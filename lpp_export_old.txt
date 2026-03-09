@@ -1,0 +1,1333 @@
+# -*- coding: utf-8 -*-
+"""
+Vita Adventure Creator — LPP Exporter
+Generates a multi-file Lua project using the LPP-Vita API.
+
+Output structure:
+    index.lua               — orchestrator: require libs, require scenes, main loop
+    lib/controls.lua        — controls shim (pressed/held/released helpers)
+    lib/camera.lua          — camera system
+    lib/tween.lua           — tween system
+    lib/shake.lua           — screen shake system
+    lib/save.lua            — save/load/delete (only if save enabled)
+    scenes/scene_NNN.lua    — one file per scene
+    assets/images/          — image assets (copied by VPK builder)
+    assets/audio/           — audio assets (copied by VPK builder)
+    assets/fonts/           — font assets (copied by VPK builder)
+
+Returns: dict[str, str]  { "relative/path/file.lua": "file contents" }
+The VPK builder writes each entry to the correct path inside the ZIP.
+"""
+
+from __future__ import annotations
+from pathlib import Path
+from models import Project, Scene, Behavior, BehaviorAction
+
+
+# ─────────────────────────────────────────────────────────────
+#  HELPERS  (identical to lua_exporter)
+# ─────────────────────────────────────────────────────────────
+
+def _lua_str(s: str) -> str:
+    return '"' + s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n') + '"'
+
+def _lua_bool(b: bool) -> str:
+    return "true" if b else "false"
+
+def _safe_name(s: str) -> str:
+    out = ""
+    for c in s:
+        out += c if c.isalnum() or c == "_" else "_"
+    if out and out[0].isdigit():
+        out = "_" + out
+    return out or "obj"
+
+def _asset_filename(path: str) -> str:
+    return Path(path).name if path else ""
+
+def _button_constant(button: str) -> str:
+    return {
+        "cross":      "SCE_CTRL_CROSS",
+        "circle":     "SCE_CTRL_CIRCLE",
+        "square":     "SCE_CTRL_SQUARE",
+        "triangle":   "SCE_CTRL_TRIANGLE",
+        "dpad_up":    "SCE_CTRL_UP",
+        "dpad_down":  "SCE_CTRL_DOWN",
+        "dpad_left":  "SCE_CTRL_LEFT",
+        "dpad_right": "SCE_CTRL_RIGHT",
+        "l":          "SCE_CTRL_LTRIGGER",
+        "r":          "SCE_CTRL_RTRIGGER",
+        "start":      "SCE_CTRL_START",
+        "select":     "SCE_CTRL_SELECT",
+    }.get(button, "SCE_CTRL_CROSS")
+
+def _event_check(event: str) -> str:
+    # These map to our shim functions in lib/controls.lua
+    return {
+        "pressed":  "controls_pressed",
+        "released": "controls_released",
+        "held":     "controls_held",
+    }.get(event, "controls_pressed")
+
+def _color(r: int, g: int, b: int, a: int = 255) -> str:
+    """Emit a Color.new() call."""
+    return f"Color.new({r}, {g}, {b}, {a})"
+
+def _parse_hex_color(hex_color: str, alpha: int = 255) -> str:
+    """Convert #RRGGBB hex string to Color.new() call."""
+    hx = hex_color.lstrip('#')
+    r, g, b = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+    return _color(r, g, b, alpha)
+
+
+# ─────────────────────────────────────────────────────────────
+#  LIB FILE GENERATORS
+# ─────────────────────────────────────────────────────────────
+
+def _make_controls_lib() -> str:
+    """
+    LPP controls shim.
+    Controls.read() returns raw button bitmask as integer.
+    Controls.check(pad, btn) returns boolean.
+    We track old/new state to synthesize pressed and released.
+    """
+    lines = [
+        "-- lib/controls.lua",
+        "-- LPP controls shim — provides pressed/held/released helpers",
+        "",
+        "local _pad_old = 0",
+        "local _pad_cur = 0",
+        "",
+        "function controls_update()",
+        "    _pad_old = _pad_cur",
+        "    _pad_cur = Controls.read()",
+        "end",
+        "",
+        "function controls_held(btn)",
+        "    return Controls.check(_pad_cur, btn)",
+        "end",
+        "",
+        "function controls_pressed(btn)",
+        "    return Controls.check(_pad_cur, btn) and not Controls.check(_pad_old, btn)",
+        "end",
+        "",
+        "function controls_released(btn)",
+        "    return not Controls.check(_pad_cur, btn) and Controls.check(_pad_old, btn)",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+def _make_tween_lib() -> str:
+    lines = [
+        "-- lib/tween.lua",
+        "",
+        "tweens = {}",
+        "",
+        "local function ease_linear(t) return t end",
+        "local function ease_in(t) return t * t end",
+        "local function ease_out(t) return 1 - (1 - t) * (1 - t) end",
+        "local function ease_in_out(t)",
+        "    if t < 0.5 then return 2 * t * t",
+        "    else return 1 - 2 * (1 - t) * (1 - t) end",
+        "end",
+        "",
+        "local easing_funcs = {",
+        "    linear     = ease_linear,",
+        "    ease_in    = ease_in,",
+        "    ease_out   = ease_out,",
+        "    ease_in_out = ease_in_out,",
+        "}",
+        "",
+        "function tween_add(id, target_table, key, target_value, duration_frames, easing)",
+        "    tweens[id] = {",
+        "        target      = target_table,",
+        "        key         = key,",
+        "        start_value = target_table[key],",
+        "        end_value   = target_value,",
+        "        duration    = duration_frames,",
+        "        elapsed     = 0,",
+        "        easing      = easing_funcs[easing] or ease_linear,",
+        "    }",
+        "end",
+        "",
+        "function tween_update()",
+        "    for id, tw in pairs(tweens) do",
+        "        tw.elapsed = tw.elapsed + 1",
+        "        local t = tw.elapsed / tw.duration",
+        "        if t >= 1 then",
+        "            tw.target[tw.key] = tw.end_value",
+        "            tweens[id] = nil",
+        "        else",
+        "            local eased = tw.easing(t)",
+        "            tw.target[tw.key] = tw.start_value + (tw.end_value - tw.start_value) * eased",
+        "        end",
+        "    end",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+def _make_camera_lib() -> str:
+    lines = [
+        "-- lib/camera.lua",
+        "",
+        "camera = {",
+        "    x              = 480,",
+        "    y              = 272,",
+        "    bounds_enabled = false,",
+        "    bounds_width   = 960,",
+        "    bounds_height  = 544,",
+        "    follow_target  = nil,",
+        "    follow_offset_x = 0,",
+        "    follow_offset_y = 0,",
+        "    follow_lag     = 0,",
+        "}",
+        "",
+        "function camera_reset_state()",
+        "    camera.x              = 480",
+        "    camera.y              = 272",
+        "    camera.bounds_enabled = false",
+        "    camera.bounds_width   = 960",
+        "    camera.bounds_height  = 544",
+        "    camera.follow_target  = nil",
+        "    camera.follow_offset_x = 0",
+        "    camera.follow_offset_y = 0",
+        "    camera.follow_lag     = 0",
+        "end",
+        "",
+        "function world_to_screen(wx, wy)",
+        "    local sx = wx - camera.x + 480",
+        "    local sy = wy - camera.y + 272",
+        "    return sx, sy",
+        "end",
+        "",
+        "function camera_bg_offset(parallax)",
+        "    local ox = -(camera.x - 480) * parallax",
+        "    local oy = -(camera.y - 272) * parallax",
+        "    return ox, oy",
+        "end",
+        "",
+        "function camera_apply_bounds()",
+        "    if not camera.bounds_enabled then return end",
+        "    local half_w = 480",
+        "    local half_h = 272",
+        "    if camera.x < half_w then camera.x = half_w end",
+        "    if camera.y < half_h then camera.y = half_h end",
+        "    if camera.x > camera.bounds_width  - half_w then camera.x = camera.bounds_width  - half_w end",
+        "    if camera.y > camera.bounds_height - half_h then camera.y = camera.bounds_height - half_h end",
+        "end",
+        "",
+        "function camera_update_follow()",
+        "    if not camera.follow_target then return end",
+        "    local tx = _G[camera.follow_target .. '_x']",
+        "    local ty = _G[camera.follow_target .. '_y']",
+        "    if tx == nil or ty == nil then return end",
+        "    tx = tx + camera.follow_offset_x",
+        "    ty = ty + camera.follow_offset_y",
+        "    if camera.follow_lag <= 0 then",
+        "        camera.x = tx",
+        "        camera.y = ty",
+        "    else",
+        "        camera.x = camera.x + (tx - camera.x) * (1 - camera.follow_lag)",
+        "        camera.y = camera.y + (ty - camera.y) * (1 - camera.follow_lag)",
+        "    end",
+        "    camera_apply_bounds()",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+def _make_shake_lib() -> str:
+    lines = [
+        "-- lib/shake.lua",
+        "",
+        "shake_intensity = 0",
+        "shake_timer     = 0",
+        "shake_offset_x  = 0",
+        "shake_offset_y  = 0",
+        "",
+        "function shake_update()",
+        "    if shake_timer > 0 then",
+        "        shake_offset_x = math.random(-shake_intensity, shake_intensity)",
+        "        shake_offset_y = math.random(-shake_intensity, shake_intensity)",
+        "        shake_timer    = shake_timer - 1",
+        "    else",
+        "        shake_offset_x = 0",
+        "        shake_offset_y = 0",
+        "    end",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+def _make_save_lib(title_id: str) -> str:
+    save_path = f"ux0:data/{title_id}_save.dat"
+    lines = [
+        "-- lib/save.lua",
+        "",
+        f'local SAVE_PATH = "{save_path}"',
+        "",
+        "function save_progress(scene_num)",
+        '    local f = io.open(SAVE_PATH, "w")',
+        "    if f then f:write(tostring(scene_num)); f:close() end",
+        "end",
+        "",
+        "function load_progress()",
+        '    local f = io.open(SAVE_PATH, "r")',
+        '    if f then local val = tonumber(f:read("*n")); f:close(); return val end',
+        "    return nil",
+        "end",
+        "",
+        "function delete_save()",
+        "    os.remove(SAVE_PATH)",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
+#  INLINE ACTION → LUA  (LPP version)
+#  Controls use shim functions. Everything else uses LPP APIs.
+# ─────────────────────────────────────────────────────────────
+
+def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None) -> list[str]:
+    t = action.action_type
+    lines = []
+    spd = getattr(action, "movement_speed", 4)
+
+    # ── Movement ─────────────────────────────────────────────
+    if t == "four_way_movement":
+        lines.append(f"if controls_held(SCE_CTRL_UP)    then {obj_var}_y = {obj_var}_y - {spd} end")
+        lines.append(f"if controls_held(SCE_CTRL_DOWN)  then {obj_var}_y = {obj_var}_y + {spd} end")
+        lines.append(f"if controls_held(SCE_CTRL_LEFT)  then {obj_var}_x = {obj_var}_x - {spd} end")
+        lines.append(f"if controls_held(SCE_CTRL_RIGHT) then {obj_var}_x = {obj_var}_x + {spd} end")
+
+    # ── Navigation ───────────────────────────────────────────
+    elif t == "go_to_next":
+        lines.append("current_scene = current_scene + 1")
+        lines.append("advance = true")
+    elif t == "go_to_prev":
+        lines.append("current_scene = current_scene - 1")
+        lines.append("advance = true")
+    elif t == "go_to_scene":
+        lines.append(f"current_scene = {action.target_scene}")
+        lines.append("advance = true")
+    elif t == "quit_game":
+        lines.append("if current_music then Sound.close(current_music) end")
+        lines.append("os.exit()")
+
+    # ── Audio ────────────────────────────────────────────────
+    elif t == "stop_music":
+        lines.append("if current_music then Sound.close(current_music) end")
+        lines.append("current_music = nil")
+
+    # ── Object transform ─────────────────────────────────────
+    elif t == "move_to" and obj_var:
+        lines.append(f"{obj_var}_x = {action.target_x}")
+        lines.append(f"{obj_var}_y = {action.target_y}")
+    elif t == "move_by" and obj_var:
+        lines.append(f"{obj_var}_x = {obj_var}_x + {action.offset_x}")
+        lines.append(f"{obj_var}_y = {obj_var}_y + {action.offset_y}")
+    elif t == "show_object" and obj_var:
+        lines.append(f"{obj_var}_visible = true")
+    elif t == "hide_object" and obj_var:
+        lines.append(f"{obj_var}_visible = false")
+
+    # ── Variables ────────────────────────────────────────────
+    elif t == "set_variable":
+        vn  = _safe_name(action.var_name) if action.var_name else "unknown"
+        val = _lua_str(action.var_value) if isinstance(action.var_value, str) else str(action.var_value)
+        lines.append(f"{vn} = {val}")
+    elif t == "increment_var":
+        vn    = _safe_name(action.var_name) if action.var_name else "unknown"
+        delta = getattr(action, "var_delta", 1)
+        lines.append(f"{vn} = {vn} + {delta}")
+
+    # ── Input conditionals ───────────────────────────────────
+    elif t == "if_button_pressed":
+        btn = _button_constant(action.button)
+        lines.append(f"if controls_pressed({btn}) then")
+        for sa in getattr(action, "sub_actions", []):
+            for sl in _action_to_lua_inline(sa, obj_var):
+                lines.append(f"    {sl}")
+        lines.append("end")
+    elif t == "if_button_held":
+        btn = _button_constant(action.button)
+        lines.append(f"if controls_held({btn}) then")
+        for sa in getattr(action, "sub_actions", []):
+            for sl in _action_to_lua_inline(sa, obj_var):
+                lines.append(f"    {sl}")
+        lines.append("end")
+    elif t == "if_button_released":
+        btn = _button_constant(action.button)
+        lines.append(f"if controls_released({btn}) then")
+        for sa in getattr(action, "sub_actions", []):
+            for sl in _action_to_lua_inline(sa, obj_var):
+                lines.append(f"    {sl}")
+        lines.append("end")
+
+    # ── Camera ───────────────────────────────────────────────
+    elif t == "camera_move_to":
+        if action.camera_duration > 0:
+            frames = int(action.camera_duration * 60)
+            lines.append(f'tween_add("cam_x", camera, "x", {action.camera_target_x}, {frames}, "{action.camera_easing}")')
+            lines.append(f'tween_add("cam_y", camera, "y", {action.camera_target_y}, {frames}, "{action.camera_easing}")')
+        else:
+            lines.append(f"camera.x = {action.camera_target_x}")
+            lines.append(f"camera.y = {action.camera_target_y}")
+        lines.append("camera_apply_bounds()")
+
+    elif t == "camera_offset":
+        if action.camera_duration > 0:
+            frames = int(action.camera_duration * 60)
+            lines.append(f'tween_add("cam_x", camera, "x", camera.x + {action.camera_offset_x}, {frames}, "{action.camera_easing}")')
+            lines.append(f'tween_add("cam_y", camera, "y", camera.y + {action.camera_offset_y}, {frames}, "{action.camera_easing}")')
+        else:
+            lines.append(f"camera.x = camera.x + {action.camera_offset_x}")
+            lines.append(f"camera.y = camera.y + {action.camera_offset_y}")
+        lines.append("camera_apply_bounds()")
+
+    elif t == "camera_follow":
+        target_var = _safe_name(action.camera_follow_target_def_id) if action.camera_follow_target_def_id else ""
+        if target_var:
+            lines.append(f'camera.follow_target = "{target_var}"')
+            lines.append(f"camera.follow_offset_x = {action.camera_follow_offset_x}")
+            lines.append(f"camera.follow_offset_y = {action.camera_follow_offset_y}")
+        else:
+            lines.append("-- camera_follow: no target specified")
+
+    elif t == "camera_stop_follow":
+        lines.append("camera.follow_target = nil")
+
+    elif t == "camera_reset":
+        if action.camera_duration > 0:
+            frames = int(action.camera_duration * 60)
+            lines.append(f'tween_add("cam_x", camera, "x", 480, {frames}, "{action.camera_easing}")')
+            lines.append(f'tween_add("cam_y", camera, "y", 272, {frames}, "{action.camera_easing}")')
+        else:
+            lines.append("camera.x = 480")
+            lines.append("camera.y = 272")
+        lines.append("camera.follow_target = nil")
+
+    elif t == "camera_shake":
+        intensity = getattr(action, "shake_intensity", 5.0)
+        duration  = getattr(action, "shake_duration",  0.5)
+        frames    = int(duration * 60)
+        lines.append(f"shake_intensity = {intensity}")
+        lines.append(f"shake_timer = {frames}")
+
+    # ── Animation ────────────────────────────────────────────
+    elif t == "ani_play":
+        target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
+        if target:
+            lines.append(f"{target}_ani_playing = true")
+            lines.append(f"{target}_ani_done = false")
+
+    elif t == "ani_pause":
+        target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
+        if target:
+            lines.append(f"{target}_ani_playing = false")
+
+    elif t == "ani_stop":
+        target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
+        if target:
+            lines.append(f"{target}_ani_playing = false")
+            lines.append(f"{target}_ani_frame = 0")
+            lines.append(f"{target}_ani_done = false")
+
+    elif t == "ani_set_frame":
+        target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
+        frame  = getattr(action, "ani_target_frame", 0)
+        if target:
+            lines.append(f"{target}_ani_frame = {frame}")
+
+    elif t == "ani_set_speed":
+        target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
+        fps    = getattr(action, "ani_fps", 12)
+        if target:
+            lines.append(f"{target}_ani_fps = {fps}")
+
+    elif t not in ("none", ""):
+        lines.append(f"-- [{t}] not yet implemented in LPP exporter")
+
+    return lines
+
+
+# ─────────────────────────────────────────────────────────────
+#  ANIMATION DRAW HELPER  (LPP version)
+#  LifeLua used img:blit(x, y, sx, sy, sw, sh)
+#  LPP uses Graphics.drawPartialImage(x, y, img, sx, sy, w, h)
+# ─────────────────────────────────────────────────────────────
+
+def _make_ani_lib() -> str:
+    """
+    Animation system as a lib snippet — embedded into index.lua globals
+    since it relies on the ani_data / ani_sheets tables.
+    Kept separate so we can emit it cleanly.
+    """
+    lines = [
+        "-- Animation helpers",
+        "ani_data   = {}",
+        "ani_sheets = {}",
+        "trans_data   = {}",
+        "trans_sheets = {}",
+        "",
+        "local function ani_get_frame_rect(ani_id, frame)",
+        "    local data = ani_data[ani_id]",
+        "    if not data then return 0, 0, 64, 64 end",
+        "    local cols = math.floor(data.sheet_width / data.frame_width)",
+        "    if cols < 1 then cols = 1 end",
+        "    local col = frame % cols",
+        "    local row = math.floor(frame / cols)",
+        "    return col * data.frame_width, row * data.frame_height,",
+        "           data.frame_width, data.frame_height",
+        "end",
+        "",
+        "function ani_draw(ani_id, frame, x, y)",
+        "    local sheet = ani_sheets[ani_id]",
+        "    if not sheet then return end",
+        "    local sx, sy, sw, sh = ani_get_frame_rect(ani_id, frame)",
+        "    -- Graphics.drawPartialImage(x, y, image, source_x, source_y, width, height)",
+        "    Graphics.drawPartialImage(x, y, sheet, sx, sy, sw, sh)",
+        "end",
+        "",
+        "local function trans_draw_frame(trans_id, frame)",
+        "    local sheet = trans_sheets[trans_id]",
+        "    local data  = trans_data[trans_id]",
+        "    if not sheet or not data then return end",
+        "    local cols = math.floor(data.sheet_width / 960)",
+        "    if cols < 1 then cols = 1 end",
+        "    local col = frame % cols",
+        "    local row = math.floor(frame / cols)",
+        "    Graphics.drawPartialImage(0, 0, sheet, col * 960, row * 544, 960, 544)",
+        "end",
+        "",
+        "function play_transition(trans_id, fps_override)",
+        "    local data = trans_data[trans_id]",
+        "    if not data then return end",
+        "    local fps         = fps_override or data.fps or 12",
+        "    local frame_delay = math.floor(60 / fps)",
+        "    if frame_delay < 1 then frame_delay = 1 end",
+        "    local frame = 0",
+        "    local timer = 0",
+        "    while frame < data.frame_count do",
+        "        Graphics.initBlend()",
+        "        Screen.clear()",
+        "        trans_draw_frame(trans_id, frame)",
+        "        Graphics.termBlend()",
+        "        Screen.flip()",
+        "        timer = timer + 1",
+        "        if timer >= frame_delay then",
+        "            timer = 0",
+        "            frame = frame + 1",
+        "        end",
+        "    end",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
+#  SCENE → LUA  (one scene function, goes into scenes/scene_NNN.lua)
+# ─────────────────────────────────────────────────────────────
+
+def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
+    out = []
+    out.append(f"-- scenes/scene_{scene_num:03d}.lua")
+    out.append(f"-- Scene {scene_num}: {scene.name or 'Unnamed'}")
+    out.append("")
+    out.append(f"function scene_{scene_num}()")
+
+    # Camera init
+    camera_obj    = None
+    camera_placed = None
+    for po in scene.placed_objects:
+        od = project.get_object_def(po.object_def_id)
+        if od and od.behavior_type == "Camera":
+            camera_obj    = od
+            camera_placed = po
+            break
+
+    out.append("    camera_reset_state()")
+    if camera_obj:
+        if camera_placed:
+            out.append(f"    camera.x = {camera_placed.x}")
+            out.append(f"    camera.y = {camera_placed.y}")
+        if camera_obj.camera_bounds_enabled:
+            out.append(f"    camera.bounds_enabled = true")
+            out.append(f"    camera.bounds_width   = {camera_obj.camera_bounds_width}")
+            out.append(f"    camera.bounds_height  = {camera_obj.camera_bounds_height}")
+        else:
+            out.append(f"    camera.bounds_enabled = false")
+        out.append(f"    camera.follow_lag = {camera_obj.camera_follow_lag}")
+
+    # Object locals
+    for po in scene.placed_objects:
+        od = project.get_object_def(po.object_def_id)
+        if od and od.behavior_type != "Camera":
+            vname = _safe_name(od.name)
+            out.append(f"    local {vname}_x       = {po.x}")
+            out.append(f"    local {vname}_y       = {po.y}")
+            out.append(f"    local {vname}_visible = {_lua_bool(po.visible)}")
+
+            if od.behavior_type == "Animation" and getattr(od, "ani_file_id", ""):
+                ani_play_on_spawn = getattr(od, "ani_play_on_spawn", True)
+                ani_start_paused  = getattr(od, "ani_start_paused",  False)
+                ani_pause_frame   = getattr(od, "ani_pause_frame",   0)
+                ani_fps_override  = getattr(od, "ani_fps_override",  0)
+                ani_loop          = getattr(od, "ani_loop",          True)
+                ani_playing       = "true" if ani_play_on_spawn and not ani_start_paused else "false"
+                start_frame       = ani_pause_frame if ani_start_paused else 0
+                out.append(f"    local {vname}_ani_id      = {_lua_str(od.ani_file_id)}")
+                out.append(f"    local {vname}_ani_frame   = {start_frame}")
+                out.append(f"    local {vname}_ani_playing = {ani_playing}")
+                out.append(f"    local {vname}_ani_timer   = 0")
+                out.append(f"    local {vname}_ani_loop    = {_lua_bool(ani_loop)}")
+                out.append(f"    local {vname}_ani_fps     = {ani_fps_override}")
+                out.append(f"    local {vname}_ani_done    = false")
+
+    # Hold-timer locals
+    for po in scene.placed_objects:
+        od = project.get_object_def(po.object_def_id)
+        if od:
+            all_behaviors = list(od.behaviors) + list(po.instance_behaviors)
+            for beh in all_behaviors:
+                if beh.trigger == "on_input" and getattr(beh, "input_action_name", ""):
+                    ia = next((a for a in project.game_data.input_actions
+                               if a.name == beh.input_action_name), None)
+                    if ia and ia.event == "hold_for":
+                        timer_var = f"_hold_{_safe_name(ia.name)}_timer"
+                        out.append(f"    local {timer_var} = 0")
+
+    # Background
+    scene_bg          = None
+    scene_bg_parallax = 1.0
+    for comp in scene.components:
+        if comp.component_type == "Background":
+            img = project.get_image(comp.config.get("image_id", ""))
+            if img and img.path:
+                scene_bg          = _asset_filename(img.path)
+                scene_bg_parallax = comp.config.get("parallax", 1.0)
+                break
+
+    # Music
+    for comp in scene.components:
+        if comp.component_type == "Music":
+            action = comp.config.get("action", "keep")
+            if action == "change":
+                aud = project.get_audio(comp.config.get("audio_id", ""))
+                if aud and aud.path:
+                    fname = _asset_filename(aud.path)
+                    out.append(f"    if current_music then Sound.close(current_music) end")
+                    out.append(f"    current_music = audio_tracks[{_lua_str(fname)}]")
+                    out.append(f"    if current_music then Sound.play(current_music, true) end")
+            elif action == "stop":
+                out.append(f"    if current_music then Sound.close(current_music) end")
+                out.append(f"    current_music = nil")
+
+    # ── START SCREEN ─────────────────────────────────────────
+    if scene.role == "start":
+        out.append("    local chosen = false")
+        out.append("    while not chosen do")
+        out.append("        Graphics.initBlend()")
+        out.append("        Screen.clear()")
+        if scene_bg:
+            out.append(f'        if images[{_lua_str(scene_bg)}] then Graphics.drawImage(0, 0, images[{_lua_str(scene_bg)}]) end')
+        out.append('        if deff then')
+        out.append('            Font.print(deff, 62, 452, "Cross: New Game    Triangle: Continue", Color.new(0,0,0))')
+        out.append('            Font.print(deff, 60, 450, "Cross: New Game    Triangle: Continue", Color.new(255,255,255))')
+        out.append('        end')
+        out.append("        Graphics.termBlend()")
+        out.append("        Screen.flip()")
+        out.append("        controls_update()")
+        out.append("        if controls_released(SCE_CTRL_START) then os.exit() end")
+        out.append("        if controls_released(SCE_CTRL_CROSS) then")
+        if project.game_data.save_enabled:
+            out.append("            delete_save()")
+        out.append(f"            current_scene = {scene_num + 1}")
+        out.append("            chosen = true")
+        out.append("        elseif controls_released(SCE_CTRL_TRIANGLE) then")
+        if project.game_data.save_enabled:
+            out.append("            local saved = load_progress()")
+            out.append(f"            if saved and saved >= 1 and saved <= {len(project.scenes)} then")
+            out.append("                current_scene = saved")
+            out.append("            else")
+            out.append(f"                current_scene = {scene_num + 1}")
+            out.append("            end")
+        else:
+            out.append(f"            current_scene = {scene_num + 1}")
+        out.append("            chosen = true")
+        out.append("        end")
+        out.append("    end")
+
+    # ── END SCREEN ───────────────────────────────────────────
+    elif scene.role == "end":
+        if project.game_data.save_enabled:
+            out.append("    delete_save()")
+        out.append("    local waiting = true")
+        out.append("    while waiting do")
+        out.append("        Graphics.initBlend()")
+        out.append("        Screen.clear()")
+        if scene_bg:
+            out.append(f'        if images[{_lua_str(scene_bg)}] then Graphics.drawImage(0, 0, images[{_lua_str(scene_bg)}]) end')
+        out.append('        if deff then')
+        out.append('            Font.print(deff, 62, 262, "--- THE END ---", Color.new(0,0,0))')
+        out.append('            Font.print(deff, 60, 260, "--- THE END ---", Color.new(255,255,255))')
+        out.append('            Font.print(deff, 62, 302, "Press START to exit", Color.new(0,0,0))')
+        out.append('            Font.print(deff, 60, 300, "Press START to exit", Color.new(255,255,255))')
+        out.append('        end')
+        out.append("        Graphics.termBlend()")
+        out.append("        Screen.flip()")
+        out.append("        controls_update()")
+        out.append("        if controls_released(SCE_CTRL_START) then")
+        out.append("            if current_music then Sound.close(current_music) end")
+        out.append("            waiting = false")
+        out.append("            running = false")
+        out.append("        end")
+        out.append("    end")
+
+    # ── NORMAL SCENE ─────────────────────────────────────────
+    else:
+        vn_comp = next((c for c in scene.components if c.component_type == "VNDialogBox"), None)
+
+        out.append("    local advance = false")
+        if vn_comp and vn_comp.config.get("auto_advance", False):
+            out.append("    local auto_advance_timer = 0")
+        out.append("    while not advance do")
+
+        # Per-frame systems
+        out.append("        tween_update()")
+        out.append("        camera_update_follow()")
+        out.append("        shake_update()")
+
+        # Animation state update
+        for po in scene.placed_objects:
+            od = project.get_object_def(po.object_def_id)
+            if od and od.behavior_type == "Animation" and getattr(od, "ani_file_id", ""):
+                vname = _safe_name(od.name)
+                out.append(f"        -- Update animation: {vname}")
+                out.append(f"        if {vname}_ani_playing and not {vname}_ani_done then")
+                out.append(f"            local _ani_d = ani_data[{vname}_ani_id]")
+                out.append(f"            if _ani_d then")
+                out.append(f"                local _fps   = {vname}_ani_fps > 0 and {vname}_ani_fps or _ani_d.fps")
+                out.append(f"                local _delay = math.floor(60 / _fps)")
+                out.append(f"                if _delay < 1 then _delay = 1 end")
+                out.append(f"                {vname}_ani_timer = {vname}_ani_timer + 1")
+                out.append(f"                if {vname}_ani_timer >= _delay then")
+                out.append(f"                    {vname}_ani_timer = 0")
+                out.append(f"                    {vname}_ani_frame = {vname}_ani_frame + 1")
+                out.append(f"                    if {vname}_ani_frame >= _ani_d.frame_count then")
+                out.append(f"                        if {vname}_ani_loop then")
+                out.append(f"                            {vname}_ani_frame = 0")
+                out.append(f"                        else")
+                out.append(f"                            {vname}_ani_frame = _ani_d.frame_count - 1")
+                out.append(f"                            {vname}_ani_done    = true")
+                out.append(f"                            {vname}_ani_playing = false")
+                out.append(f"                        end")
+                out.append(f"                    end")
+                out.append(f"                end")
+                out.append(f"            end")
+                out.append(f"        end")
+
+        # ── DRAW PHASE ───────────────────────────────────────
+        out.append("        Graphics.initBlend()")
+        out.append("        Screen.clear()")
+
+        # Background
+        if scene_bg:
+            out.append(f"        -- Background (parallax={scene_bg_parallax})")
+            out.append(f"        local _bg_ox, _bg_oy = camera_bg_offset({scene_bg_parallax})")
+            out.append(f'        if images[{_lua_str(scene_bg)}] then')
+            out.append(f'            Graphics.drawImage(_bg_ox + shake_offset_x, _bg_oy + shake_offset_y, images[{_lua_str(scene_bg)}])')
+            out.append(f'        end')
+
+        # Per-frame object behaviors
+        for po in scene.placed_objects:
+            od = project.get_object_def(po.object_def_id)
+            if od and od.behavior_type != "Camera":
+                vname = _safe_name(od.name)
+                all_behaviors = list(od.behaviors) + list(po.instance_behaviors)
+                for beh in all_behaviors:
+                    if beh.trigger == "on_frame":
+                        for action in beh.actions:
+                            for line in _action_to_lua_inline(action, vname):
+                                out.append(f"        {line}")
+
+        # Draw objects
+        for po in scene.placed_objects:
+            od = project.get_object_def(po.object_def_id)
+            if not od or od.behavior_type == "Camera":
+                continue
+
+            vname = _safe_name(od.name)
+
+            if od.behavior_type == "GUI_Panel":
+                hx      = od.gui_bg_color.lstrip('#')
+                pr, pg, pb = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
+                # fillRect(x1, x2, y1, y2, color)  — LPP uses x1,x2,y1,y2
+                out.append(f'        if {vname}_visible then')
+                out.append(f'            local _pc = Color.new({pr}, {pg}, {pb}, {od.gui_bg_opacity})')
+                out.append(f'            Graphics.fillRect({vname}_x + shake_offset_x, {vname}_x + {od.gui_width} + shake_offset_x, {vname}_y + shake_offset_y, {vname}_y + {od.gui_height} + shake_offset_y, _pc)')
+                out.append(f'        end')
+
+            elif od.behavior_type == "GUI_Label":
+                hx      = od.gui_text_color.lstrip('#')
+                lr, lg, lb = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
+                font_var = "deff"
+                if od.gui_font_id:
+                    fnt = project.get_font(od.gui_font_id)
+                    if fnt and fnt.path:
+                        font_var = f'fonts[{_lua_str(_asset_filename(fnt.path))}]'
+                text = _lua_str(od.gui_text)
+                out.append(f'        if {vname}_visible and {font_var} then')
+                out.append(f'            local _lc = Color.new({lr}, {lg}, {lb})')
+                out.append(f'            Font.print({font_var}, {vname}_x + shake_offset_x, {vname}_y + shake_offset_y, {text}, _lc)')
+                out.append(f'        end')
+
+            elif od.behavior_type == "GUI_Button":
+                hx_bg = od.gui_bg_color.lstrip('#')
+                br, bg_g, bb = int(hx_bg[0:2],16), int(hx_bg[2:4],16), int(hx_bg[4:6],16)
+                hx_tx = od.gui_text_color.lstrip('#')
+                tr, tg, tb = int(hx_tx[0:2],16), int(hx_tx[2:4],16), int(hx_tx[4:6],16)
+                font_var = "deff"
+                if od.gui_font_id:
+                    fnt = project.get_font(od.gui_font_id)
+                    if fnt and fnt.path:
+                        font_var = f'fonts[{_lua_str(_asset_filename(fnt.path))}]'
+                out.append(f'        if {vname}_visible then')
+                bg_img = None
+                if getattr(od, "gui_bg_image_id", ""):
+                    bi = project.get_image(od.gui_bg_image_id)
+                    if bi and bi.path:
+                        bg_img = _asset_filename(bi.path)
+                if bg_img:
+                    out.append(f'            if images[{_lua_str(bg_img)}] then Graphics.drawImage({vname}_x + shake_offset_x, {vname}_y + shake_offset_y, images[{_lua_str(bg_img)}]) end')
+                else:
+                    out.append(f'            local _bc = Color.new({br}, {bg_g}, {bb}, {od.gui_bg_opacity})')
+                    out.append(f'            Graphics.fillRect({vname}_x + shake_offset_x, {vname}_x + {od.gui_width} + shake_offset_x, {vname}_y + shake_offset_y, {vname}_y + {od.gui_height} + shake_offset_y, _bc)')
+                if od.gui_text:
+                    text = _lua_str(od.gui_text)
+                    out.append(f'            if {font_var} then')
+                    out.append(f'                local _tc = Color.new({tr}, {tg}, {tb})')
+                    out.append(f'                Font.print({font_var}, {vname}_x + 8 + shake_offset_x, {vname}_y + 8 + shake_offset_y, {text}, _tc)')
+                    out.append(f'            end')
+                out.append(f'        end')
+
+            elif od.behavior_type == "Animation":
+                if getattr(od, "ani_file_id", ""):
+                    out.append(f'        if {vname}_visible then')
+                    out.append(f'            local _sx, _sy = world_to_screen({vname}_x, {vname}_y)')
+                    out.append(f'            ani_draw({vname}_ani_id, {vname}_ani_frame, _sx + shake_offset_x, _sy + shake_offset_y)')
+                    out.append(f'        end')
+
+            else:
+                # Default sprite
+                if od.frames:
+                    img = project.get_image(od.frames[0].image_id) if od.frames[0].image_id else None
+                    if img and img.path:
+                        fname = _asset_filename(img.path)
+                        out.append(f'        if {vname}_visible and images[{_lua_str(fname)}] then')
+                        out.append(f'            local _sx, _sy = world_to_screen({vname}_x, {vname}_y)')
+                        out.append(f'            Graphics.drawImage(_sx + shake_offset_x, _sy + shake_offset_y, images[{_lua_str(fname)}])')
+                        out.append(f'        end')
+
+        # VN dialog box
+        if vn_comp:
+            cfg        = vn_comp.config
+            speaker    = cfg.get("speaker_name", "")
+            lines_raw  = cfg.get("lines", [])
+            non_empty  = [l for l in lines_raw if l.strip()]
+
+            fill    = cfg.get("fill_color", "#000000")
+            opacity = cfg.get("opacity", 150)
+            r, g, b = int(fill[1:3],16), int(fill[3:5],16), int(fill[5:7],16)
+
+            tex_id = cfg.get("texture_image_id")
+            if tex_id:
+                tex_img = project.get_image(tex_id)
+                if tex_img and tex_img.path:
+                    fname = _asset_filename(tex_img.path)
+                    out.append(f'        if images[{_lua_str(fname)}] then')
+                    out.append(f'            Graphics.drawPartialImage(40 + shake_offset_x, 335 + shake_offset_y, images[{_lua_str(fname)}], 0, 0, 880, 200)')
+                    out.append(f'        else')
+                    out.append(f'            local box_col = Color.new({r}, {g}, {b}, {opacity})')
+                    out.append(f'            Graphics.fillRect(40 + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, box_col)')
+                    out.append(f'        end')
+            else:
+                out.append(f'        local box_col = Color.new({r}, {g}, {b}, {opacity})')
+                out.append(f'        Graphics.fillRect(40 + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, box_col)')
+
+            if cfg.get("border", False):
+                bc      = cfg.get("border_color", "#ffffff")
+                br2, bg2, bb2 = int(bc[1:3],16), int(bc[3:5],16), int(bc[5:7],16)
+                thick   = cfg.get("border_thickness", 2)
+                out.append(f'        local border_col = Color.new({br2}, {bg2}, {bb2})')
+                # Top border
+                out.append(f'        Graphics.fillRect(40 + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, {335+thick} + shake_offset_y, border_col)')
+                # Bottom border
+                out.append(f'        Graphics.fillRect(40 + shake_offset_x, 920 + shake_offset_x, {535-thick} + shake_offset_y, 535 + shake_offset_y, border_col)')
+                # Left border
+                out.append(f'        Graphics.fillRect(40 + shake_offset_x, {40+thick} + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, border_col)')
+                # Right border
+                out.append(f'        Graphics.fillRect({920-thick} + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, border_col)')
+
+            tc      = cfg.get("text_color", "#ffffff")
+            tr2, tg2, tb2 = int(tc[1:3],16), int(tc[3:5],16), int(tc[5:7],16)
+            shadow  = cfg.get("shadow", True)
+            out.append(f'        local txt_col = Color.new({tr2}, {tg2}, {tb2})')
+
+            font_id  = cfg.get("font_id")
+            font_var = "deff"
+            if font_id:
+                fnt = project.get_font(font_id)
+                if fnt and fnt.path:
+                    fname    = _asset_filename(fnt.path)
+                    font_var = f'fonts[{_lua_str(fname)}]'
+
+            if speaker:
+                nametag_pos = cfg.get("nametag_position", "inside box top")
+                nc          = cfg.get("nametag_color", "#333333")
+                nr, ng, nb  = int(nc[1:3],16), int(nc[3:5],16), int(nc[5:7],16)
+                name_y      = 345 if nametag_pos == "inside box top" else 320
+                tag_bg_y    = name_y - 5
+                out.append(f'        local tag_col = Color.new({nr}, {ng}, {nb}, 200)')
+                out.append(f'        Graphics.fillRect(40 + shake_offset_x, 240 + shake_offset_x, {tag_bg_y} + shake_offset_y, {tag_bg_y+26} + shake_offset_y, tag_col)')
+                if shadow:
+                    out.append(f'        if {font_var} then Font.print({font_var}, 62 + shake_offset_x, {name_y+2} + shake_offset_y, {_lua_str(speaker)}, Color.new(0,0,0)) end')
+                out.append(f'        if {font_var} then Font.print({font_var}, 60 + shake_offset_x, {name_y} + shake_offset_y, {_lua_str(speaker)}, txt_col) end')
+
+            line_y = 383
+            for ln in non_empty:
+                if shadow:
+                    out.append(f'        if {font_var} then Font.print({font_var}, 62 + shake_offset_x, {line_y+2} + shake_offset_y, {_lua_str(ln)}, Color.new(0,0,0)) end')
+                out.append(f'        if {font_var} then Font.print({font_var}, 60 + shake_offset_x, {line_y} + shake_offset_y, {_lua_str(ln)}, txt_col) end')
+                line_y += 35
+
+        out.append("        Graphics.termBlend()")
+        out.append("        Screen.flip()")
+
+        # ── INPUT PHASE ──────────────────────────────────────
+        out.append("        controls_update()")
+
+        # Global quit / save
+        out.append("        if controls_released(SCE_CTRL_START) then")
+        if project.game_data.save_enabled:
+            out.append("            save_progress(current_scene)")
+        out.append("            if current_music then Sound.close(current_music) end")
+        out.append("            os.exit()")
+        out.append("        end")
+
+        # Object input behaviors
+        for po in scene.placed_objects:
+            od = project.get_object_def(po.object_def_id)
+            if od and od.behavior_type != "Camera":
+                vname         = _safe_name(od.name)
+                all_behaviors = list(od.behaviors) + list(po.instance_behaviors)
+                for beh in all_behaviors:
+                    if beh.trigger == "on_input" and getattr(beh, "input_action_name", ""):
+                        ia = next((a for a in project.game_data.input_actions
+                                   if a.name == beh.input_action_name), None)
+                        if ia:
+                            btn = _button_constant(ia.button)
+                            if ia.event == "hold_for":
+                                timer_var = f"_hold_{_safe_name(ia.name)}_timer"
+                                frames    = int(getattr(ia, "hold_duration", 2.0) * 60)
+                                out.append(f"        if controls_held({btn}) then")
+                                out.append(f"            {timer_var} = {timer_var} + 1")
+                                out.append(f"            if {timer_var} == {frames} then")
+                                for action in beh.actions:
+                                    for line in _action_to_lua_inline(action, vname):
+                                        out.append(f"                {line}")
+                                out.append(f"            end")
+                                out.append(f"        else")
+                                out.append(f"            {timer_var} = 0")
+                                out.append(f"        end")
+                            else:
+                                fn_check = _event_check(ia.event)
+                                out.append(f"        if {fn_check}({btn}) then")
+                                for action in beh.actions:
+                                    for line in _action_to_lua_inline(action, vname):
+                                        out.append(f"            {line}")
+                                out.append(f"        end")
+
+        # VN advance
+        if vn_comp:
+            cfg     = vn_comp.config
+            if cfg.get("advance", True):
+                btn_const = {
+                    "cross":    "SCE_CTRL_CROSS",
+                    "circle":   "SCE_CTRL_CIRCLE",
+                    "square":   "SCE_CTRL_SQUARE",
+                    "triangle": "SCE_CTRL_TRIANGLE",
+                }.get(cfg.get("advance_button", "cross"), "SCE_CTRL_CROSS")
+                out.append(f"        if controls_released({btn_const}) then")
+                out.append(f"            current_scene = current_scene + 1")
+                out.append(f"            advance = true")
+                out.append(f"        end")
+            if cfg.get("auto_advance", False):
+                secs   = cfg.get("auto_advance_secs", 3.0)
+                frames = int(secs * 60)
+                out.append(f"        if auto_advance_timer >= {frames} then")
+                out.append(f"            current_scene = current_scene + 1")
+                out.append(f"            advance = true")
+                out.append(f"        end")
+                out.append(f"        auto_advance_timer = auto_advance_timer + 1")
+
+        out.append("    end")  # end while
+
+        # Transition
+        trans_comp = next((c for c in scene.components if c.component_type == "Transition"), None)
+        if trans_comp:
+            trans_id    = trans_comp.config.get("trans_file_id", "")
+            fps_override = trans_comp.config.get("trans_fps_override", 0)
+            if trans_id:
+                out.append(f"    -- Play scene transition")
+                if fps_override > 0:
+                    out.append(f"    play_transition({_lua_str(trans_id)}, {fps_override})")
+                else:
+                    out.append(f"    play_transition({_lua_str(trans_id)}, nil)")
+
+    out.append("end")
+    out.append("")
+    return "\n".join(out)
+
+
+# ─────────────────────────────────────────────────────────────
+#  3D SCENE → LUA
+# ─────────────────────────────────────────────────────────────
+
+def _scene_3d_to_lua(scene, scene_num: int, project) -> str:
+    out = []
+    out.append(f"-- scenes/scene_{scene_num:03d}.lua")
+    out.append(f"-- 3D Scene {scene_num}: {scene.name or 'Unnamed'}")
+    out.append("")
+    out.append(f"function scene_{scene_num}()")
+
+    md = scene.map_data
+    mode = getattr(scene, "movement_mode", "free")
+    move_speed = getattr(scene, "move_speed", 5)
+    turn_speed = getattr(scene, "turn_speed", 50)
+
+    # Build flat map table
+    cells_str = ", ".join(str(c) for c in md.cells)
+    out.append(f"    local map_cells = {{ {cells_str} }}")
+
+    # Resolve texture indices into image handles
+    out.append(f"    for i = 1, #map_cells do")
+    out.append(f"        if map_cells[i] >= 2 then")
+    out.append(f"            local tex_key = map_tex_keys[map_cells[i] - 1]")
+    out.append(f"            if tex_key and images[tex_key] then")
+    out.append(f"                map_cells[i] = images[tex_key]")
+    out.append(f"            else")
+    out.append(f"                map_cells[i] = 1")
+    out.append(f"            end")
+    out.append(f"        end")
+    out.append(f"    end")
+
+    # Colors
+    fr, fg, fb = int(md.floor_color[1:3],16), int(md.floor_color[3:5],16), int(md.floor_color[5:7],16)
+    sr, sg, sb = int(md.sky_color[1:3],16),   int(md.sky_color[3:5],16),   int(md.sky_color[5:7],16)
+    wr, wg, wb = int(md.wall_color[1:3],16),  int(md.wall_color[3:5],16),  int(md.wall_color[5:7],16)
+
+    out.append(f"    RayCast3D.setResolution(960, 544)")
+    out.append(f"    RayCast3D.setViewsize(60)")
+    out.append(f"    RayCast3D.loadMap(map_cells, {md.width}, {md.height}, {md.tile_size}, {md.wall_height})")
+    out.append(f"    RayCast3D.setWallColor(Color.new({wr}, {wg}, {wb}))")
+    out.append(f"    RayCast3D.useShading({_lua_bool(md.shading)})")
+    out.append(f"    RayCast3D.setAccuracy(3)")
+
+    # Spawn — convert grid cell to world coords (center of cell)
+    spawn_world_x = md.spawn_x * md.tile_size + md.tile_size // 2
+    spawn_world_y = md.spawn_y * md.tile_size + md.tile_size // 2
+    out.append(f"    RayCast3D.spawnPlayer({spawn_world_x}, {spawn_world_y}, {md.spawn_angle})")
+
+    # Floor/sky colors for manual fillRect
+    out.append(f"    local _ceil_c  = Color.new({sr}, {sg}, {sb})")
+    out.append(f"    local _floor_c = Color.new({fr}, {fg}, {fb})")
+
+    out.append("    local advance = false")
+    out.append("    while not advance do")
+    out.append("        local pad = Controls.read()")
+    out.append("        Graphics.initBlend()")
+    out.append(f"        Graphics.fillRect(0, 960, 0, 272, _ceil_c)")
+    out.append(f"        Graphics.fillRect(0, 960, 272, 544, _floor_c)")
+    out.append("        RayCast3D.renderScene(0, 0)")
+    out.append("        Graphics.termBlend()")
+    out.append("        Screen.flip()")
+
+    out.append("        controls_update()")
+    out.append("        if controls_released(SCE_CTRL_START) then")
+    if project.game_data.save_enabled:
+        out.append("            save_progress(current_scene)")
+    out.append("            if current_music then Sound.close(current_music) end")
+    out.append("            os.exit()")
+    out.append("        end")
+
+    if mode == "free":
+        out.append(f"        if controls_held(SCE_CTRL_UP)    then RayCast3D.movePlayer(FORWARD, {move_speed}) end")
+        out.append(f"        if controls_held(SCE_CTRL_DOWN)  then RayCast3D.movePlayer(BACK,    {move_speed}) end")
+        out.append(f"        if controls_held(SCE_CTRL_LEFT)  then RayCast3D.rotateCamera(LEFT,  {turn_speed}) end")
+        out.append(f"        if controls_held(SCE_CTRL_RIGHT) then RayCast3D.rotateCamera(RIGHT, {turn_speed}) end")
+    elif mode == "grid":
+        out.append(f"        if controls_pressed(SCE_CTRL_UP)    then RayCast3D.movePlayer(FORWARD, {md.tile_size}) end")
+        out.append(f"        if controls_pressed(SCE_CTRL_DOWN)  then RayCast3D.movePlayer(BACK,    {md.tile_size}) end")
+        out.append(f"        if controls_pressed(SCE_CTRL_LEFT)  then RayCast3D.rotateCamera(LEFT,  {90 * (960 // 60)}) end")
+        out.append(f"        if controls_pressed(SCE_CTRL_RIGHT) then RayCast3D.rotateCamera(RIGHT, {90 * (960 // 60)}) end")
+
+    out.append("    end")
+    out.append("end")
+    out.append("")
+    return "\n".join(out)
+
+
+# ─────────────────────────────────────────────────────────────
+#  MAIN EXPORT ENTRY POINT
+#  Returns dict[str, str] — { "relative/path": "content" }
+# ─────────────────────────────────────────────────────────────
+
+def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
+    """
+    Export the project as an LPP-Vita multi-file package.
+
+    Returns a dict mapping relative output paths to file contents.
+    The VPK builder writes each entry to the correct path in the ZIP.
+
+    Asset paths use the new folder structure:
+        assets/images/   assets/audio/   assets/fonts/   assets/animations/
+    """
+    files: dict[str, str] = {}
+
+    tid = title_id or project.title_id
+
+    # ── Lib files ────────────────────────────────────────────
+    files["lib/controls.lua"] = _make_controls_lib()
+    files["lib/tween.lua"]    = _make_tween_lib()
+    files["lib/camera.lua"]   = _make_camera_lib()
+    files["lib/shake.lua"]    = _make_shake_lib()
+    if project.game_data.save_enabled:
+        files["lib/save.lua"] = _make_save_lib(tid)
+
+    # ── Scene files ──────────────────────────────────────────
+    for si, scene in enumerate(project.scenes):
+        scene_num  = si + 1
+        scene_key  = f"scenes/scene_{scene_num:03d}.lua"
+        files[scene_key] = _scene_to_lua(scene, scene_num, project)
+
+    # ── index.lua (orchestrator) ─────────────────────────────
+    idx = []
+    idx.append("-- =====================================================")
+    idx.append(f"-- {project.title}")
+    idx.append(f"-- Title ID : {tid}")
+    idx.append(f"-- Author   : {project.author}")
+    idx.append(f"-- Version  : {project.version}")
+    idx.append("-- Generated by Vita Adventure Creator (LPP Export)")
+    idx.append("-- =====================================================")
+    idx.append("")
+
+    # Require libs
+    idx.append("require('lib/tween')")
+    idx.append("require('lib/camera')")
+    idx.append("require('lib/shake')")
+    idx.append("require('lib/controls')")
+    if project.game_data.save_enabled:
+        idx.append("require('lib/save')")
+    has_3d = any(getattr(s, "scene_type", "2d") == "3d" for s in project.scenes)
+    if has_3d:
+        idx.append("dofile('app0:/files/raycast3d.lua')")
+        idx.append("System.setCpuSpeed(444)")
+    idx.append("")
+    idx.append("Sound.init()")
+    idx.append("")
+
+    # Animation system inline (depends on globals set below)
+    idx.append(_make_ani_lib())
+    idx.append("")
+
+    # ── Asset loading ────────────────────────────────────────
+    idx.append("-- ─── ASSETS ─────────────────────────────────────────────")
+
+    # Default font
+    idx.append('deff = Font.load("app0:/assets/fonts/font.ttf")')
+    idx.append("")
+
+    # Registered fonts
+    if project.fonts:
+        idx.append("fonts = {}")
+        for fnt in project.fonts:
+            if fnt.path:
+                fname = _asset_filename(fnt.path)
+                idx.append(f'fonts[{_lua_str(fname)}] = Font.load("app0:/assets/fonts/{fname}")')
+        idx.append("")
+
+    # Images
+    all_image_paths: set[str] = set()
+    for scene in project.scenes:
+        for comp in scene.components:
+            if comp.component_type in ("Background", "Foreground"):
+                img = project.get_image(comp.config.get("image_id", ""))
+                if img and img.path:
+                    all_image_paths.add(img.path)
+        for po in scene.placed_objects:
+            od = project.get_object_def(po.object_def_id)
+            if od:
+                for fr in od.frames:
+                    img = project.get_image(fr.image_id) if fr.image_id else None
+                    if img and img.path:
+                        all_image_paths.add(img.path)
+
+    idx.append("images = {}")
+    for path in sorted(all_image_paths):
+        fname = _asset_filename(path)
+        idx.append(f'images[{_lua_str(fname)}] = Graphics.loadImage("app0:/assets/images/{fname}")')
+    idx.append("")
+
+    # Texture key table for 3D map cell resolution
+    # map_tex_keys[n] = the image filename at index n (1-based, matching cell value - 1)
+    if has_3d:
+        idx.append("-- Texture key lookup for 3D map cells")
+        idx.append("map_tex_keys = {}")
+        sorted_images = sorted(all_image_paths)
+        for i, path in enumerate(sorted_images):
+            fname = _asset_filename(path)
+            idx.append(f'map_tex_keys[{i+1}] = {_lua_str(fname)}')
+        idx.append("")
+
+    # Animation spritesheets
+    ani_files = list(set(
+        od.ani_file_id
+        for od in project.object_defs
+        if od.behavior_type == "Animation" and getattr(od, "ani_file_id", "")
+    ))
+    if ani_files:
+        idx.append("-- Load animation files")
+        for ani_id in sorted(ani_files):
+            ani_obj = project.get_animation_export(ani_id) if hasattr(project, 'get_animation_export') else None
+            if ani_obj:
+                idx.append(f'ani_data[{_lua_str(ani_id)}] = {{')
+                idx.append(f'    frame_count  = {ani_obj.frame_count},')
+                idx.append(f'    frame_width  = {ani_obj.frame_width},')
+                idx.append(f'    frame_height = {ani_obj.frame_height},')
+                idx.append(f'    sheet_width  = {ani_obj.sheet_width},')
+                idx.append(f'    sheet_height = {ani_obj.sheet_height},')
+                idx.append(f'    fps          = {ani_obj.fps},')
+                idx.append(f'}}')
+                sheet_name = _asset_filename(ani_obj.spritesheet_path)
+                idx.append(f'ani_sheets[{_lua_str(ani_id)}] = Graphics.loadImage("app0:assets/animations/{sheet_name}")')
+        idx.append("")
+
+    # Transition spritesheets
+    trans_files = list(set(
+        comp.config.get("trans_file_id", "")
+        for scene in project.scenes
+        for comp in scene.components
+        if comp.component_type == "Transition" and comp.config.get("trans_file_id", "")
+    ))
+    if trans_files:
+        idx.append("-- Load transition files")
+        for trans_id in sorted(trans_files):
+            trans_obj = project.get_transition_export(trans_id) if hasattr(project, 'get_transition_export') else None
+            if trans_obj:
+                idx.append(f'trans_data[{_lua_str(trans_id)}] = {{')
+                idx.append(f'    frame_count  = {trans_obj.frame_count},')
+                idx.append(f'    sheet_width  = {trans_obj.sheet_width},')
+                idx.append(f'    sheet_height = {trans_obj.sheet_height},')
+                idx.append(f'    fps          = {trans_obj.fps},')
+                idx.append(f'}}')
+                sheet_name = _asset_filename(trans_obj.spritesheet_path)
+                idx.append(f'trans_sheets[{_lua_str(trans_id)}] = Graphics.loadImage("app0:assets/animations/{sheet_name}")')
+        idx.append("")
+
+    # Audio — Sound.open() detects format by magic bytes, no constant needed
+    all_audio_paths: set[str] = set()
+    for aud in project.audio:
+        if aud.path:
+            all_audio_paths.add(aud.path)
+    if all_audio_paths:
+        idx.append("audio_tracks = {}")
+        for path in sorted(all_audio_paths):
+            fname = _asset_filename(path)
+            idx.append(f'audio_tracks[{_lua_str(fname)}] = Sound.open("app0:assets/audio/{fname}")')
+        idx.append("")
+
+    # ── Global state ─────────────────────────────────────────
+    idx.append("-- ─── STATE ──────────────────────────────────────────────")
+    idx.append("current_scene = 1")
+    idx.append("current_music = nil")
+    idx.append("running       = true")
+    idx.append("")
+
+    # User variables
+    if project.game_data.variables:
+        idx.append("-- ─── VARIABLES ─────────────────────────────────────────")
+        for v in project.game_data.variables:
+            if v.var_type == "string":
+                default = _lua_str(str(v.default_value))
+            elif v.var_type == "bool":
+                default = _lua_bool(bool(v.default_value))
+            else:
+                default = str(v.default_value) if v.default_value else "0"
+            idx.append(f"{_safe_name(v.name)} = {default}")
+        idx.append("")
+
+    # Require scene files
+    idx.append("-- ─── SCENES ─────────────────────────────────────────────")
+    for si, scene in enumerate(project.scenes):
+        scene_num = si + 1
+        idx.append(f"dofile('app0:/scenes/scene_{scene_num:03d}.lua')")
+    idx.append("")
+
+    # Main loop
+    idx.append("-- ─── MAIN LOOP ──────────────────────────────────────────")
+    idx.append("while running do")
+    for si, scene in enumerate(project.scenes):
+        scene_num = si + 1
+        prefix    = "    if" if si == 0 else "    elseif"
+        idx.append(f"{prefix} current_scene == {scene_num} then scene_{scene_num}()")
+    idx.append("    else")
+    idx.append("        running = false")
+    idx.append("    end")
+    idx.append("end")
+    idx.append("")
+    idx.append("if current_music then Sound.close(current_music) end")
+    idx.append("os.exit()")
+    idx.append("")
+
+    files["index.lua"] = "\n".join(idx)
+    return files
+
+
+# ─────────────────────────────────────────────────────────────
+#  ASSET PATH MAPPING
+#  Used by the VPK builder to know where to copy source files.
+# ─────────────────────────────────────────────────────────────
+
+def get_asset_mapping(project: Project) -> dict[str, str]:
+    """
+    Returns a dict mapping source file paths on disk to their
+    destination paths inside the VPK (relative to app0:).
+
+    VPK builder uses this alongside the Lua file dict.
+    """
+    mapping: dict[str, str] = {}
+
+    for img in project.images:
+        if img.path:
+            mapping[img.path] = f"assets/images/{_asset_filename(img.path)}"
+
+    for aud in project.audio:
+        if aud.path:
+            mapping[aud.path] = f"assets/audio/{_asset_filename(aud.path)}"
+
+    for fnt in project.fonts:
+        if fnt.path:
+            mapping[fnt.path] = f"assets/fonts/{_asset_filename(fnt.path)}"
+
+    # Animation spritesheets
+    for od in project.object_defs:
+        if od.behavior_type == "Animation" and getattr(od, "ani_file_id", ""):
+            ani_obj = project.get_animation_export(od.ani_file_id) if hasattr(project, 'get_animation_export') else None
+            if ani_obj and ani_obj.spritesheet_path:
+                mapping[ani_obj.spritesheet_path] = f"assets/animations/{_asset_filename(ani_obj.spritesheet_path)}"
+
+    return mapping

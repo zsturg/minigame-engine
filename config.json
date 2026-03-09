@@ -1,0 +1,36 @@
+{
+  "theme": {
+    "colors": {
+      "DARK": "#0f0f12",
+      "PANEL": "#16161c",
+      "SURFACE": "#1e1e28",
+      "SURFACE2": "#26263a",
+      "BORDER": "#2e2e42",
+      "ACCENT": "#7c6aff",
+      "ACCENT2": "#ff6a9b",
+      "TEXT": "#e8e6f0",
+      "TEXT_DIM": "#7a7890",
+      "TEXT_MUTED": "#4a4860",
+      "SUCCESS": "#4ade80",
+      "WARNING": "#facc15",
+      "DANGER": "#f87171"
+    },
+    "textures": {
+      "use_textures": false,
+      "background_texture": null,
+      "panel_texture": null,
+      "surface_texture": null,
+      "texture_opacity": 0.05
+    },
+    "fonts": {
+      "family": "Segoe UI",
+      "size": 13
+    },
+    "rounding": {
+      "button_radius": 4,
+      "widget_radius": 4,
+      "tab_radius": 0
+    }
+  },
+  "show_explorer": true
+}
