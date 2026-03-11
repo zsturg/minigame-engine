@@ -599,6 +599,36 @@ class ObjectDefEditor(QWidget):
         gf.addWidget(self.gui_font_combo, stretch=1)
         gg.addWidget(self._gui_font_row)
 
+        # Text alignment (Label + Button)
+        self._gui_align_row = QWidget()
+        ga = QHBoxLayout(self._gui_align_row)
+        ga.setContentsMargins(0, 0, 0, 0)
+        ga.setSpacing(8)
+        ga.addWidget(_make_dim_label("Align:"))
+        self.gui_align_combo = QComboBox()
+        self.gui_align_combo.addItems(["left", "center", "right"])
+        self.gui_align_combo.setStyleSheet(_field_style())
+        self.gui_align_combo.currentIndexChanged.connect(self._emit)
+        ga.addWidget(self.gui_align_combo)
+        ga.addStretch()
+        gg.addWidget(self._gui_align_row)
+
+        # Font size (Label + Button)
+        self._gui_font_size_row = QWidget()
+        gfs = QHBoxLayout(self._gui_font_size_row)
+        gfs.setContentsMargins(0, 0, 0, 0)
+        gfs.setSpacing(8)
+        gfs.addWidget(_make_dim_label("Font Size:"))
+        self.gui_font_size_spin = QSpinBox()
+        self.gui_font_size_spin.setRange(4, 128)
+        self.gui_font_size_spin.setValue(16)
+        self.gui_font_size_spin.setFixedWidth(70)
+        self.gui_font_size_spin.setStyleSheet(_field_style())
+        self.gui_font_size_spin.valueChanged.connect(self._emit)
+        gfs.addWidget(self.gui_font_size_spin)
+        gfs.addStretch()
+        gg.addWidget(self._gui_font_size_row)
+
         # Background color (Panel + Button)
         self._gui_bg_color_row = QWidget()
         bc = QHBoxLayout(self._gui_bg_color_row)
@@ -927,6 +957,8 @@ class ObjectDefEditor(QWidget):
         o.gui_text = self.gui_text_edit.text()
         o.gui_text_color = self._gui_text_color
         o.gui_font_id = self.gui_font_combo.currentData() or ""
+        o.gui_text_align = self.gui_align_combo.currentText()
+        o.gui_font_size = self.gui_font_size_spin.value()
         o.gui_bg_color = self._gui_bg_color
         o.gui_bg_opacity = self.gui_opacity_spin.value()
         o.gui_width = self.gui_width_spin.value()
@@ -1192,6 +1224,18 @@ class ObjectDefEditor(QWidget):
                         break
             self.gui_font_combo.blockSignals(False)
 
+            # Load alignment
+            align = getattr(obj, "gui_text_align", "left")
+            align_idx = self.gui_align_combo.findText(align)
+            self.gui_align_combo.blockSignals(True)
+            self.gui_align_combo.setCurrentIndex(align_idx if align_idx >= 0 else 0)
+            self.gui_align_combo.blockSignals(False)
+
+            # Load font size
+            self.gui_font_size_spin.blockSignals(True)
+            self.gui_font_size_spin.setValue(getattr(obj, "gui_font_size", 16))
+            self.gui_font_size_spin.blockSignals(False)
+
             # Populate GUI image combo
             self.gui_image_combo.blockSignals(True)
             self.gui_image_combo.clear()
@@ -1208,11 +1252,13 @@ class ObjectDefEditor(QWidget):
             # Show/hide GUI sub-rows based on type
             btype = obj.behavior_type
             has_text = btype in ("GUI_Label", "GUI_Button")
-            has_bg   = btype in ("GUI_Panel", "GUI_Button")
+            has_bg   = btype in ("GUI_Panel", "GUI_Button", "GUI_Label")
             is_btn   = btype == "GUI_Button"
             self._gui_text_row.setVisible(has_text)
             self._gui_text_color_row.setVisible(has_text)
             self._gui_font_row.setVisible(has_text)
+            self._gui_align_row.setVisible(has_text)
+            self._gui_font_size_row.setVisible(has_text)
             self._gui_bg_color_row.setVisible(has_bg)
             self._gui_opacity_row.setVisible(has_bg)
             self._gui_size_row.setVisible(has_bg)
