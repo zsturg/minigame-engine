@@ -70,14 +70,6 @@ def _parse_hex_color(hex_color: str, alpha: int = 255) -> str:
 CHUNK_SIZE = 512
 
 def bake_tile_chunks(project: Project, build_dir) -> list:
-    """
-    Bake every TileLayer component in every scene into 512x512 PNG chunks.
-    Writes chunks to build_dir/assets/tilechunks/.
-    Returns list of (scene_index, comp_id, cx, cy, filename).
-
-    Tiles with index -1 (eraser) are left transparent.
-    Edge chunks are cropped to actual size — Lua draws them as-is.
-    """
     import math
     from PIL import Image
 
@@ -190,6 +182,14 @@ def _make_tween_lib() -> str:
         "local function ease_in_out(t)",
         "    if t < 0.5 then return 2 * t * t",
         "    else return 1 - 2 * (1 - t) * (1 - t) end",
+        "end",
+        "",
+        "function emit_signal(name)",
+        "    _signals[name] = (_signals[name] or 0) + 1",
+        "end",
+        "",
+        "function signal_fired(name)",
+        "    return (_signals[name] or 0) > 0",
         "end",
         "",
         "local easing_funcs = {",
@@ -315,6 +315,35 @@ def _make_shake_lib() -> str:
     return "\n".join(lines)
 
 
+def _make_flash_lib() -> str:
+    lines = [
+        "-- lib/flash.lua",
+        "flash_timer     = 0",
+        "flash_duration  = 0",
+        "flash_r         = 255",
+        "flash_g         = 255",
+        "flash_b         = 255",
+        "",
+        "function flash_update()",
+        "    if flash_timer > 0 then",
+        "        flash_timer = flash_timer - 1",
+        "    end",
+        "end",
+        "",
+        "function flash_draw()",
+        "    if flash_timer > 0 and flash_duration > 0 then",
+        "        local _alpha = math.floor(255 * flash_timer / flash_duration)",
+        "        if _alpha > 255 then _alpha = 255 end",
+        "        if _alpha > 0 then",
+        "            local _fc = Color.new(flash_r, flash_g, flash_b, _alpha)",
+        "            Graphics.fillRect(0, 960, 0, 544, _fc)",
+        "        end",
+        "    end",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
 def _make_save_lib(title_id: str) -> str:
     save_path = f"ux0:data/{title_id}_save.dat"
     lines = [
@@ -334,6 +363,12 @@ def _make_save_lib(title_id: str) -> str:
         "",
         "function delete_save()",
         "    os.remove(SAVE_PATH)",
+        "end",
+        "",
+        "function save_exists()",
+        "    local f = io.open(SAVE_PATH, 'r')",
+        "    if f then f:close(); return true end",
+        "    return false",
         "end",
     ]
     return "\n".join(lines)
@@ -361,67 +396,268 @@ def _resolve_target_name(target_id: str, project) -> str:
 def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=None) -> list[str]:
     t = action.action_type
     lines = []
-    spd = getattr(action, "movement_speed", 4)
+    spd = action.movement_speed  # int, always present
 
     if t == "four_way_movement":
         lines.append(f"if controls_held(SCE_CTRL_UP)    then {obj_var}_y = {obj_var}_y - {spd} end")
         lines.append(f"if controls_held(SCE_CTRL_DOWN)  then {obj_var}_y = {obj_var}_y + {spd} end")
         lines.append(f"if controls_held(SCE_CTRL_LEFT)  then {obj_var}_x = {obj_var}_x - {spd} end")
         lines.append(f"if controls_held(SCE_CTRL_RIGHT) then {obj_var}_x = {obj_var}_x + {spd} end")
+
+    elif t == "four_way_movement_collide":
+        grid_id = action.collision_layer_id or ""
+        pw      = action.player_width
+        ph      = action.player_height
+        if not grid_id and project:
+            for _scene in project.scenes:
+                for _comp in _scene.components:
+                    if _comp.component_type == "CollisionLayer":
+                        grid_id = _comp.id
+                        break
+                if grid_id:
+                    break
+        if grid_id and obj_var:
+            lines.append(f"do")
+            lines.append(f"    local _grid = collision_grids[{_lua_str(grid_id)}]")
+            lines.append(f"    if _grid then")
+            lines.append(f"        if controls_held(SCE_CTRL_LEFT) then")
+            lines.append(f"            local _nx = {obj_var}_x - {spd}")
+            lines.append(f"            if not check_collision_rect(_grid, _nx, {obj_var}_y, {pw}, {ph}) then {obj_var}_x = _nx end")
+            lines.append(f"        end")
+            lines.append(f"        if controls_held(SCE_CTRL_RIGHT) then")
+            lines.append(f"            local _nx = {obj_var}_x + {spd}")
+            lines.append(f"            if not check_collision_rect(_grid, _nx, {obj_var}_y, {pw}, {ph}) then {obj_var}_x = _nx end")
+            lines.append(f"        end")
+            lines.append(f"        if controls_held(SCE_CTRL_UP) then")
+            lines.append(f"            local _ny = {obj_var}_y - {spd}")
+            lines.append(f"            if not check_collision_rect(_grid, {obj_var}_x, _ny, {pw}, {ph}) then {obj_var}_y = _ny end")
+            lines.append(f"        end")
+            lines.append(f"        if controls_held(SCE_CTRL_DOWN) then")
+            lines.append(f"            local _ny = {obj_var}_y + {spd}")
+            lines.append(f"            if not check_collision_rect(_grid, {obj_var}_x, _ny, {pw}, {ph}) then {obj_var}_y = _ny end")
+            lines.append(f"        end")
+            lines.append(f"    end")
+            lines.append(f"end")
+        else:
+            lines.append(f"if controls_held(SCE_CTRL_UP)    then {obj_var}_y = {obj_var}_y - {spd} end")
+            lines.append(f"if controls_held(SCE_CTRL_DOWN)  then {obj_var}_y = {obj_var}_y + {spd} end")
+            lines.append(f"if controls_held(SCE_CTRL_LEFT)  then {obj_var}_x = {obj_var}_x - {spd} end")
+            lines.append(f"if controls_held(SCE_CTRL_RIGHT) then {obj_var}_x = {obj_var}_x + {spd} end")
+
+    elif t == "two_way_movement":
+        axis = action.two_way_axis
+        if axis == "horizontal":
+            lines.append(f"if controls_held(SCE_CTRL_LEFT)  then {obj_var}_x = {obj_var}_x - {spd} end")
+            lines.append(f"if controls_held(SCE_CTRL_RIGHT) then {obj_var}_x = {obj_var}_x + {spd} end")
+        else:
+            lines.append(f"if controls_held(SCE_CTRL_UP)    then {obj_var}_y = {obj_var}_y - {spd} end")
+            lines.append(f"if controls_held(SCE_CTRL_DOWN)  then {obj_var}_y = {obj_var}_y + {spd} end")
+
+    elif t == "two_way_movement_collide":
+        axis    = action.two_way_axis
+        grid_id = action.collision_layer_id or ""
+        pw      = action.player_width
+        ph      = action.player_height
+        if not grid_id and project:
+            for _scene in project.scenes:
+                for _comp in _scene.components:
+                    if _comp.component_type == "CollisionLayer":
+                        grid_id = _comp.id
+                        break
+                if grid_id:
+                    break
+        if grid_id and obj_var:
+            lines.append(f"do")
+            lines.append(f"    local _grid = collision_grids[{_lua_str(grid_id)}]")
+            lines.append(f"    if _grid then")
+            if axis == "horizontal":
+                lines.append(f"        if controls_held(SCE_CTRL_LEFT) then")
+                lines.append(f"            local _nx = {obj_var}_x - {spd}")
+                lines.append(f"            if not check_collision_rect(_grid, _nx, {obj_var}_y, {pw}, {ph}) then {obj_var}_x = _nx end")
+                lines.append(f"        end")
+                lines.append(f"        if controls_held(SCE_CTRL_RIGHT) then")
+                lines.append(f"            local _nx = {obj_var}_x + {spd}")
+                lines.append(f"            if not check_collision_rect(_grid, _nx, {obj_var}_y, {pw}, {ph}) then {obj_var}_x = _nx end")
+                lines.append(f"        end")
+            else:
+                lines.append(f"        if controls_held(SCE_CTRL_UP) then")
+                lines.append(f"            local _ny = {obj_var}_y - {spd}")
+                lines.append(f"            if not check_collision_rect(_grid, {obj_var}_x, _ny, {pw}, {ph}) then {obj_var}_y = _ny end")
+                lines.append(f"        end")
+                lines.append(f"        if controls_held(SCE_CTRL_DOWN) then")
+                lines.append(f"            local _ny = {obj_var}_y + {spd}")
+                lines.append(f"            if not check_collision_rect(_grid, {obj_var}_x, _ny, {pw}, {ph}) then {obj_var}_y = _ny end")
+                lines.append(f"        end")
+            lines.append(f"    end")
+            lines.append(f"end")
+        else:
+            if axis == "horizontal":
+                lines.append(f"if controls_held(SCE_CTRL_LEFT)  then {obj_var}_x = {obj_var}_x - {spd} end")
+                lines.append(f"if controls_held(SCE_CTRL_RIGHT) then {obj_var}_x = {obj_var}_x + {spd} end")
+            else:
+                lines.append(f"if controls_held(SCE_CTRL_UP)    then {obj_var}_y = {obj_var}_y - {spd} end")
+                lines.append(f"if controls_held(SCE_CTRL_DOWN)  then {obj_var}_y = {obj_var}_y + {spd} end")
+
+    elif t == "fire_bullet":
+        bdir = action.bullet_direction
+        bspd = action.bullet_speed
+        if bdir == "right":
+            lines.append(f"{obj_var}_x = {obj_var}_x + {bspd}")
+        elif bdir == "left":
+            lines.append(f"{obj_var}_x = {obj_var}_x - {bspd}")
+        elif bdir == "down":
+            lines.append(f"{obj_var}_y = {obj_var}_y + {bspd}")
+        elif bdir == "up":
+            lines.append(f"{obj_var}_y = {obj_var}_y - {bspd}")
+
+    elif t == "restart_scene":
+        lines.append("advance = true  -- current_scene unchanged; main loop re-calls this scene")
+
+    elif t == "emit_signal":
+        # signal name stored in var_name (no dedicated field in BehaviorAction)
+        sig = action.var_name or ""
+        if sig:
+            lines.append(f"emit_signal({_lua_str(sig)})")
+        else:
+            lines.append("-- emit_signal: no signal name set")
+
     elif t == "go_to_next":
         lines.append("current_scene = current_scene + 1")
         lines.append("advance = true")
+
     elif t == "go_to_prev":
         lines.append("current_scene = current_scene - 1")
         lines.append("advance = true")
+
     elif t == "go_to_scene":
         lines.append(f"current_scene = {action.target_scene}")
         lines.append("advance = true")
+
     elif t == "quit_game":
         lines.append("if current_music then Sound.close(current_music) end")
         lines.append("os.exit()")
+
     elif t == "stop_music":
         lines.append("if current_music then Sound.close(current_music) end")
         lines.append("current_music = nil")
+
+    elif t == "play_music":
+        audio_id = action.audio_id or ""
+        if audio_id and project:
+            aud = project.get_audio(audio_id)
+            if aud and aud.path:
+                fname = _asset_filename(aud.path)
+                lines.append("if current_music then Sound.close(current_music) end")
+                lines.append(f"current_music = audio_tracks[{_lua_str(fname)}]")
+                lines.append("if current_music then Sound.play(current_music, true) end")
+            else:
+                lines.append(f"-- play_music: audio asset {_lua_str(audio_id)} not found")
+        else:
+            lines.append("-- play_music: no audio_id specified")
+
+    elif t == "set_music_volume":
+        # volume is int 0-100 in models
+        vol = int(action.volume)
+        lpp_vol = int(vol / 100.0 * 32767)
+        lpp_vol = max(0, min(32767, lpp_vol))
+        lines.append(f"if current_music then Sound.setVolume(current_music, {lpp_vol}) end")
+
+    elif t == "play_sfx":
+        audio_id = action.audio_id or ""
+        if audio_id and project:
+            aud = project.get_audio(audio_id)
+            if aud and aud.path:
+                fname = _asset_filename(aud.path)
+                lines.append(f"do")
+                lines.append(f"    local _sfx = audio_tracks[{_lua_str(fname)}]")
+                lines.append(f"    if _sfx then Sound.play(_sfx, false) end")
+                lines.append(f"end")
+            else:
+                lines.append(f"-- play_sfx: audio asset {_lua_str(audio_id)} not found")
+        else:
+            lines.append("-- play_sfx: no audio_id specified")
+
+    elif t == "set_flag":
+        bn  = _safe_name(action.bool_name) if action.bool_name else "unknown_flag"
+        val = "true" if action.bool_value else "false"
+        lines.append(f"{bn} = {val}")
+
+    elif t == "toggle_flag":
+        bn = _safe_name(action.bool_name) if action.bool_name else "unknown_flag"
+        lines.append(f"{bn} = not {bn}")
+
+    elif t == "add_item":
+        iname = _safe_name(action.item_name) if action.item_name else "unknown_item"
+        lines.append(f'inventory_add("{iname}")')
+
+    elif t == "remove_item":
+        iname = _safe_name(action.item_name) if action.item_name else "unknown_item"
+        lines.append(f'inventory_remove("{iname}")')
+
     elif t == "move_to" and obj_var:
         lines.append(f"{obj_var}_x = {action.target_x}")
         lines.append(f"{obj_var}_y = {action.target_y}")
+
     elif t == "move_by" and obj_var:
         lines.append(f"{obj_var}_x = {obj_var}_x + {action.offset_x}")
         lines.append(f"{obj_var}_y = {obj_var}_y + {action.offset_y}")
+
     elif t == "show_object" and obj_var:
         lines.append(f"{obj_var}_visible = true")
+
     elif t == "hide_object" and obj_var:
         lines.append(f"{obj_var}_visible = false")
+
     elif t == "set_variable":
         vn  = _safe_name(action.var_name) if action.var_name else "unknown"
         val = _lua_str(action.var_value) if isinstance(action.var_value, str) else str(action.var_value)
         lines.append(f"{vn} = {val}")
+
+    elif t == "change_variable":
+        vn  = _safe_name(action.var_name) if action.var_name else "unknown"
+        val = action.var_value if action.var_value else "0"
+        op  = action.var_operator  # set | add | subtract | multiply | divide
+        if op == "add":
+            lines.append(f"{vn} = ({vn} or 0) + {val}")
+        elif op == "subtract":
+            lines.append(f"{vn} = ({vn} or 0) - {val}")
+        elif op == "multiply":
+            lines.append(f"{vn} = ({vn} or 0) * {val}")
+        elif op == "divide":
+            lines.append(f"{vn} = ({vn} or 0) / {val}")
+        else:
+            lines.append(f"{vn} = {val}")
+
     elif t == "increment_var":
         vn    = _safe_name(action.var_name) if action.var_name else "unknown"
-        delta = getattr(action, "var_delta", 1)
+        # var_delta doesn't exist — use var_value, default 1
+        delta = action.var_value if action.var_value else "1"
         lines.append(f"{vn} = {vn} + {delta}")
+
     elif t == "if_button_pressed":
         btn = _button_constant(action.button)
         lines.append(f"if controls_pressed({btn}) then")
-        for sa in getattr(action, "sub_actions", []):
+        for sa in action.sub_actions:
             for sl in _action_to_lua_inline(sa, obj_var, project):
                 lines.append(f"    {sl}")
         lines.append("end")
+
     elif t == "if_button_held":
         btn = _button_constant(action.button)
         lines.append(f"if controls_held({btn}) then")
-        for sa in getattr(action, "sub_actions", []):
+        for sa in action.sub_actions:
             for sl in _action_to_lua_inline(sa, obj_var, project):
                 lines.append(f"    {sl}")
         lines.append("end")
+
     elif t == "if_button_released":
         btn = _button_constant(action.button)
         lines.append(f"if controls_released({btn}) then")
-        for sa in getattr(action, "sub_actions", []):
+        for sa in action.sub_actions:
             for sl in _action_to_lua_inline(sa, obj_var, project):
                 lines.append(f"    {sl}")
         lines.append("end")
+
     elif t == "camera_move_to":
         if action.camera_duration > 0:
             frames = int(action.camera_duration * 60)
@@ -431,6 +667,7 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
             lines.append(f"camera.x = {action.camera_target_x}")
             lines.append(f"camera.y = {action.camera_target_y}")
         lines.append("camera_apply_bounds()")
+
     elif t == "camera_offset":
         if action.camera_duration > 0:
             frames = int(action.camera_duration * 60)
@@ -440,6 +677,7 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
             lines.append(f"camera.x = camera.x + {action.camera_offset_x}")
             lines.append(f"camera.y = camera.y + {action.camera_offset_y}")
         lines.append("camera_apply_bounds()")
+
     elif t == "camera_follow":
         target_var = _resolve_target_name(action.camera_follow_target_def_id, project) if project else _safe_name(action.camera_follow_target_def_id or "")
         if target_var:
@@ -448,8 +686,10 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
             lines.append(f"camera.follow_offset_y = {action.camera_follow_offset_y}")
         else:
             lines.append("-- camera_follow: no target specified")
+
     elif t == "camera_stop_follow":
         lines.append("camera.follow_target = nil")
+
     elif t == "camera_reset":
         if action.camera_duration > 0:
             frames = int(action.camera_duration * 60)
@@ -459,52 +699,326 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
             lines.append("camera.x = 480")
             lines.append("camera.y = 272")
         lines.append("camera.follow_target = nil")
+
     elif t == "camera_shake":
-        intensity = getattr(action, "shake_intensity", 5.0)
-        duration  = getattr(action, "shake_duration",  0.5)
+        intensity = action.shake_intensity
+        duration  = action.shake_duration
         frames    = int(duration * 60)
         lines.append(f"shake_intensity = {intensity}")
         lines.append(f"shake_timer = {frames}")
+
+    elif t == "flash_screen":
+        hex_color = (action.color or "#ffffff").lstrip("#")
+        try:
+            fr, fg, fb = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        except (ValueError, IndexError):
+            fr, fg, fb = 255, 255, 255
+        dur    = action.duration
+        frames = max(1, int(float(dur) * 60))
+        lines.append(f"flash_r        = {fr}")
+        lines.append(f"flash_g        = {fg}")
+        lines.append(f"flash_b        = {fb}")
+        lines.append(f"flash_duration = {frames}")
+        lines.append(f"flash_timer    = {frames}")
+
     elif t == "ani_play":
         target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
         if target:
             lines.append(f"{target}_ani_playing = true")
             lines.append(f"{target}_ani_done = false")
+
     elif t == "ani_pause":
         target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
         if target:
             lines.append(f"{target}_ani_playing = false")
+
     elif t == "ani_stop":
         target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
         if target:
             lines.append(f"{target}_ani_playing = false")
             lines.append(f"{target}_ani_frame = 0")
             lines.append(f"{target}_ani_done = false")
+
     elif t == "ani_set_frame":
         target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
-        frame  = getattr(action, "ani_target_frame", 0)
+        frame  = action.frame_index  # frame_index is the correct field
         if target:
             lines.append(f"{target}_ani_frame = {frame}")
+
     elif t == "ani_set_speed":
         target = _safe_name(action.object_def_id) if action.object_def_id else obj_var
-        fps    = getattr(action, "ani_fps", 12)
+        fps    = action.anim_fps  # anim_fps is the correct field
         if target:
             lines.append(f"{target}_ani_fps = {fps}")
+
     elif t == "layer_show":
-        lname = _safe_name(getattr(action, "layer_name", "") or "")
+        lname = _safe_name(action.layer_name or "")
         if lname:
             lines.append(f"layer_{lname}_visible = true")
         else:
             lines.append("-- layer_show: no layer name specified")
+
     elif t == "layer_hide":
-        lname = _safe_name(getattr(action, "layer_name", "") or "")
+        lname = _safe_name(action.layer_name or "")
         if lname:
             lines.append(f"layer_{lname}_visible = false")
         else:
             lines.append("-- layer_hide: no layer name specified")
+
     elif t == "layer_set_image":
-        lname = _safe_name(getattr(action, "layer_name", "") or "")
+        lname = _safe_name(action.layer_name or "")
         lines.append(f"-- layer_set_image: runtime image swap not yet supported for layer_{lname}")
+
+    elif t == "scroll_bg":
+        lname = _safe_name(action.layer_name or "")
+        # scroll_dx/scroll_dy don't exist — use offset_x/offset_y
+        dx    = action.offset_x
+        dy    = action.offset_y
+        if lname:
+            if dx != 0:
+                lines.append(f"layer_{lname}_scroll_x = (layer_{lname}_scroll_x or 0) + {dx}")
+            if dy != 0:
+                lines.append(f"layer_{lname}_scroll_y = (layer_{lname}_scroll_y or 0) + {dy}")
+            if dx == 0 and dy == 0:
+                lines.append(f"-- scroll_bg: offset_x and offset_y are both 0 for layer_{lname}")
+        else:
+            lines.append("-- scroll_bg: no layer name specified")
+
+    elif t == "set_scale" and obj_var:
+        val = action.target_scale  # FIXED: was scale_value
+        lines.append(f"{obj_var}_scale = {val}")
+
+    elif t == "set_rotation" and obj_var:
+        val = action.target_rotation  # FIXED: was rotation_value
+        lines.append(f"{obj_var}_rotation = {val}")
+
+    elif t == "set_opacity" and obj_var:
+        # target_opacity is 0.0-1.0, convert to 0-255
+        val = int(float(action.target_opacity) * 255)  # FIXED: was opacity_value, wrong range
+        lines.append(f"{obj_var}_opacity = {val}")
+
+    elif t == "scale_to" and obj_var:
+        val    = action.target_scale   # FIXED: was scale_value
+        dur    = action.duration       # FIXED: was tween_duration
+        easing = action.camera_easing  # reuse camera_easing for tween easing (no dedicated field)
+        frames = max(1, int(float(dur) * 60))
+        lines.append(f'tween_add("{obj_var}_scale", _G, "{obj_var}_scale", {val}, {frames}, "{easing}")')
+
+    elif t == "rotate_to" and obj_var:
+        val    = action.target_rotation  # FIXED: was rotation_value
+        dur    = action.duration         # FIXED: was tween_duration
+        easing = action.camera_easing
+        frames = max(1, int(float(dur) * 60))
+        lines.append(f'tween_add("{obj_var}_rot", _G, "{obj_var}_rotation", {val}, {frames}, "{easing}")')
+
+    elif t == "rotate_by" and obj_var:
+        delta = action.target_rotation  # FIXED: was rotation_value
+        lines.append(f"{obj_var}_rotation = {obj_var}_rotation + {delta}")
+
+    elif t == "slide_to" and obj_var:
+        tx     = action.target_x
+        ty     = action.target_y
+        dur    = action.duration   # FIXED: was tween_duration
+        easing = action.camera_easing
+        frames = max(1, int(float(dur) * 60))
+        lines.append(f'tween_add("{obj_var}_sx", _G, "{obj_var}_x", {tx}, {frames}, "{easing}")')
+        lines.append(f'tween_add("{obj_var}_sy", _G, "{obj_var}_y", {ty}, {frames}, "{easing}")')
+
+    elif t == "slide_by" and obj_var:
+        dx     = action.offset_x
+        dy     = action.offset_y
+        dur    = action.duration   # FIXED: was tween_duration
+        easing = action.camera_easing
+        frames = max(1, int(float(dur) * 60))
+        lines.append(f"do")
+        lines.append(f'    tween_add("{obj_var}_sx", _G, "{obj_var}_x", {obj_var}_x + {dx}, {frames}, "{easing}")')
+        lines.append(f'    tween_add("{obj_var}_sy", _G, "{obj_var}_y", {obj_var}_y + {dy}, {frames}, "{easing}")')
+        lines.append(f"end")
+
+    elif t == "return_to_start" and obj_var:
+        dur    = action.duration   # FIXED: was tween_duration
+        easing = action.camera_easing
+        if dur and float(dur) > 0:
+            frames = max(1, int(float(dur) * 60))
+            lines.append(f'tween_add("{obj_var}_sx", _G, "{obj_var}_x", {obj_var}_start_x, {frames}, "{easing}")')
+            lines.append(f'tween_add("{obj_var}_sy", _G, "{obj_var}_y", {obj_var}_start_y, {frames}, "{easing}")')
+        else:
+            lines.append(f"{obj_var}_x = {obj_var}_start_x")
+            lines.append(f"{obj_var}_y = {obj_var}_start_y")
+
+    elif t == "spin" and obj_var:
+        speed = action.spin_speed  # correct field name
+        lines.append(f"{obj_var}_spin_speed = {speed}")
+
+    elif t == "stop_spin" and obj_var:
+        lines.append(f"{obj_var}_spin_speed = 0.0")
+
+    elif t == "create_object":
+        def_id = action.object_def_id or ""
+        tx     = action.target_x
+        ty     = action.target_y
+        if def_id and project:
+            od = project.get_object_def(def_id)
+            if od:
+                iid   = f"{_safe_name(od.name)}_dyn_{def_id[:6]}"
+                fname = ""
+                if od.frames and od.frames[0].image_id:
+                    img = project.get_image(od.frames[0].image_id)
+                    if img and img.path:
+                        fname = _asset_filename(img.path)
+                lines.append(f"do")
+                lines.append(f'    local _iid = "{iid}_" .. tostring(os.clock()):gsub("%.", "")')
+                lines.append(f"    _live_objects[_iid] = {{")
+                lines.append(f"        def_id       = {_lua_str(def_id)},")
+                lines.append(f"        x            = {tx},")
+                lines.append(f"        y            = {ty},")
+                lines.append(f"        visible      = true,")
+                lines.append(f"        scale        = 1.0,")
+                lines.append(f"        rotation     = 0.0,")
+                lines.append(f"        opacity      = 255,")
+                lines.append(f"        spin_speed   = 0.0,")
+                lines.append(f"        interactable = true,")
+                lines.append(f"        image        = {_lua_str(fname)},")
+                lines.append(f"    }}")
+                lines.append(f"end")
+            else:
+                lines.append(f"-- create_object: def {_lua_str(def_id)} not found")
+        else:
+            lines.append("-- create_object: no object_def_id specified")
+
+    elif t == "destroy_object":
+        def_id  = action.object_def_id or ""
+        inst_id = action.instance_id or ""
+        if inst_id:
+            # specific placed instance by instance_id
+            lines.append(f"_live_objects[{_lua_str(inst_id)}] = nil")
+        elif def_id and project:
+            od = project.get_object_def(def_id)
+            if od:
+                vname = _safe_name(od.name)
+                # hide and disable the placed object variable
+                lines.append(f"{vname}_visible = false")
+                lines.append(f"{vname}_interactable = false")
+            else:
+                lines.append(f"-- destroy_object: def {_lua_str(def_id)} not found")
+        else:
+            lines.append("-- destroy_object: no target specified")
+
+    elif t == "destroy_all_type":
+        def_id = action.object_def_id or ""
+        if def_id and project:
+            od = project.get_object_def(def_id)
+            if od:
+                vname = _safe_name(od.name)
+                lines.append(f"{vname}_visible = false")
+                lines.append(f"{vname}_interactable = false")
+            else:
+                lines.append(f"-- destroy_all_type: def {_lua_str(def_id)} not found")
+        else:
+            lines.append("-- destroy_all_type: no object_def_id specified")
+
+    elif t == "enable_interact" and obj_var:
+        lines.append(f"{obj_var}_interactable = true")
+
+    elif t == "disable_interact" and obj_var:
+        lines.append(f"{obj_var}_interactable = false")
+
+    elif t == "if_variable":
+        vn  = _safe_name(action.var_name) if action.var_name else "unknown"
+        val = action.var_value if action.var_value else "0"
+        op  = action.var_compare or "=="
+        lines.append(f"if ({vn} or 0) {op} {val} then")
+        for sa in action.true_actions:
+            for sl in _action_to_lua_inline(sa, obj_var, project):
+                lines.append(f"    {sl}")
+        if action.false_actions:
+            lines.append("else")
+            for sa in action.false_actions:
+                for sl in _action_to_lua_inline(sa, obj_var, project):
+                    lines.append(f"    {sl}")
+        lines.append("end")
+
+    elif t == "if_flag":
+        bn  = _safe_name(action.bool_name) if action.bool_name else "unknown_flag"
+        exp = "true" if action.bool_expected else "false"
+        lines.append(f"if {bn} == {exp} then")
+        for sa in action.true_actions:
+            for sl in _action_to_lua_inline(sa, obj_var, project):
+                lines.append(f"    {sl}")
+        if action.false_actions:
+            lines.append("else")
+            for sa in action.false_actions:
+                for sl in _action_to_lua_inline(sa, obj_var, project):
+                    lines.append(f"    {sl}")
+        lines.append("end")
+
+    elif t == "if_has_item":
+        iname = _safe_name(action.item_name) if action.item_name else "unknown_item"
+        lines.append(f"if inventory_has(\"{iname}\") then")
+        for sa in action.true_actions:
+            for sl in _action_to_lua_inline(sa, obj_var, project):
+                lines.append(f"    {sl}")
+        if action.false_actions:
+            lines.append("else")
+            for sa in action.false_actions:
+                for sl in _action_to_lua_inline(sa, obj_var, project):
+                    lines.append(f"    {sl}")
+        lines.append("end")
+
+    elif t == "if_save_exists":
+        lines.append("if save_exists() then")
+        for sa in action.true_actions:
+            for sl in _action_to_lua_inline(sa, obj_var, project):
+                lines.append(f"    {sl}")
+        if action.false_actions:
+            lines.append("else")
+            for sa in action.false_actions:
+                for sl in _action_to_lua_inline(sa, obj_var, project):
+                    lines.append(f"    {sl}")
+        lines.append("end")
+
+    elif t == "set_label_text":
+        def_id = action.object_def_id or ""
+        tgt = _resolve_target_name(def_id, project) if (project and def_id) else _safe_name(def_id)
+        new_text = action.dialogue_text or ""
+        if tgt:
+            lines.append(f"{tgt}_text = {_lua_str(new_text)}")
+        else:
+            lines.append("-- set_label_text: no label object specified")
+
+    elif t == "set_label_text_var":
+        def_id = action.object_def_id or ""
+        tgt = _resolve_target_name(def_id, project) if (project and def_id) else _safe_name(def_id)
+        vn = _safe_name(action.var_name or "")
+        if tgt and vn:
+            lines.append(f'{tgt}_text = tostring({vn} or "")')
+        else:
+            lines.append("-- set_label_text_var: missing label or variable name")
+
+    elif t == "set_label_color":
+        def_id = action.object_def_id or ""
+        tgt = _resolve_target_name(def_id, project) if (project and def_id) else _safe_name(def_id)
+        hx = (action.color or "#ffffff").lstrip('#')
+        try:
+            cr, cg, cb = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+        except (ValueError, IndexError):
+            cr, cg, cb = 255, 255, 255
+        if tgt:
+            lines.append(f"{tgt}_text_r = {cr}")
+            lines.append(f"{tgt}_text_g = {cg}")
+            lines.append(f"{tgt}_text_b = {cb}")
+        else:
+            lines.append("-- set_label_color: no label object specified")
+
+    elif t == "set_label_size":
+        def_id = action.object_def_id or ""
+        tgt = _resolve_target_name(def_id, project) if (project and def_id) else _safe_name(def_id)
+        size = action.frame_index  # frame_index reused for font size target
+        if tgt:
+            lines.append(f"{tgt}_font_size = {size}")
+        else:
+            lines.append("-- set_label_size: no label object specified")
+
     elif t not in ("none", ""):
         lines.append(f"-- [{t}] not yet implemented in LPP exporter")
 
@@ -583,65 +1097,6 @@ def _make_ani_lib() -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-#  TILELAYER CHUNK DRAW HELPER — emitted into scene Lua
-# ─────────────────────────────────────────────────────────────
-
-def _emit_tilelayer_draws(scene, project, out: list, indent: str = "        "):
-    """
-    Emit draw calls for all TileLayer components in a scene, sorted by draw_layer.
-    Draws _cx0-1 to _cx0+2 horizontally (4 columns) so chunks are buffered one
-    column ahead in both horizontal directions before the camera center reaches them.
-    Vertically draws 2 rows (_cy0 to _cy0+1).
-    """
-    tile_layers = sorted(
-        [c for c in scene.components if c.component_type == "TileLayer"],
-        key=lambda c: c.config.get("draw_layer", 0)
-    )
-    if not tile_layers:
-        return
-
-    for comp in tile_layers:
-        ts_id = comp.config.get("tileset_id")
-        if not ts_id:
-            continue
-        ts = project.get_tileset(ts_id)
-        if ts is None:
-            continue
-
-        safe_id   = comp.id.replace("-", "_")
-        tile_size = ts.tile_size
-        map_w     = comp.config.get("map_width",  30)
-        map_h     = comp.config.get("map_height", 17)
-        world_w   = map_w * tile_size
-        world_h   = map_h * tile_size
-
-        import math
-        chunks_x = math.ceil(world_w / CHUNK_SIZE)
-        chunks_y = math.ceil(world_h / CHUNK_SIZE)
-
-        out.append(f"{indent}-- TileLayer {safe_id} (draw_layer {comp.config.get('draw_layer', 0)})")
-        out.append(f"{indent}do")
-        out.append(f"{indent}    local _cam_left = camera.x - 480")
-        out.append(f"{indent}    local _cam_top  = camera.y - 272")
-        out.append(f"{indent}    local _cx0 = math.floor(_cam_left / {CHUNK_SIZE})")
-        out.append(f"{indent}    local _cy0 = math.floor(_cam_top  / {CHUNK_SIZE})")
-        out.append(f"{indent}    for _dcy = _cy0, _cy0 + 1 do")
-        out.append(f"{indent}        for _dcx = _cx0 - 1, _cx0 + 2 do")
-        out.append(f"{indent}            if _dcx >= 0 and _dcx < {chunks_x} and _dcy >= 0 and _dcy < {chunks_y} then")
-        out.append(f"{indent}                local _key = 'tl_{safe_id}_' .. _dcx .. '_' .. _dcy")
-        out.append(f"{indent}                local _img = tile_chunks[_key]")
-        out.append(f"{indent}                if _img then")
-        out.append(f"{indent}                    local _dx = _dcx * {CHUNK_SIZE} - _cam_left + shake_offset_x")
-        out.append(f"{indent}                    local _dy = _dcy * {CHUNK_SIZE} - _cam_top  + shake_offset_y")
-        out.append(f"{indent}                    Graphics.drawImage(_dx, _dy, _img)")
-        out.append(f"{indent}                end")
-        out.append(f"{indent}            end")
-        out.append(f"{indent}        end")
-        out.append(f"{indent}    end")
-        out.append(f"{indent}end")
-
-
-# ─────────────────────────────────────────────────────────────
 #  2D SCENE → LUA
 # ─────────────────────────────────────────────────────────────
 
@@ -678,31 +1133,46 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         od = project.get_object_def(po.object_def_id)
         if od and od.behavior_type != "Camera":
             vname = _safe_name(od.name)
-            out.append(f"    {vname}_x       = {po.x}")
-            out.append(f"    {vname}_y       = {po.y}")
-            out.append(f"    {vname}_visible = {_lua_bool(po.visible)}")
-            if od.behavior_type == "Animation" and getattr(od, "ani_file_id", ""):
-                ani_play_on_spawn = getattr(od, "ani_play_on_spawn", True)
-                ani_start_paused  = getattr(od, "ani_start_paused",  False)
-                ani_pause_frame   = getattr(od, "ani_pause_frame",   0)
-                ani_fps_override  = getattr(od, "ani_fps_override",  0)
-                ani_loop          = getattr(od, "ani_loop",          True)
-                ani_playing       = "true" if ani_play_on_spawn and not ani_start_paused else "false"
-                start_frame       = ani_pause_frame if ani_start_paused else 0
+            # PlacedObject.opacity is 0.0-1.0, convert to 0-255 for Lua
+            opacity_255 = int(round(po.opacity * 255))
+            out.append(f"    {vname}_x          = {po.x}")
+            out.append(f"    {vname}_y          = {po.y}")
+            out.append(f"    {vname}_visible    = {_lua_bool(po.visible)}")
+            is_sprite = od.behavior_type not in ("GUI_Panel", "GUI_Label", "GUI_Button")
+            if is_sprite:
+                out.append(f"    {vname}_start_x   = {po.x}")
+                out.append(f"    {vname}_start_y   = {po.y}")
+                out.append(f"    {vname}_scale     = {po.scale}")
+                out.append(f"    {vname}_rotation  = {po.rotation}")
+                out.append(f"    {vname}_opacity   = {opacity_255}")
+                out.append(f"    {vname}_spin_speed = 0.0")
+                out.append(f"    {vname}_interactable = true")
+            if od.behavior_type == "GUI_Label":
+                out.append(f'    {vname}_text = {_lua_str(od.gui_text)}')
+                hx = od.gui_text_color.lstrip('#')
+                lr, lg, lb = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+                out.append(f'    {vname}_text_r = {lr}')
+                out.append(f'    {vname}_text_g = {lg}')
+                out.append(f'    {vname}_text_b = {lb}')
+                out.append(f'    {vname}_font_size = {od.gui_font_size}')
+            if od.behavior_type == "Animation" and od.ani_file_id:
+                ani_playing = "true" if od.ani_play_on_spawn and not od.ani_start_paused else "false"
+                start_frame = od.ani_pause_frame if od.ani_start_paused else 0
                 out.append(f"    {vname}_ani_id      = {_lua_str(od.ani_file_id)}")
                 out.append(f"    {vname}_ani_frame   = {start_frame}")
                 out.append(f"    {vname}_ani_playing = {ani_playing}")
                 out.append(f"    {vname}_ani_timer   = 0")
-                out.append(f"    {vname}_ani_loop    = {_lua_bool(ani_loop)}")
-                out.append(f"    {vname}_ani_fps     = {ani_fps_override}")
+                out.append(f"    {vname}_ani_loop    = {_lua_bool(od.ani_loop)}")
+                out.append(f"    {vname}_ani_fps     = {od.ani_fps_override}")
                 out.append(f"    {vname}_ani_done    = false")
 
+    # hold timers for on_input hold_for behaviors
     for po in scene.placed_objects:
         od = project.get_object_def(po.object_def_id)
         if od:
             all_behaviors = list(od.behaviors) + list(po.instance_behaviors)
             for beh in all_behaviors:
-                if beh.trigger == "on_input" and getattr(beh, "input_action_name", ""):
+                if beh.trigger == "on_input" and beh.input_action_name:
                     ia = next((a for a in project.game_data.input_actions
                                if a.name == beh.input_action_name), None)
                     if ia and ia.event == "hold_for":
@@ -760,6 +1230,8 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
     if scene.role == "start":
         out.append("    local chosen = false")
         out.append("    while not chosen do")
+        out.append("        controls_update()")
+        out.append("        _signals = {}")
         out.append("        Graphics.initBlend()")
         out.append("        Screen.clear()")
         if scene_bg:
@@ -770,7 +1242,6 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         out.append('        end')
         out.append("        Graphics.termBlend()")
         out.append("        Screen.flip()")
-        out.append("        controls_update()")
         out.append("        if controls_released(SCE_CTRL_START) then os.exit() end")
         out.append("        if controls_released(SCE_CTRL_CROSS) then")
         if project.game_data.save_enabled:
@@ -796,6 +1267,8 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             out.append("    delete_save()")
         out.append("    local waiting = true")
         out.append("    while waiting do")
+        out.append("        controls_update()")
+        out.append("        _signals = {}")
         out.append("        Graphics.initBlend()")
         out.append("        Screen.clear()")
         if scene_bg:
@@ -808,7 +1281,6 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         out.append('        end')
         out.append("        Graphics.termBlend()")
         out.append("        Screen.flip()")
-        out.append("        controls_update()")
         out.append("        if controls_released(SCE_CTRL_START) then")
         out.append("            if current_music then Sound.close(current_music) end")
         out.append("            waiting = false")
@@ -823,9 +1295,16 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         if vn_comp and vn_comp.config.get("auto_advance", False):
             out.append("    local auto_advance_timer = 0")
         out.append("    while not advance do")
+
+        # ── controls_update FIRST — always ───────────────────
+        out.append("        controls_update()")
+        out.append("        _signals = {}")
+
         out.append("        tween_update()")
         out.append("        shake_update()")
+        out.append("        flash_update()")
 
+        # ── per-object frame / button behaviors ──────────────
         for po in scene.placed_objects:
             od = project.get_object_def(po.object_def_id)
             if not od or od.behavior_type == "Camera":
@@ -858,12 +1337,30 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                         for line in _action_to_lua_inline(action, vname, project):
                             out.append(f"            {line}")
                     out.append(f"        end")
+                elif beh.trigger == "on_signal" and beh.bool_var:
+                    sig = beh.bool_var
+                    out.append(f"        if signal_fired({_lua_str(sig)}) then")
+                    for action in beh.actions:
+                        for line in _action_to_lua_inline(action, vname, project):
+                            out.append(f"            {line}")
+                    out.append(f"        end")
 
         out.append("        camera_update_follow()")
 
+        # spin
         for po in scene.placed_objects:
             od = project.get_object_def(po.object_def_id)
-            if od and od.behavior_type == "Animation" and getattr(od, "ani_file_id", ""):
+            if not od or od.behavior_type == "Camera":
+                continue
+            if od.behavior_type in ("GUI_Panel", "GUI_Label", "GUI_Button"):
+                continue
+            vname = _safe_name(od.name)
+            out.append(f"        if {vname}_spin_speed ~= 0 then {vname}_rotation = {vname}_rotation + {vname}_spin_speed end")
+
+        # animation advance
+        for po in scene.placed_objects:
+            od = project.get_object_def(po.object_def_id)
+            if od and od.behavior_type == "Animation" and od.ani_file_id:
                 vname = _safe_name(od.name)
                 out.append(f"        if {vname}_ani_playing and not {vname}_ani_done then")
                 out.append(f"            local _ani_d = ani_data[{vname}_ani_id]")
@@ -888,13 +1385,15 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 out.append(f"            end")
                 out.append(f"        end")
 
+        # zone detection
         if zone_objects:
             zone_instance_ids = {zpo.instance_id for zpo in zone_objects}
             mover_objects = [
                 (_po, project.get_object_def(_po.object_def_id))
                 for _po in scene.placed_objects
                 if _po.instance_id not in zone_instance_ids
-                and (lambda _od: _od and _od.behavior_type != "Camera")(project.get_object_def(_po.object_def_id))
+                and project.get_object_def(_po.object_def_id) is not None
+                and project.get_object_def(_po.object_def_id).behavior_type != "Camera"
             ]
             for zpo in zone_objects:
                 zod = project.get_object_def(zpo.object_def_id)
@@ -949,7 +1448,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f"        end")
                 iz_behs = [b for b in all_zbeh if b.trigger == "on_interact_zone"]
                 if iz_behs:
-                    out.append(f"        if _znow_{zname} and controls_released(SCE_CTRL_CROSS) then")
+                    out.append(f"        if _znow_{zname} and ({zname}_interactable ~= false) and controls_released(SCE_CTRL_CROSS) then")
                     for beh in iz_behs:
                         for action in beh.actions:
                             for line in _action_to_lua_inline(action, zname, project):
@@ -957,6 +1456,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f"        end")
                 out.append(f"        _zone_prev[{_lua_str(zpo.instance_id)}] = _znow_{zname}")
 
+        # ── DRAW ─────────────────────────────────────────────
         out.append("        Graphics.initBlend()")
         out.append("        Screen.clear()")
 
@@ -972,10 +1472,10 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             parallax = lc.config.get("parallax", 1.0)
             out.append(f"        if layer_{lname}_visible and images[{_lua_str(fname)}] then")
             if locked:
-                out.append(f"            Graphics.drawImage(0, 0, images[{_lua_str(fname)}])")
+                out.append(f"            Graphics.drawImage((layer_{lname}_scroll_x or 0), (layer_{lname}_scroll_y or 0), images[{_lua_str(fname)}])")
             else:
                 out.append(f"            local _lox, _loy = camera_bg_offset({parallax})")
-                out.append(f"            Graphics.drawImage(_lox + shake_offset_x, _loy + shake_offset_y, images[{_lua_str(fname)}])")
+                out.append(f"            Graphics.drawImage(_lox + (layer_{lname}_scroll_x or 0) + shake_offset_x, _loy + (layer_{lname}_scroll_y or 0) + shake_offset_y, images[{_lua_str(fname)}])")
             out.append("        end")
 
         def _emit_object_draw(po, locked=False):
@@ -989,38 +1489,53 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
 
             if od.behavior_type == "GUI_Panel":
                 hx = od.gui_bg_color.lstrip('#')
-                pr, pg, pb = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
+                pr, pg, pb = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
                 out.append(f'        if {vname}_visible then')
                 out.append(f'            local _pc = Color.new({pr}, {pg}, {pb}, {od.gui_bg_opacity})')
                 out.append(f'            Graphics.fillRect({vname}_x{shk_x}, {vname}_x + {od.gui_width}{shk_x}, {vname}_y{shk_y}, {vname}_y + {od.gui_height}{shk_y}, _pc)')
                 out.append(f'        end')
             elif od.behavior_type == "GUI_Label":
-                hx = od.gui_text_color.lstrip('#')
-                lr, lg, lb = int(hx[0:2],16), int(hx[2:4],16), int(hx[4:6],16)
                 font_var = "deff"
                 if od.gui_font_id:
                     fnt = project.get_font(od.gui_font_id)
                     if fnt and fnt.path:
                         font_var = f'fonts[{_lua_str(_asset_filename(fnt.path))}]'
-                text = _lua_str(od.gui_text)
+                align = od.gui_text_align
+                has_bg = od.gui_bg_opacity > 0
                 out.append(f'        if {vname}_visible and {font_var} then')
-                out.append(f'            local _lc = Color.new({lr}, {lg}, {lb})')
-                out.append(f'            Font.print({font_var}, {vname}_x{shk_x}, {vname}_y{shk_y}, {text}, _lc)')
+                if has_bg:
+                    hx_bg = od.gui_bg_color.lstrip('#')
+                    bgr, bgg, bgb = int(hx_bg[0:2], 16), int(hx_bg[2:4], 16), int(hx_bg[4:6], 16)
+                    out.append(f'            local _lbg = Color.new({bgr}, {bgg}, {bgb}, {od.gui_bg_opacity})')
+                    out.append(f'            Graphics.fillRect({vname}_x{shk_x}, {vname}_x + {od.gui_width}{shk_x}, {vname}_y{shk_y}, {vname}_y + {od.gui_height}{shk_y}, _lbg)')
+                out.append(f'            Font.setPixelSizes({font_var}, {vname}_font_size)')
+                out.append(f'            local _lc = Color.new({vname}_text_r, {vname}_text_g, {vname}_text_b)')
+                if align == "center":
+                    out.append(f'            local _tw = Font.getTextWidth({font_var}, {vname}_text)')
+                    out.append(f'            local _tx = {vname}_x + math.floor(({od.gui_width} - _tw) / 2)')
+                    out.append(f'            Font.print({font_var}, _tx{shk_x}, {vname}_y{shk_y}, {vname}_text, _lc)')
+                elif align == "right":
+                    out.append(f'            local _tw = Font.getTextWidth({font_var}, {vname}_text)')
+                    out.append(f'            local _tx = {vname}_x + {od.gui_width} - _tw')
+                    out.append(f'            Font.print({font_var}, _tx{shk_x}, {vname}_y{shk_y}, {vname}_text, _lc)')
+                else:
+                    out.append(f'            Font.print({font_var}, {vname}_x{shk_x}, {vname}_y{shk_y}, {vname}_text, _lc)')
                 out.append(f'        end')
             elif od.behavior_type == "GUI_Button":
                 hx_bg = od.gui_bg_color.lstrip('#')
-                br, bg_g, bb = int(hx_bg[0:2],16), int(hx_bg[2:4],16), int(hx_bg[4:6],16)
+                br, bg_g, bb = int(hx_bg[0:2], 16), int(hx_bg[2:4], 16), int(hx_bg[4:6], 16)
                 hx_tx = od.gui_text_color.lstrip('#')
-                tr, tg, tb = int(hx_tx[0:2],16), int(hx_tx[2:4],16), int(hx_tx[4:6],16)
+                tr, tg, tb = int(hx_tx[0:2], 16), int(hx_tx[2:4], 16), int(hx_tx[4:6], 16)
                 font_var = "deff"
                 if od.gui_font_id:
                     fnt = project.get_font(od.gui_font_id)
                     if fnt and fnt.path:
                         font_var = f'fonts[{_lua_str(_asset_filename(fnt.path))}]'
                 out.append(f'        if {vname}_visible then')
+                # FIXED: gui_image_id not gui_bg_image_id
                 bg_img = None
-                if getattr(od, "gui_bg_image_id", ""):
-                    bi = project.get_image(od.gui_bg_image_id)
+                if od.gui_image_id:
+                    bi = project.get_image(od.gui_image_id)
                     if bi and bi.path:
                         bg_img = _asset_filename(bi.path)
                 if bg_img:
@@ -1036,10 +1551,23 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f'            end')
                 out.append(f'        end')
             elif od.behavior_type == "Animation":
-                if getattr(od, "ani_file_id", ""):
+                if od.ani_file_id:
                     out.append(f'        if {vname}_visible then')
                     out.append(f'            {ws_call}')
-                    out.append(f'            ani_draw({vname}_ani_id, {vname}_ani_frame, _sx{shk_x}, _sy{shk_y})')
+                    out.append(f'            local _ani_d = ani_data[{vname}_ani_id]')
+                    out.append(f'            local _sheet = ani_sheets[{vname}_ani_id]')
+                    out.append(f'            if _ani_d and _sheet then')
+                    out.append(f'                local _cols = math.floor(_ani_d.sheet_width / _ani_d.frame_width)')
+                    out.append(f'                if _cols < 1 then _cols = 1 end')
+                    out.append(f'                local _fcol = {vname}_ani_frame % _cols')
+                    out.append(f'                local _frow = math.floor({vname}_ani_frame / _cols)')
+                    out.append(f'                local _fsx  = _fcol * _ani_d.frame_width')
+                    out.append(f'                local _fsy  = _frow * _ani_d.frame_height')
+                    out.append(f'                local _ox   = _sx + math.floor(_ani_d.frame_width  * {vname}_scale * 0.5){shk_x}')
+                    out.append(f'                local _oy   = _sy + math.floor(_ani_d.frame_height * {vname}_scale * 0.5){shk_y}')
+                    out.append(f'                local _tc   = Color.new(255, 255, 255, {vname}_opacity)')
+                    out.append(f'                Graphics.drawImageExtended(_ox, _oy, _sheet, _fsx, _fsy, _ani_d.frame_width, _ani_d.frame_height, {vname}_rotation, {vname}_scale, {vname}_scale, _tc)')
+                    out.append(f'            end')
                     out.append(f'        end')
             else:
                 if od.frames:
@@ -1048,7 +1576,12 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                         fname = _asset_filename(img.path)
                         out.append(f'        if {vname}_visible and images[{_lua_str(fname)}] then')
                         out.append(f'            {ws_call}')
-                        out.append(f'            Graphics.drawImage(_sx{shk_x}, _sy{shk_y}, images[{_lua_str(fname)}])')
+                        out.append(f'            local _iw = Graphics.getImageWidth(images[{_lua_str(fname)}])')
+                        out.append(f'            local _ih = Graphics.getImageHeight(images[{_lua_str(fname)}])')
+                        out.append(f'            local _tc = Color.new(255, 255, 255, {vname}_opacity)')
+                        out.append(f'            local _ox = _sx + math.floor(_iw * {vname}_scale * 0.5){shk_x}')
+                        out.append(f'            local _oy = _sy + math.floor(_ih * {vname}_scale * 0.5){shk_y}')
+                        out.append(f'            Graphics.drawImageExtended(_ox, _oy, images[{_lua_str(fname)}], 0, 0, _iw, _ih, {vname}_rotation, {vname}_scale, {vname}_scale, _tc)')
                         out.append(f'        end')
                 else:
                     all_behs = list(od.behaviors) + list(po.instance_behaviors)
@@ -1062,19 +1595,17 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                         out.append(f'            Graphics.fillRect(_sx{shk_x}, _sx + {zw}{shk_x}, _sy{shk_y}, _sy + {zh}{shk_y}, _zc)')
                         out.append(f'        end')
 
-        # ── Background (legacy, always first) ─────────────────
+        # background (legacy)
         if scene_bg:
             out.append(f"        local _bg_ox, _bg_oy = camera_bg_offset({scene_bg_parallax})")
             out.append(f'        if images[{_lua_str(scene_bg)}] then')
             out.append(f'            Graphics.drawImage(_bg_ox + shake_offset_x, _bg_oy + shake_offset_y, images[{_lua_str(scene_bg)}])')
             out.append(f'        end')
 
-        # ── Build interleaved draw order ──────────────────────
+        # interleaved draw order
         draw_slots = []
-
         for lc in scene_layers:
             draw_slots.append((lc.config.get("layer", 0), "layer", lc))
-
         for comp in scene.components:
             if comp.component_type == "TileLayer":
                 dl = comp.config.get("draw_layer", 0)
@@ -1092,7 +1623,6 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
 
         for dl, objects in world_objects_by_layer.items():
             draw_slots.append((dl, "objects", (objects, False)))
-
         for lid, objects in layer_object_groups.items():
             lc = layer_by_id[lid]
             order = lc.config.get("layer", 0) + 0.5
@@ -1143,6 +1673,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 for po in objects:
                     _emit_object_draw(po, locked=locked)
 
+        # VN dialog box
         if vn_comp:
             cfg       = vn_comp.config
             speaker   = cfg.get("speaker_name", "")
@@ -1150,7 +1681,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             non_empty = [l for l in lines_raw if l.strip()]
             fill      = cfg.get("fill_color", "#000000")
             opacity   = cfg.get("opacity", 150)
-            r, g, b   = int(fill[1:3],16), int(fill[3:5],16), int(fill[5:7],16)
+            r, g, b   = int(fill[1:3], 16), int(fill[3:5], 16), int(fill[5:7], 16)
             tex_id    = cfg.get("texture_image_id")
             if tex_id:
                 tex_img = project.get_image(tex_id)
@@ -1167,7 +1698,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 out.append(f'        Graphics.fillRect(40 + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, box_col)')
             if cfg.get("border", False):
                 bc            = cfg.get("border_color", "#ffffff")
-                br2, bg2, bb2 = int(bc[1:3],16), int(bc[3:5],16), int(bc[5:7],16)
+                br2, bg2, bb2 = int(bc[1:3], 16), int(bc[3:5], 16), int(bc[5:7], 16)
                 thick         = cfg.get("border_thickness", 2)
                 out.append(f'        local border_col = Color.new({br2}, {bg2}, {bb2})')
                 out.append(f'        Graphics.fillRect(40 + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, {335+thick} + shake_offset_y, border_col)')
@@ -1175,7 +1706,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 out.append(f'        Graphics.fillRect(40 + shake_offset_x, {40+thick} + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, border_col)')
                 out.append(f'        Graphics.fillRect({920-thick} + shake_offset_x, 920 + shake_offset_x, 335 + shake_offset_y, 535 + shake_offset_y, border_col)')
             tc            = cfg.get("text_color", "#ffffff")
-            tr2, tg2, tb2 = int(tc[1:3],16), int(tc[3:5],16), int(tc[5:7],16)
+            tr2, tg2, tb2 = int(tc[1:3], 16), int(tc[3:5], 16), int(tc[5:7], 16)
             shadow        = cfg.get("shadow", True)
             out.append(f'        local txt_col = Color.new({tr2}, {tg2}, {tb2})')
             font_id  = cfg.get("font_id")
@@ -1188,7 +1719,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             if speaker:
                 nametag_pos = cfg.get("nametag_position", "inside box top")
                 nc          = cfg.get("nametag_color", "#333333")
-                nr, ng, nb  = int(nc[1:3],16), int(nc[3:5],16), int(nc[5:7],16)
+                nr, ng, nb  = int(nc[1:3], 16), int(nc[3:5], 16), int(nc[5:7], 16)
                 name_y      = 345 if nametag_pos == "inside box top" else 320
                 tag_bg_y    = name_y - 5
                 out.append(f'        local tag_col = Color.new({nr}, {ng}, {nb}, 200)')
@@ -1203,9 +1734,28 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 out.append(f'        if {font_var} then Font.print({font_var}, 60 + shake_offset_x, {line_y} + shake_offset_y, {_lua_str(ln)}, txt_col) end')
                 line_y += 35
 
+        # dynamic objects
+        out.append("        -- draw dynamically created objects")
+        out.append("        for _liid, _lo in pairs(_live_objects) do")
+        out.append("            if _lo.visible then")
+        out.append("                local _lsx, _lsy = world_to_screen(_lo.x, _lo.y)")
+        out.append("                local _limg = _lo.image and images[_lo.image]")
+        out.append("                if _limg then")
+        out.append("                    local _liw = Graphics.getImageWidth(_limg)")
+        out.append("                    local _lih = Graphics.getImageHeight(_limg)")
+        out.append("                    local _ltc = Color.new(255, 255, 255, _lo.opacity)")
+        out.append("                    local _lox = _lsx + math.floor(_liw * _lo.scale * 0.5) + shake_offset_x")
+        out.append("                    local _loy = _lsy + math.floor(_lih * _lo.scale * 0.5) + shake_offset_y")
+        out.append("                    Graphics.drawImageExtended(_lox, _loy, _limg, 0, 0, _liw, _lih, _lo.rotation, _lo.scale, _lo.scale, _ltc)")
+        out.append("                end")
+        out.append("            end")
+        out.append("        end")
+
+        out.append("        flash_draw()")
         out.append("        Graphics.termBlend()")
         out.append("        Screen.flip()")
-        out.append("        controls_update()")
+
+        # START to quit
         out.append("        if controls_released(SCE_CTRL_START) then")
         if project.game_data.save_enabled:
             out.append("            save_progress(current_scene)")
@@ -1213,20 +1763,21 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         out.append("            os.exit()")
         out.append("        end")
 
+        # on_input behaviors
         for po in scene.placed_objects:
             od = project.get_object_def(po.object_def_id)
             if od and od.behavior_type != "Camera":
                 vname         = _safe_name(od.name)
                 all_behaviors = list(od.behaviors) + list(po.instance_behaviors)
                 for beh in all_behaviors:
-                    if beh.trigger == "on_input" and getattr(beh, "input_action_name", ""):
+                    if beh.trigger == "on_input" and beh.input_action_name:
                         ia = next((a for a in project.game_data.input_actions
                                    if a.name == beh.input_action_name), None)
                         if ia:
                             btn = _button_constant(ia.button)
                             if ia.event == "hold_for":
                                 timer_var = f"_hold_{_safe_name(ia.name)}_timer"
-                                frames    = int(getattr(ia, "hold_duration", 2.0) * 60)
+                                frames    = int(ia.hold_duration * 60)
                                 out.append(f"        if controls_held({btn}) then")
                                 out.append(f"            {timer_var} = {timer_var} + 1")
                                 out.append(f"            if {timer_var} == {frames} then")
@@ -1245,6 +1796,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                                         out.append(f"            {line}")
                                 out.append(f"        end")
 
+        # VN advance
         if vn_comp:
             cfg = vn_comp.config
             if cfg.get("advance", True):
@@ -1267,8 +1819,9 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 out.append(f"        end")
                 out.append(f"        auto_advance_timer = auto_advance_timer + 1")
 
-        out.append("    end")
+        out.append("    end")  # end while
 
+        # transition
         trans_comp = next((c for c in scene.components if c.component_type == "Transition"), None)
         if trans_comp:
             trans_id     = trans_comp.config.get("trans_file_id", "")
@@ -1295,9 +1848,9 @@ def _scene_3d_to_lua(scene, scene_num: int, project) -> str:
     out.append("")
     out.append(f"function scene_{scene_num}()")
     md         = scene.map_data
-    mode       = getattr(scene, "movement_mode", "free")
-    move_speed = getattr(scene, "move_speed", 5)
-    turn_speed = getattr(scene, "turn_speed", 50)
+    mode       = scene.movement_mode
+    move_speed = scene.move_speed
+    turn_speed = scene.turn_speed
     cells_str = ", ".join(str(c) for c in md.cells)
     out.append(f"    local map_cells = {{ {cells_str} }}")
     out.append(f"    for i = 1, #map_cells do")
@@ -1310,9 +1863,9 @@ def _scene_3d_to_lua(scene, scene_num: int, project) -> str:
     out.append(f"            end")
     out.append(f"        end")
     out.append(f"    end")
-    fr, fg, fb = int(md.floor_color[1:3],16), int(md.floor_color[3:5],16), int(md.floor_color[5:7],16)
-    sr, sg, sb = int(md.sky_color[1:3],16),   int(md.sky_color[3:5],16),   int(md.sky_color[5:7],16)
-    wr, wg, wb = int(md.wall_color[1:3],16),  int(md.wall_color[3:5],16),  int(md.wall_color[5:7],16)
+    fr, fg, fb = int(md.floor_color[1:3], 16), int(md.floor_color[3:5], 16), int(md.floor_color[5:7], 16)
+    sr, sg, sb = int(md.sky_color[1:3], 16),   int(md.sky_color[3:5], 16),   int(md.sky_color[5:7], 16)
+    wr, wg, wb = int(md.wall_color[1:3], 16),  int(md.wall_color[3:5], 16),  int(md.wall_color[5:7], 16)
     out.append(f"    RayCast3D.setResolution(960, 544)")
     out.append(f"    RayCast3D.setViewsize(60)")
     out.append(f"    RayCast3D.loadMap(map_cells, {md.width}, {md.height}, {md.tile_size}, {md.wall_height})")
@@ -1327,6 +1880,7 @@ def _scene_3d_to_lua(scene, scene_num: int, project) -> str:
     out.append("    local advance = false")
     out.append("    while not advance do")
     out.append("        controls_update()")
+    out.append("        _signals = {}")
     out.append("        if controls_released(SCE_CTRL_START) then")
     if project.game_data.save_enabled:
         out.append("            save_progress(current_scene)")
@@ -1356,6 +1910,36 @@ def _scene_3d_to_lua(scene, scene_num: int, project) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+#  COLLISION LIB
+# ─────────────────────────────────────────────────────────────
+
+def _make_collision_lib() -> str:
+    lines = [
+        "-- Collision grid helpers",
+        "collision_grids = {}",
+        "",
+        "function check_collision(grid, wx, wy)",
+        "    local col = math.floor(wx / grid.tile_size)",
+        "    local row = math.floor(wy / grid.tile_size)",
+        "    if col < 0 or col >= grid.map_width or row < 0 or row >= grid.map_height then",
+        "        return true",
+        "    end",
+        "    local idx = row * grid.map_width + col + 1",
+        "    return (grid.cells[idx] or 0) == 1",
+        "end",
+        "",
+        "function check_collision_rect(grid, wx, wy, w, h)",
+        "    if check_collision(grid, wx,     wy    ) then return true end",
+        "    if check_collision(grid, wx+w-1, wy    ) then return true end",
+        "    if check_collision(grid, wx,     wy+h-1) then return true end",
+        "    if check_collision(grid, wx+w-1, wy+h-1) then return true end",
+        "    return false",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
 #  MAIN EXPORT ENTRY POINT
 # ─────────────────────────────────────────────────────────────
 
@@ -1367,6 +1951,7 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
     files["lib/tween.lua"]    = _make_tween_lib()
     files["lib/camera.lua"]   = _make_camera_lib()
     files["lib/shake.lua"]    = _make_shake_lib()
+    files["lib/flash.lua"]    = _make_flash_lib()
     if project.game_data.save_enabled:
         files["lib/save.lua"] = _make_save_lib(tid)
 
@@ -1392,6 +1977,7 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
     idx.append("require('lib/tween')")
     idx.append("require('lib/camera')")
     idx.append("require('lib/shake')")
+    idx.append("require('lib/flash')")
     idx.append("require('lib/controls')")
     if project.game_data.save_enabled:
         idx.append("require('lib/save')")
@@ -1422,13 +2008,16 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
                 img = project.get_image(comp.config.get("image_id", ""))
                 if img and img.path:
                     all_image_paths.add(img.path)
-        for po in scene.placed_objects:
-            od = project.get_object_def(po.object_def_id)
-            if od:
-                for fr in od.frames:
-                    img = project.get_image(fr.image_id) if fr.image_id else None
-                    if img and img.path:
-                        all_image_paths.add(img.path)
+    # include ALL object defs so create_object works for unplaced objects
+    for od in project.object_defs:
+        for fr in od.frames:
+            img = project.get_image(fr.image_id) if fr.image_id else None
+            if img and img.path:
+                all_image_paths.add(img.path)
+        if od.gui_image_id:
+            img = project.get_image(od.gui_image_id)
+            if img and img.path:
+                all_image_paths.add(img.path)
 
     idx.append("images = {}")
     for path in sorted(all_image_paths):
@@ -1480,14 +2069,46 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
                         )
         idx.append("")
 
+    has_collision_layers = any(
+        comp.component_type == "CollisionLayer"
+        for scene in project.scenes
+        for comp in scene.components
+    )
+    if has_collision_layers:
+        idx.append("-- ─── COLLISION GRIDS ────────────────────────────────────")
+        idx.append(_make_collision_lib())
+        for scene in project.scenes:
+            for comp in scene.components:
+                if comp.component_type != "CollisionLayer":
+                    continue
+                safe_id  = comp.id.replace("-", "_")
+                map_w    = comp.config.get("map_width",  30)
+                map_h    = comp.config.get("map_height", 17)
+                tile_sz  = comp.config.get("tile_size",  32)
+                tiles    = comp.config.get("tiles", [])
+                needed   = map_w * map_h
+                cells    = list(tiles[:needed])
+                while len(cells) < needed:
+                    cells.append(0)
+                cells_str = ", ".join(str(c) for c in cells)
+                lname = comp.config.get("layer_name", "") or safe_id
+                idx.append(f'-- CollisionLayer: {lname}')
+                idx.append(f'collision_grids[{_lua_str(comp.id)}] = {{')
+                idx.append(f'    map_width  = {map_w},')
+                idx.append(f'    map_height = {map_h},')
+                idx.append(f'    tile_size  = {tile_sz},')
+                idx.append(f'    cells      = {{ {cells_str} }},')
+                idx.append(f'}}')
+        idx.append("")
+
     ani_files = list(set(
         od.ani_file_id
         for od in project.object_defs
-        if od.behavior_type == "Animation" and getattr(od, "ani_file_id", "")
+        if od.behavior_type == "Animation" and od.ani_file_id
     ))
     if ani_files:
         for ani_id in sorted(ani_files):
-            ani_obj = project.get_animation_export(ani_id) if hasattr(project, 'get_animation_export') else None
+            ani_obj = project.get_animation_export(ani_id)
             if ani_obj:
                 idx.append(f'ani_data[{_lua_str(ani_id)}] = {{')
                 idx.append(f'    frame_count  = {ani_obj.frame_count},')
@@ -1509,7 +2130,7 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
     ))
     if trans_files:
         for trans_id in sorted(trans_files):
-            trans_obj = project.get_transition_export(trans_id) if hasattr(project, 'get_transition_export') else None
+            trans_obj = project.get_transition_export(trans_id)
             if trans_obj:
                 idx.append(f'trans_data[{_lua_str(trans_id)}] = {{')
                 idx.append(f'    frame_count  = {trans_obj.frame_count},')
@@ -1538,6 +2159,30 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
     idx.append("current_scene = 1")
     idx.append("current_music = nil")
     idx.append("running       = true")
+    idx.append("_signals      = {}")
+    idx.append("_live_objects = {}")
+    idx.append("")
+    idx.append("-- ─── INVENTORY ──────────────────────────────────────────")
+    idx.append("inventory = {}")
+    idx.append("function inventory_has(name)")
+    idx.append("    for _, v in ipairs(inventory) do")
+    idx.append("        if v == name then return true end")
+    idx.append("    end")
+    idx.append("    return false")
+    idx.append("end")
+    idx.append("function inventory_add(name)")
+    idx.append("    if not inventory_has(name) then")
+    idx.append("        inventory[#inventory + 1] = name")
+    idx.append("    end")
+    idx.append("end")
+    idx.append("function inventory_remove(name)")
+    idx.append("    for i, v in ipairs(inventory) do")
+    idx.append("        if v == name then")
+    idx.append("            table.remove(inventory, i)")
+    idx.append("            return")
+    idx.append("        end")
+    idx.append("    end")
+    idx.append("end")
     idx.append("")
 
     if project.game_data.variables:
@@ -1597,8 +2242,8 @@ def get_asset_mapping(project: Project) -> dict[str, str]:
             mapping[fnt.path] = f"assets/fonts/{_asset_filename(fnt.path)}"
 
     for od in project.object_defs:
-        if od.behavior_type == "Animation" and getattr(od, "ani_file_id", ""):
-            ani_obj = project.get_animation_export(od.ani_file_id) if hasattr(project, 'get_animation_export') else None
+        if od.behavior_type == "Animation" and od.ani_file_id:
+            ani_obj = project.get_animation_export(od.ani_file_id)
             if ani_obj and ani_obj.spritesheet_path:
                 if project.project_folder:
                     full_path = os.path.join(
