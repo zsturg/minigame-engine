@@ -66,6 +66,7 @@ OBJECT_TRIGGERS = [
     ("on_exit",            "On Zone Exit",            "Zone",     "Fires once when a target stops overlapping this zone."),
     ("on_overlap",         "On Zone Overlap",         "Zone",     "Fires every frame while a target overlaps this zone."),
     ("on_interact_zone",   "On Interact in Zone",     "Zone",     "Player presses interact while inside this zone."),
+    ("on_signal",          "On Signal",               "Signal",   "Fires when a named signal is emitted anywhere in the scene."),
 ]
 
 SCENE_TRIGGERS = [
@@ -168,8 +169,15 @@ ACTION_PALETTE = {
         ("delete_save",     "Delete Save",           "Erase the save file."),
         ("if_save_exists",  "If Save Exists",        "Branch: run actions based on whether a save file exists."),
     ],
+    "Signals": [
+        ("emit_signal",    "Emit Signal",           "Broadcast a named signal to any on_signal behaviors in this scene."),
+    ],
     "Movement": [
-        ("four_way_movement", "4-Way Movement",      "Move this object with the d-pad. No input setup required — just set speed and drop it on any object."),
+        ("four_way_movement",         "4-Way Movement",           "Move this object with the d-pad. No input setup required — just set speed and drop it on any object."),
+        ("four_way_movement_collide", "4-Way Movement (Collide)", "Move with d-pad, blocked by a CollisionLayer. Set speed, player size, and pick the collision layer."),
+        ("two_way_movement",          "2-Way Movement",           "Move left/right OR up/down with the d-pad. Choose axis and speed."),
+        ("two_way_movement_collide",  "2-Way Movement (Collide)", "2-way d-pad movement blocked by a CollisionLayer. Choose axis, speed, player size, and collision layer."),
+        ("fire_bullet",               "Fire Bullet",              "Move this object as a projectile each frame. Set direction and speed. Pair with Create Object to spawn it."),
     ],
     "Objects": [
         ("show_object",     "Show Object",           "Make a placed object visible."),
@@ -205,6 +213,12 @@ ACTION_PALETTE = {
         ("char_enter",      "Character Enter",       "Slide or fade a character into the scene from an edge."),
         ("char_exit",       "Character Exit",        "Slide or fade a character out of the scene toward an edge."),
         ("char_react",      "Character React",       "Play a brief shake or bounce on the character."),
+    ],
+    "GUI": [
+        ("set_label_text",     "Set Label Text",         "Replace the full text of a GUI_Label at runtime."),
+        ("set_label_text_var", "Set Label Text (Variable)", "Set a GUI_Label's text to the current value of a game variable."),
+        ("set_label_color",    "Set Label Color",        "Change the text color of a GUI_Label at runtime."),
+        ("set_label_size",     "Set Label Font Size",    "Change the font size of a GUI_Label at runtime."),
     ],
     "Debug": [
         ("log_message",     "Log Message",           "Print a message to the debug console. Does nothing in release builds."),
@@ -323,9 +337,41 @@ ACTION_FIELDS = {
                           ("duration",           "Seconds",         "dspin",    {"min":0.0,"max":5.0,"step":0.1})],
     "char_react":        [("object_def_id",      "Character",       "object",   {}),
                           ("var_value",          "Reaction",        "combo",    {"options":["shake","bounce","nod","spin_once"]})],
+    "set_label_text":    [("object_def_id",      "Label Object",    "object",   {}),
+                          ("dialogue_text",      "New Text",        "text",     {})],
+    "set_label_text_var":[("object_def_id",      "Label Object",    "object",   {}),
+                          ("var_name",           "Variable",        "text",     {})],
+    "set_label_color":   [("object_def_id",      "Label Object",    "object",   {}),
+                          ("color",              "Color (#rrggbb)", "text",     {})],
+    "set_label_size":    [("object_def_id",      "Label Object",    "object",   {}),
+                          ("frame_index",        "Size (px)",       "spin",     {"min":4,"max":128})],
     "log_message":       [("log_message",        "Message",         "text",     {})],
-    "four_way_movement": [("movement_speed",     "Speed (px/frame)","spin",     {"min":1,"max":20}),
+    "four_way_movement": [("movement_speed",     "Speed (px/frame)","dspin",     {"min":0.1,"max":20.0,"step":0.1}),
                           ("movement_style",     "Style",           "combo",    {"options":["instant","slide"]})],
+    "four_way_movement_collide": [
+        ("movement_speed",      "Speed (px/frame)", "dspin",   {"min":0.1,"max":20.0,"step":0.1}),
+        ("movement_style",      "Style",            "combo",  {"options":["instant","slide"]}),
+        ("collision_layer_id",  "Collision Layer",  "collision_layer", {}),
+        ("player_width",        "Player Width (px)","spin",   {"min":1,"max":512}),
+        ("player_height",       "Player Height (px)","spin",  {"min":1,"max":512}),
+    ],
+    "two_way_movement": [
+        ("movement_speed", "Speed (px/frame)", "dspin",  {"min":0.1,"max":20.0,"step":0.1}),
+        ("two_way_axis",   "Axis",             "combo", {"options":["horizontal","vertical"]}),
+        ("movement_style", "Style",            "combo", {"options":["instant","slide"]}),
+    ],
+    "two_way_movement_collide": [
+        ("movement_speed",     "Speed (px/frame)",  "dspin",            {"min":0.1,"max":20.0,"step":0.1}),
+        ("two_way_axis",       "Axis",               "combo",           {"options":["horizontal","vertical"]}),
+        ("movement_style",     "Style",              "combo",           {"options":["instant","slide"]}),
+        ("collision_layer_id", "Collision Layer",    "collision_layer", {}),
+        ("player_width",       "Player Width (px)",  "spin",            {"min":1,"max":512}),
+        ("player_height",      "Player Height (px)", "spin",            {"min":1,"max":512}),
+    ],
+    "fire_bullet": [
+        ("bullet_direction", "Direction",        "combo", {"options":["right","left","up","down"]}),
+        ("bullet_speed",     "Speed (px/frame)", "spin",  {"min":1,"max":40}),
+    ],
     "camera_move_to":    [("camera_target_x","Target X","spin",{"min":-9999,"max":9999}),("camera_target_y","Target Y","spin",{"min":-9999,"max":9999}),("camera_duration","Duration (sec)","dspin",{"min":0.0,"max":30.0,"step":0.1}),("camera_easing","Easing","combo",{"options":["linear","ease_in","ease_out","ease_in_out"]})],
     "camera_offset":     [("camera_offset_x","Offset X","spin",{"min":-9999,"max":9999}),("camera_offset_y","Offset Y","spin",{"min":-9999,"max":9999}),("camera_duration","Duration (sec)","dspin",{"min":0.0,"max":30.0,"step":0.1}),("camera_easing","Easing","combo",{"options":["linear","ease_in","ease_out","ease_in_out"]})],
     "camera_follow":     [("camera_follow_target_def_id","Object to Follow","object",{}),("camera_follow_offset_x","Offset X","spin",{"min":-999,"max":999}),("camera_follow_offset_y","Offset Y","spin",{"min":-999,"max":999})],
@@ -337,6 +383,7 @@ ACTION_FIELDS = {
     "ani_stop":          [("object_def_id","Target Object","object",{})],
     "ani_set_frame":     [("object_def_id","Target Object","object",{}),("ani_target_frame","Frame","spin",{"min":0,"max":9999})],
     "ani_set_speed":     [("object_def_id","Target Object","object",{}),("ani_fps","FPS","spin",{"min":1,"max":120})],
+    "emit_signal":       [("signal_name",        "Signal",          "signal",   {})],
 }
 
 
@@ -390,8 +437,16 @@ def _action_summary(action: BehaviorAction) -> str:
         "char_enter":        f"from {action.var_value}",
         "char_exit":         f"to {action.var_value}",
         "char_react":        action.var_value,
+        "set_label_text":    action.dialogue_text[:20],
+        "set_label_text_var":action.var_name,
+        "set_label_color":   action.color,
+        "set_label_size":    str(action.frame_index),
         "log_message":       action.log_message[:20],
         "four_way_movement": f"speed {getattr(action, 'movement_speed', 4)}px  {getattr(action, 'movement_style', 'instant')}",
+        "four_way_movement_collide": f"speed {getattr(action, 'movement_speed', 4)}px  collide",
+        "two_way_movement":          f"{getattr(action,'two_way_axis','horizontal')}  speed {getattr(action,'movement_speed',4)}px",
+        "two_way_movement_collide":  f"{getattr(action,'two_way_axis','horizontal')}  speed {getattr(action,'movement_speed',4)}px  collide",
+        "fire_bullet":               f"→ {getattr(action,'bullet_direction','right')}  {getattr(action,'bullet_speed',6)}px/f",
         "camera_move_to":    f"({getattr(action, 'camera_target_x', 0)},{getattr(action, 'camera_target_y', 0)})",
         "camera_offset":     f"({getattr(action, 'camera_offset_x', 0)},{getattr(action, 'camera_offset_y', 0)})",
         "camera_follow":     getattr(action, 'camera_follow_target_def_id', '') or "?",
@@ -403,6 +458,7 @@ def _action_summary(action: BehaviorAction) -> str:
         "ani_stop":          getattr(action, 'object_def_id', '') or "self",
         "ani_set_frame":     f"{getattr(action, 'object_def_id', '') or 'self'} → {getattr(action, 'ani_target_frame', 0)}",
         "ani_set_speed":     f"{getattr(action, 'object_def_id', '') or 'self'} → {getattr(action, 'ani_fps', 12)} fps",
+        "emit_signal":       f"📡 {getattr(action, 'signal_name', '?')}",
     }
     detail = details.get(t, "")
     return f"{name}  {detail}" if detail else name
@@ -818,6 +874,148 @@ class ActionPickerDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────
+#  BRANCH EDITOR  (mini action list for true/false branches)
+# ─────────────────────────────────────────────────────────────
+
+BRANCH_TYPES = {"if_variable", "if_flag", "if_has_item", "if_save_exists"}
+SIGNAL_TRIGGER = "on_signal"
+SIGNAL_ACTION  = "emit_signal"
+
+
+class BranchEditorWidget(QWidget):
+    """
+    A compact action list for editing one branch (true_actions or false_actions)
+    of a conditional BehaviorAction.  Does NOT nest further branch editors.
+    """
+    changed = pyqtSignal()
+
+    def __init__(self, label: str, branch_field: str, parent=None):
+        """
+        label        — displayed header, e.g. "✔ TRUE branch"
+        branch_field — attribute name on BehaviorAction: "true_actions" or "false_actions"
+        """
+        super().__init__(parent)
+        self._action:       BehaviorAction | None = None
+        self._project:      Project        | None = None
+        self._branch_field  = branch_field
+        self._build_ui(label)
+
+    def _build_ui(self, label: str):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 4, 0, 0)
+        root.setSpacing(2)
+
+        # Header row
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel(label)
+        lbl.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 10px; font-weight: 700;"
+            f" letter-spacing: 1.2px; background: transparent;"
+        )
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        ab = _small_btn("+", "Add action to branch", accent=True)
+        ab.clicked.connect(self._add)
+        db = _small_btn("x", "Remove selected action", danger=True)
+        db.clicked.connect(self._del)
+        ub = _small_btn("↑", "Move up")
+        ub.clicked.connect(self._up)
+        dnb = _small_btn("↓", "Move down")
+        dnb.clicked.connect(self._dn)
+        for b in (ab, db, ub, dnb):
+            hdr.addWidget(b)
+        root.addLayout(hdr)
+
+        self._list = QListWidget()
+        self._list.setFixedHeight(72)
+        self._list.setStyleSheet(f"""
+            QListWidget {{
+                background: {SURFACE}; border: 1px solid {BORDER};
+                border-radius: 4px; color: {TEXT}; outline: none;
+            }}
+            QListWidget::item {{
+                padding: 3px 7px; border-bottom: 1px solid {BORDER}; font-size: 11px;
+            }}
+            QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
+            QListWidget::item:hover:!selected {{ background: {SURFACE2}; }}
+        """)
+        root.addWidget(self._list)
+
+    # ── public API ────────────────────────────────────────────
+
+    def load(self, action: BehaviorAction, project: Project):
+        self._action  = action
+        self._project = project
+        self._refresh()
+
+    def clear(self):
+        self._action  = None
+        self._project = None
+        self._list.clear()
+
+    # ── internals ─────────────────────────────────────────────
+
+    def _branch(self) -> list:
+        if self._action is None:
+            return []
+        lst = getattr(self._action, self._branch_field, None)
+        if lst is None:
+            setattr(self._action, self._branch_field, [])
+            lst = getattr(self._action, self._branch_field)
+        return lst
+
+    def _refresh(self):
+        self._list.blockSignals(True)
+        prev = self._list.currentRow()
+        self._list.clear()
+        for i, a in enumerate(self._branch()):
+            self._list.addItem(f"{i+1:02d}. {_action_summary(a)}")
+        self._list.blockSignals(False)
+        self._list.setCurrentRow(max(0, min(prev, self._list.count() - 1)))
+
+    def _add(self):
+        if self._action is None:
+            return
+        dlg = ActionPickerDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        at = dlg.selected_action_type()
+        if not at:
+            return
+        self._branch().append(BehaviorAction(action_type=at))
+        self._refresh()
+        self._list.setCurrentRow(len(self._branch()) - 1)
+        self.changed.emit()
+
+    def _del(self):
+        row = self._list.currentRow()
+        branch = self._branch()
+        if 0 <= row < len(branch):
+            branch.pop(row)
+            self._refresh()
+            self.changed.emit()
+
+    def _up(self):
+        row = self._list.currentRow()
+        branch = self._branch()
+        if row > 0:
+            branch[row], branch[row - 1] = branch[row - 1], branch[row]
+            self._refresh()
+            self._list.setCurrentRow(row - 1)
+            self.changed.emit()
+
+    def _dn(self):
+        row = self._list.currentRow()
+        branch = self._branch()
+        if 0 <= row < len(branch) - 1:
+            branch[row], branch[row + 1] = branch[row + 1], branch[row]
+            self._refresh()
+            self._list.setCurrentRow(row + 1)
+            self.changed.emit()
+
+
+# ─────────────────────────────────────────────────────────────
 #  ACTION DETAIL PANEL
 # ─────────────────────────────────────────────────────────────
 
@@ -913,10 +1111,18 @@ class ActionDetailPanel(QWidget):
             elif wtype == "combo":
                 w = QComboBox()
                 w.setStyleSheet(fs)
-                for opt in extra.get("options", []):
+                options = extra.get("options", [])
+                for opt in options:
                     w.addItem(opt)
-                if cur in extra.get("options", []):
+                if cur in options:
                     w.setCurrentText(str(cur))
+                else:
+                    # cur is not a valid option for this combo (e.g. var_operator="set"
+                    # on a change_variable action) — snap to first option and persist it
+                    # immediately so the model stays in sync with what the widget shows.
+                    if options:
+                        w.setCurrentIndex(0)
+                        setattr(self._action, field_name, options[0])
                 w.currentTextChanged.connect(lambda v, fn=field_name: self._set(fn, v))
 
             elif wtype in ("audio", "image", "object"):
@@ -948,12 +1154,60 @@ class ActionDetailPanel(QWidget):
                     pass
                 w.valueChanged.connect(lambda v, fn=field_name: self._set(fn, v))
 
+            elif wtype == "signal":
+                w = QComboBox()
+                w.setStyleSheet(fs)
+                w.addItem("-- none --", "")
+                if self._project:
+                    for sig in self._project.game_data.signals:
+                        w.addItem(sig.name, sig.name)
+                for i in range(w.count()):
+                    if w.itemData(i) == cur:
+                        w.setCurrentIndex(i)
+                        break
+                w.currentIndexChanged.connect(lambda _, fn=field_name, ww=w: self._set(fn, ww.currentData() or ""))
+
+            elif wtype == "collision_layer":
+                w = QComboBox()
+                w.setStyleSheet(fs)
+                w.addItem("-- none --", "")
+                if self._project:
+                    for scene in self._project.scenes:
+                        for comp in scene.components:
+                            if comp.component_type == "CollisionLayer":
+                                lname = comp.config.get("layer_name", "") or comp.id
+                                w.addItem(lname, comp.id)
+                matched = False
+                for i in range(w.count()):
+                    if w.itemData(i) == cur:
+                        w.setCurrentIndex(i)
+                        matched = True
+                        break
+                # If no layer selected yet and at least one exists, default to it
+                if not matched and not cur and w.count() > 1:
+                    w.setCurrentIndex(1)
+                    if self._action:
+                        setattr(self._action, field_name, w.itemData(1) or "")
+                w.currentIndexChanged.connect(lambda _, fn=field_name, ww=w: self._set(fn, ww.currentData() or ""))
+
             else:
                 w = QLineEdit(str(cur or ""))
                 w.setStyleSheet(fs)
                 w.textChanged.connect(lambda v, fn=field_name: self._set(fn, v))
 
             self._layout.addWidget(w)
+
+        # Branch editors for if_variable / if_flag / if_has_item / if_save_exists
+        if self._action.action_type in BRANCH_TYPES:
+            self._layout.addWidget(_divider())
+            true_editor  = BranchEditorWidget("✔  TRUE branch",  "true_actions",  self)
+            false_editor = BranchEditorWidget("✘  FALSE branch", "false_actions", self)
+            true_editor.load(self._action, self._project)
+            false_editor.load(self._action, self._project)
+            true_editor.changed.connect(self.changed)
+            false_editor.changed.connect(self.changed)
+            self._layout.addWidget(true_editor)
+            self._layout.addWidget(false_editor)
 
         self._layout.addStretch()
         self._suppress = False
@@ -1057,6 +1311,18 @@ class BehaviorEditorWidget(QWidget):
         self._input_action_row.setVisible(False)
         root.addWidget(self._input_action_row)
 
+        # Signal name row (shown only when trigger == "on_signal")
+        self._signal_name_row = QWidget()
+        snr = QHBoxLayout(self._signal_name_row)
+        snr.setContentsMargins(0, 4, 0, 0)
+        snr.addWidget(QLabel("📡 Signal:"))
+        self.signal_name_combo = QComboBox()
+        self.signal_name_combo.setStyleSheet(fs)
+        snr.addWidget(self.signal_name_combo, stretch=1)
+        self.signal_name_combo.currentIndexChanged.connect(self._on_signal_name_changed)
+        self._signal_name_row.setVisible(False)
+        root.addWidget(self._signal_name_row)
+
         root.addWidget(_divider())
 
         # Action list header
@@ -1137,6 +1403,7 @@ class BehaviorEditorWidget(QWidget):
             self._update_trigger_label(b)
             self._update_button_row(b)
             self._update_input_action_row(b)
+            self._update_signal_name_row(b)
             self._suppress = False
             self._refresh_act()
         else:
@@ -1144,6 +1411,7 @@ class BehaviorEditorWidget(QWidget):
             self._trigger_label.setText("—")
             self._button_row.setVisible(False)
             self._input_action_row.setVisible(False)
+            self._signal_name_row.setVisible(False)
 
     def _change_trigger(self):
         if self._sel_beh < 0:
@@ -1159,6 +1427,7 @@ class BehaviorEditorWidget(QWidget):
         self._update_trigger_label(b)
         self._update_button_row(b)
         self._update_input_action_row(b)
+        self._update_signal_name_row(b)
         self._refresh_beh()
         self.changed.emit()
 
@@ -1205,6 +1474,32 @@ class BehaviorEditorWidget(QWidget):
                 self.input_action_combo.setCurrentIndex(idx)
             self._suppress = False
 
+
+    def _on_signal_name_changed(self, idx: int):
+        if self._suppress or self._sel_beh < 0:
+            return
+        b = self._behaviors[self._sel_beh]
+        b.signal_name = self.signal_name_combo.currentData() or ""
+        self._refresh_beh()
+        self.changed.emit()
+
+    def _update_signal_name_row(self, b):
+        """Show/hide and populate the signal name combo based on the current trigger."""
+        is_sig = b.trigger == "on_signal"
+        self._signal_name_row.setVisible(is_sig)
+        if is_sig and self._project:
+            self._suppress = True
+            self.signal_name_combo.clear()
+            self.signal_name_combo.addItem("-- none --", "")
+            for sig in self._project.game_data.signals:
+                self.signal_name_combo.addItem(sig.name, sig.name)
+            cur = getattr(b, "signal_name", "")
+            for i in range(self.signal_name_combo.count()):
+                if self.signal_name_combo.itemData(i) == cur:
+                    self.signal_name_combo.setCurrentIndex(i)
+                    break
+            self._suppress = False
+
     def _refresh_beh(self):
         self.beh_list.blockSignals(True)
         prev = self.beh_list.currentRow()
@@ -1216,6 +1511,8 @@ class BehaviorEditorWidget(QWidget):
                 label = f"{label}: {b.button}"
             elif b.trigger == "on_input" and getattr(b, "input_action_name", ""):
                 label = f"{label}: {b.input_action_name}"
+            elif b.trigger == "on_signal" and getattr(b, "signal_name", ""):
+                label = f"{label}: {b.signal_name}"
             self.beh_list.addItem(f"{label}  ({len(b.actions)} actions)")
         self.beh_list.setCurrentRow(prev)
         self.beh_list.blockSignals(False)
@@ -1317,11 +1614,14 @@ class BehaviorEditorWidget(QWidget):
         self._trigger_label.setText("—")
         self._button_row.setVisible(False)
         self._input_action_row.setVisible(False)
+        self._signal_name_row.setVisible(False)
         self.detail.clear()
         self._refresh_beh()
-        self.act_list.clear()
         if self._behaviors:
             self.beh_list.setCurrentRow(0)
+            b = self._behaviors[0]
+            if b.actions:
+                self.act_list.setCurrentRow(0)
 
     def clear(self):
         self._behaviors = []
@@ -1333,6 +1633,7 @@ class BehaviorEditorWidget(QWidget):
         self._trigger_label.setText("—")
         self._button_row.setVisible(False)
         self._input_action_row.setVisible(False)
+        self._signal_name_row.setVisible(False)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1629,6 +1930,87 @@ class SceneComponentsPanel(QWidget):
                 dir_cb.currentTextChanged.connect(lambda v, c=comp: self._cfg(c, "scroll_direction", v))
                 self._root.addWidget(dir_cb)
 
+            elif ct == "CollisionLayer":
+                # Layer name
+                lbl_nm = QLabel("Name:")
+                lbl_nm.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_nm)
+                name_edit = QLineEdit(comp.config.get("layer_name", ""))
+                name_edit.setStyleSheet(fs)
+                name_edit.setPlaceholderText("e.g. Walls, Floor Collision…")
+                name_edit.textChanged.connect(lambda v, c=comp: self._cfg(c, "layer_name", v))
+                self._root.addWidget(name_edit)
+
+                # Layer draw order
+                lbl_l = QLabel("Layer (draw order):")
+                lbl_l.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_l)
+                layer_spin = QSpinBox()
+                layer_spin.setStyleSheet(fs)
+                layer_spin.setRange(0, 99)
+                layer_spin.setValue(comp.config.get("layer", 0))
+                layer_spin.setToolTip("Invisible at runtime — draw order only matters for editor visibility")
+                layer_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "layer", v))
+                self._root.addWidget(layer_spin)
+
+                # Tile (cell) size
+                lbl_ts = QLabel("Cell size (px):")
+                lbl_ts.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_ts)
+                ts_spin = QSpinBox()
+                ts_spin.setStyleSheet(fs)
+                ts_spin.setRange(4, 512)
+                ts_spin.setValue(comp.config.get("tile_size", 32))
+                ts_spin.setToolTip("Grid cell size in pixels — independent of any tilemap layer")
+                ts_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "tile_size", v))
+                self._root.addWidget(ts_spin)
+
+                # Map width / height
+                lbl_mw = QLabel("Map width (cells):")
+                lbl_mw.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_mw)
+                mw_spin = QSpinBox()
+                mw_spin.setStyleSheet(fs)
+                mw_spin.setRange(1, 500)
+                mw_spin.setValue(comp.config.get("map_width", 30))
+                mw_spin.valueChanged.connect(
+                    lambda v, c=comp: self._on_collayer_size_changed(c, "map_width", v))
+                self._root.addWidget(mw_spin)
+
+                lbl_mh = QLabel("Map height (cells):")
+                lbl_mh.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_mh)
+                mh_spin = QSpinBox()
+                mh_spin.setStyleSheet(fs)
+                mh_spin.setRange(1, 500)
+                mh_spin.setValue(comp.config.get("map_height", 17))
+                mh_spin.valueChanged.connect(
+                    lambda v, c=comp: self._on_collayer_size_changed(c, "map_height", v))
+                self._root.addWidget(mh_spin)
+
+                # Info
+                tiles   = comp.config.get("tiles", [])
+                solid   = sum(1 for t in tiles if t == 1)
+                mw      = comp.config.get("map_width",  30)
+                mh_val  = comp.config.get("map_height", 17)
+                tsz     = comp.config.get("tile_size",  32)
+                info_lbl = QLabel(
+                    f"{mw}×{mh_val} cells  •  cell {tsz}px  •  {solid} solid"
+                )
+                info_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; background: transparent;")
+                self._root.addWidget(info_lbl)
+
+                # Paint button
+                paint_btn = QPushButton("Paint Collision ↓")
+                paint_btn.setStyleSheet(f"""
+                    QPushButton {{ background: #c0392b; color: white; border: none;
+                        border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 600; }}
+                    QPushButton:hover {{ background: #e74c3c; }}
+                """)
+                paint_btn.clicked.connect(
+                    lambda _, c=comp: self.tile_layer_selected.emit("__collision__:" + c.id))
+                self._root.addWidget(paint_btn)
+
             elif ct == "TileLayer":
                 # Tileset selector
                 lbl_ts = QLabel("Tileset:")
@@ -1831,6 +2213,25 @@ class SceneComponentsPanel(QWidget):
                     new_tiles.append(old_tiles[old_idx])
                 else:
                     new_tiles.append(-1)
+        comp.config["tiles"] = new_tiles
+        self.changed.emit()
+
+    def _on_collayer_size_changed(self, comp, key, value):
+        if self._suppress:
+            return
+        comp.config[key] = value
+        mw = comp.config.get("map_width", 30)
+        mh = comp.config.get("map_height", 17)
+        old_tiles = comp.config.get("tiles", [])
+        old_w = comp.config.get("map_width", mw) if key == "map_height" else (len(old_tiles) // mh if mh else mw)
+        new_tiles = []
+        for row in range(mh):
+            for col in range(mw):
+                old_idx = row * old_w + col
+                if old_idx < len(old_tiles) and col < old_w:
+                    new_tiles.append(old_tiles[old_idx])
+                else:
+                    new_tiles.append(0)
         comp.config["tiles"] = new_tiles
         self.changed.emit()
 
@@ -2183,6 +2584,8 @@ class VitaCanvas(QWidget):
         self._tile_tileset:     object           | None = None   # RegisteredTileset
         self._tile_palette_ref: object           | None = None   # TilePalette
         self._tile_painting:    bool             = False         # mouse held
+        self._collision_mode:   bool             = False         # painting a CollisionLayer
+        self._collision_paint_value: int          = 1              # 1=solid, 0=erase
         # Camera / world pan
         self._cam_x:         int    = 0
         self._cam_y:         int    = 0
@@ -2209,11 +2612,12 @@ class VitaCanvas(QWidget):
         self._grid_size = s
         self.update()
 
-    def set_tile_paint_mode(self, active: bool, tile_layer_comp, tileset, palette_ref):
+    def set_tile_paint_mode(self, active: bool, tile_layer_comp, tileset, palette_ref, collision_mode: bool = False):
         self._tile_paint_mode  = active
         self._tile_layer_comp  = tile_layer_comp
         self._tile_tileset     = tileset
         self._tile_palette_ref = palette_ref
+        self._collision_mode   = collision_mode
         if active:
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
@@ -2224,10 +2628,34 @@ class VitaCanvas(QWidget):
         self.update()
 
     def _paint_tile_at(self, canvas_x: int, canvas_y: int):
-        if self._tile_layer_comp is None or self._tile_tileset is None or self._tile_palette_ref is None:
+        if self._tile_layer_comp is None:
+            return
+        comp = self._tile_layer_comp
+
+        if self._collision_mode:
+            # CollisionLayer: no tileset needed, paint 1 (solid) or 0 (erase)
+            tile_size = comp.config.get("tile_size", 32)
+            map_w     = comp.config.get("map_width", 30)
+            map_h     = comp.config.get("map_height", 17)
+            col = canvas_x // tile_size
+            row = canvas_y // tile_size
+            if col < 0 or col >= map_w or row < 0 or row >= map_h:
+                return
+            tiles  = comp.config.get("tiles", [])
+            needed = map_w * map_h
+            if len(tiles) < needed:
+                tiles.extend([0] * (needed - len(tiles)))
+                comp.config["tiles"] = tiles
+            flat_idx  = row * map_w + col
+            new_val   = self._collision_paint_value
+            if tiles[flat_idx] != new_val:
+                tiles[flat_idx] = new_val
+                self.update()
+            return
+
+        if self._tile_tileset is None or self._tile_palette_ref is None:
             return
         ts        = self._tile_tileset
-        comp      = self._tile_layer_comp
         tile_size = ts.tile_size
         map_w     = comp.config.get("map_width", 30)
         map_h     = comp.config.get("map_height", 17)
@@ -2247,7 +2675,7 @@ class VitaCanvas(QWidget):
             self.update()
 
     def _world_size(self) -> tuple[int, int]:
-        """Return (world_w, world_h) in pixels from the largest TileLayer, or screen size."""
+        """Return (world_w, world_h) in pixels from TileLayers or Camera object bounds."""
         if self._scene is None:
             return VITA_W, VITA_H
         best_w, best_h = VITA_W, VITA_H
@@ -2261,6 +2689,13 @@ class VitaCanvas(QWidget):
             h = comp.config.get("map_height", 17) * tsz
             best_w = max(best_w, w)
             best_h = max(best_h, h)
+        # Also check Camera objects placed in this scene
+        if self._project:
+            for po in self._scene.placed_objects:
+                od = self._project.get_object_def(po.object_def_id)
+                if od and od.behavior_type == "Camera" and od.camera_bounds_enabled:
+                    best_w = max(best_w, od.camera_bounds_width)
+                    best_h = max(best_h, od.camera_bounds_height)
         return best_w, best_h
 
     def _clamp_cam(self):
@@ -2469,6 +2904,36 @@ class VitaCanvas(QWidget):
                         p.drawPixmap(po.x, po.y, w, h, px)
                     p.restore()
 
+        # CollisionLayer components — always drawn on top as an editor overlay
+        for comp in self._scene.components:
+            if comp.component_type != "CollisionLayer":
+                continue
+            tile_size = comp.config.get("tile_size", 32)
+            map_w     = comp.config.get("map_width",  30)
+            map_h     = comp.config.get("map_height", 17)
+            tiles     = comp.config.get("tiles", [])
+            # Always show grid lines for collision layers
+            p.save()
+            is_active = self._tile_paint_mode and self._collision_mode and self._tile_layer_comp is comp
+            # Draw solid cells
+            p.setPen(Qt.PenStyle.NoPen)
+            for row in range(map_h):
+                for col in range(map_w):
+                    flat = row * map_w + col
+                    if flat < len(tiles) and tiles[flat] == 1:
+                        p.setBrush(QBrush(QColor(255, 80, 80, 100)))
+                        p.drawRect(col * tile_size, row * tile_size, tile_size, tile_size)
+            # Grid lines — dimmer when not active, brighter when painting
+            grid_alpha = "99" if is_active else "44"
+            p.setPen(QPen(QColor("#ff5050" + grid_alpha), 1))
+            for col in range(map_w + 1):
+                x = col * tile_size
+                p.drawLine(x, 0, x, map_h * tile_size)
+            for row in range(map_h + 1):
+                y = row * tile_size
+                p.drawLine(0, y, map_w * tile_size, y)
+            p.restore()
+
         if 0 <= self._selected_row < len(self._scene.placed_objects):
             po = self._scene.placed_objects[self._selected_row]
             rect = self._obj_rect(po)
@@ -2566,6 +3031,9 @@ class VitaCanvas(QWidget):
         pos = event.position().toPoint()
         if self._tile_paint_mode:
             self._tile_painting = True
+            # RMB erases in collision mode, LMB paints solid
+            if self._collision_mode:
+                self._collision_paint_value = 0 if event.button() == Qt.MouseButton.RightButton else 1
             world_x = pos.x() + self._cam_x
             world_y = pos.y() + self._cam_y
             self._paint_tile_at(world_x, world_y)
@@ -2737,6 +3205,7 @@ class EditorTab(QWidget):
         self._build_ui()
 
     def _build_ui(self):
+        self._active_collision_comp_id: str | None = None
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -2949,16 +3418,42 @@ class EditorTab(QWidget):
         self._bottom_stack.setFixedHeight(150)
         self._bottom_stack.setCurrentIndex(0)
 
+    def _show_collision_painter(self, comp_id: str):
+        """Activate collision paint mode for the CollisionLayer with the given component id."""
+        if self._scene is None:
+            return
+        comp = next((c for c in self._scene.components if c.id == comp_id), None)
+        if comp is None:
+            return
+        # Switch to tile palette panel (reuse it as a toolbar for paint/erase hint)
+        if self._project:
+            self.tile_palette.load_project(self._project)
+        self.tile_palette.load_for_component(None)  # no tileset needed
+        self._bottom_stack.setFixedHeight(60)
+        self._bottom_stack.setCurrentIndex(1)
+        # Activate paint mode on canvas in collision mode
+        self.canvas.set_tile_paint_mode(True, comp, None, None, collision_mode=True)
+
     def _on_tile_layer_selected(self, tileset_id: str):
-        """Called when a TileLayer component's palette button is clicked."""
-        if tileset_id:
+        """Called when a TileLayer or CollisionLayer palette/paint button is clicked."""
+        if tileset_id.startswith("__collision__:"):
+            comp_id = tileset_id[len("__collision__:"):]
+            self._active_collision_comp_id = comp_id
+            self._show_collision_painter(comp_id)
+        elif tileset_id:
+            self._active_collision_comp_id = None
             self._show_tile_palette(tileset_id)
         else:
+            self._active_collision_comp_id = None
             self._show_project_explorer()
 
     def _on_paint_mode_changed(self, active: bool):
         """Toggle tile paint mode on the canvas."""
         if active:
+            # Check if we're in collision mode
+            if getattr(self, "_active_collision_comp_id", None):
+                # Already activated by _show_collision_painter — nothing to do
+                return
             # Find the active TileLayer component
             tile_layer = self._get_active_tile_layer()
             ts = self.tile_palette.current_tileset()
@@ -2968,6 +3463,7 @@ class EditorTab(QWidget):
                 # No valid layer — turn button back off
                 self.tile_palette.paint_btn.setChecked(False)
         else:
+            self._active_collision_comp_id = None
             self.canvas.set_tile_paint_mode(False, None, None, None)
 
     def _get_active_tile_layer(self):
@@ -3059,9 +3555,13 @@ class EditorTab(QWidget):
         item = lst.currentItem()
         if not item:
             return
+        import copy, json
         po = PlacedObject()
         po.object_def_id = item.data(Qt.ItemDataRole.UserRole)
         po.x, po.y = 400, 200
+        od = self._project.get_object_def(po.object_def_id)
+        if od and od.behaviors:
+            po.instance_behaviors = [Behavior.from_dict(json.loads(json.dumps(b.to_dict()))) for b in od.behaviors]
         self._scene.placed_objects.append(po)
         self._refresh_objs()
         row = len(self._scene.placed_objects) - 1
