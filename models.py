@@ -246,8 +246,14 @@ class BehaviorAction:
     log_message: str = ""
 
     # ── Movement prebuilts ───────────────────────────────────
-    movement_speed: int = 4
+    movement_speed: float = 1.0
     movement_style: str = "instant"   # "instant" | "slide"
+    collision_layer_id: str = ""
+    player_width:       int = 32
+    player_height:      int = 48
+    bullet_direction:   str = "right"       # right | left | up | down
+    bullet_speed:       int = 6             # px per frame
+    two_way_axis:       str = "horizontal"  # horizontal | vertical
 
     # ── Conditional input actions ────────────────────────────
     button: str = ""                   # cross, circle, square, triangle, dpad_up, etc.
@@ -275,17 +281,21 @@ class BehaviorAction:
 
     def to_dict(self):
         d = self.__dict__.copy()
-        # Serialize sub_actions recursively
-        if self.sub_actions:
-            d["sub_actions"] = [a.to_dict() if isinstance(a, BehaviorAction) else a for a in self.sub_actions]
+        # Serialize all nested action lists recursively
+        for key in ("sub_actions", "true_actions", "false_actions"):
+            lst = getattr(self, key, [])
+            if lst:
+                d[key] = [a.to_dict() if isinstance(a, BehaviorAction) else a for a in lst]
+            else:
+                d[key] = []
         return d
 
     @classmethod
     def from_dict(cls, d):
         obj = cls()
         for k, v in d.items():
-            if k == "sub_actions" and isinstance(v, list):
-                obj.sub_actions = [BehaviorAction.from_dict(sa) if isinstance(sa, dict) else sa for sa in v]
+            if k in ("sub_actions", "true_actions", "false_actions") and isinstance(v, list):
+                setattr(obj, k, [BehaviorAction.from_dict(sa) if isinstance(sa, dict) else sa for sa in v])
             elif hasattr(obj, k):
                 setattr(obj, k, v)
         return obj
@@ -356,6 +366,8 @@ class ObjectDefinition:
     gui_text: str = ""                  # display text for Label and Button
     gui_text_color: str = "#FFFFFF"     # text color
     gui_font_id: str = ""              # registered font ID (empty = default font)
+    gui_text_align: str = "left"        # text alignment: left | center | right (Label + Button)
+    gui_font_size: int = 16             # font size in pixels for Label and Button
     gui_bg_color: str = "#000000"      # background fill for Panel and Button
     gui_bg_opacity: int = 150          # background alpha (0-255) for Panel and Button
     gui_width: int = 200               # rectangle width for Panel and Button
@@ -396,6 +408,8 @@ class ObjectDefinition:
             "gui_text": self.gui_text,
             "gui_text_color": self.gui_text_color,
             "gui_font_id": self.gui_font_id,
+            "gui_text_align": self.gui_text_align,
+            "gui_font_size": self.gui_font_size,
             "gui_bg_color": self.gui_bg_color,
             "gui_bg_opacity": self.gui_bg_opacity,
             "gui_width": self.gui_width,
@@ -433,6 +447,8 @@ class ObjectDefinition:
         obj.gui_text = d.get("gui_text", "")
         obj.gui_text_color = d.get("gui_text_color", "#FFFFFF")
         obj.gui_font_id = d.get("gui_font_id", "")
+        obj.gui_text_align = d.get("gui_text_align", "left")
+        obj.gui_font_size = d.get("gui_font_size", 16)
         obj.gui_bg_color = d.get("gui_bg_color", "#000000")
         obj.gui_bg_opacity = d.get("gui_bg_opacity", 150)
         obj.gui_width = d.get("gui_width", 200)
@@ -514,6 +530,7 @@ COMPONENT_TYPES = [
     "Foreground",
     "Layer",
     "TileLayer",
+    "CollisionLayer",
     "Music",
     "VNDialogBox",
     "ChoiceMenu",
@@ -546,11 +563,26 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
         "parallax": 1.0,
     },
     "TileLayer": {
+        "layer_name": "New Tile Layer",
+        "layer": 0,              # unified draw order index (shared with Layer components)
         "tileset_id": None,      # RegisteredTileset.id
-        "map_width": 30,         # width in tiles  (30 = one screen wide at 32px)
-        "map_height": 17,        # height in tiles (17 = one screen tall at 32px)
+        "tile_size": 32,         # grid cell size in pixels
+        "map_width": 30,         # width in tiles
+        "map_height": 17,        # height in tiles
         "tiles": [],             # flat int array, len = map_width * map_height, -1 = empty
-        "draw_layer": 0,         # z-order; 0 = behind everything
+        "visible": True,
+        "scroll": False,
+        "scroll_speed": 1,
+        "scroll_direction": "horizontal",
+        "parallax": 1.0,
+    },
+    "CollisionLayer": {
+        "layer_name": "New Collision Layer",
+        "layer": 0,              # unified draw order index
+        "tile_size": 32,         # collision grid cell size in pixels (independent of any tile layer)
+        "map_width": 30,
+        "map_height": 17,
+        "tiles": [],             # flat int array, len = map_width * map_height, 0 = empty, 1 = solid
     },
     "Music": {
         "action": "keep",       # keep | change | stop
@@ -928,10 +960,27 @@ class InputAction:
 
 
 @dataclass
+class GameSignal:
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = "my_signal"
+
+    def to_dict(self):
+        return {"id": self.id, "name": self.name}
+
+    @classmethod
+    def from_dict(cls, d):
+        obj = cls()
+        obj.id = d.get("id", obj.id)
+        obj.name = d.get("name", obj.name)
+        return obj
+
+
+@dataclass
 class GameData:
     variables: list[GameVariable] = field(default_factory=list)
     inventory_items: list[InventoryItem] = field(default_factory=list)
     input_actions: list[InputAction] = field(default_factory=list)
+    signals: list[GameSignal] = field(default_factory=list)
     inventory_enabled: bool = False
     inventory_max: int = 20
     save_enabled: bool = True
@@ -942,6 +991,7 @@ class GameData:
             "variables": [v.to_dict() for v in self.variables],
             "inventory_items": [i.to_dict() for i in self.inventory_items],
             "input_actions": [a.to_dict() for a in self.input_actions],
+            "signals": [s.to_dict() for s in self.signals],
             "inventory_enabled": self.inventory_enabled,
             "inventory_max": self.inventory_max,
             "save_enabled": self.save_enabled,
@@ -954,6 +1004,7 @@ class GameData:
         gd.variables = [GameVariable.from_dict(v) for v in d.get("variables", [])]
         gd.inventory_items = [InventoryItem.from_dict(i) for i in d.get("inventory_items", [])]
         gd.input_actions = [InputAction.from_dict(a) for a in d.get("input_actions", [])]
+        gd.signals = [GameSignal.from_dict(s) for s in d.get("signals", [])]
         gd.inventory_enabled = d.get("inventory_enabled", False)
         gd.inventory_max = d.get("inventory_max", 20)
         gd.save_enabled = d.get("save_enabled", True)
