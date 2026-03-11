@@ -19,7 +19,7 @@ from PyQt6.QtGui import QColor, QPixmap, QIcon, QPainter
 from project_explorer import import_asset_to_project
 from models import (
     Project, RegisteredImage, RegisteredAudio, RegisteredFont,
-    GameVariable, InventoryItem, GameData, InputAction
+    GameVariable, InventoryItem, GameData, InputAction, GameSignal
 )
 
 # ── Colours (match main.py) ──────────────────────────────────
@@ -1105,6 +1105,172 @@ class InventoryPanel(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────
+#  SIGNALS PANEL
+# ─────────────────────────────────────────────────────────────
+
+class SignalsPanel(QWidget):
+    changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._signals: list[GameSignal] = []
+        self._current = -1
+        self._suppress = False
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Left list ────────────────────────────────────────
+        left = QWidget()
+        left.setFixedWidth(230)
+        left.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(8, 8, 8, 8)
+        lv.setSpacing(6)
+
+        self.sig_list = QListWidget()
+        self.sig_list.setStyleSheet(f"""
+            QListWidget {{
+                background: {SURFACE}; border: 1px solid {BORDER};
+                border-radius: 4px; color: {TEXT}; outline: none;
+            }}
+            QListWidget::item {{ padding: 8px 10px; border-radius: 3px; border-bottom: 1px solid {BORDER}; }}
+            QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
+            QListWidget::item:hover:!selected {{ background: {SURF2}; }}
+        """)
+        self.sig_list.currentRowChanged.connect(self._on_select)
+        lv.addWidget(self.sig_list)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+        add_btn = _btn("+ Add Signal", accent=True, small=True)
+        add_btn.clicked.connect(self._add)
+        del_btn = _btn("x", danger=True, small=True)
+        del_btn.setFixedWidth(32)
+        del_btn.clicked.connect(self._delete)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(del_btn)
+        lv.addLayout(btn_row)
+        root.addWidget(left)
+
+        # ── Right editor ─────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border: none; background: transparent;")
+        rw = QWidget()
+        rw.setStyleSheet(f"background: {DARK};")
+        self.rl = QVBoxLayout(rw)
+        self.rl.setContentsMargins(20, 16, 20, 20)
+        self.rl.setSpacing(8)
+
+        self.rl.addWidget(_section("SIGNAL"))
+        self.rl.addWidget(_divider())
+
+        self.rl.addWidget(_section("SIGNAL NAME"))
+        hint = QLabel("Used in emit_signal and on_signal behaviors.\nLowercase, underscores, no spaces.")
+        hint.setStyleSheet(f"color: {DIM}; font-size: 11px;")
+        hint.setWordWrap(True)
+        self.rl.addWidget(hint)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("player_died, door_opened…")
+        self.name_edit.setStyleSheet(_field_style())
+        self.name_edit.textChanged.connect(self._emit)
+        self.rl.addWidget(self.name_edit)
+
+        self.rl.addWidget(_section("DESCRIPTION (optional)"))
+        self.desc_edit = QLineEdit()
+        self.desc_edit.setPlaceholderText("What does this signal communicate?")
+        self.desc_edit.setStyleSheet(_field_style())
+        self.desc_edit.textChanged.connect(self._emit)
+        self.rl.addWidget(self.desc_edit)
+
+        usage_box = QLabel(
+            "📡  Emit with emit_signal action.\n"
+            "🎧  React with on_signal trigger."
+        )
+        usage_box.setStyleSheet(f"""
+            background: {SURF2}; color: {DIM};
+            border: 1px solid {BORDER}; border-radius: 4px;
+            padding: 10px; font-size: 11px; line-height: 1.6;
+        """)
+        usage_box.setWordWrap(True)
+        self.rl.addWidget(usage_box)
+
+        self.rl.addStretch()
+        scroll.setWidget(rw)
+        root.addWidget(scroll, stretch=1)
+
+        rw.setEnabled(False)
+        self._editor_widget = rw
+
+    def _add(self):
+        s = GameSignal(name="new_signal")
+        self._signals.append(s)
+        self._refresh_list()
+        self.sig_list.setCurrentRow(len(self._signals) - 1)
+        self.changed.emit()
+
+    def _delete(self):
+        row = self.sig_list.currentRow()
+        if 0 <= row < len(self._signals):
+            self._signals.pop(row)
+            self._refresh_list()
+            new = min(row, len(self._signals) - 1)
+            if new >= 0:
+                self.sig_list.setCurrentRow(new)
+            else:
+                self._current = -1
+                self._editor_widget.setEnabled(False)
+            self.changed.emit()
+
+    def _refresh_list(self):
+        self.sig_list.blockSignals(True)
+        self.sig_list.clear()
+        for s in self._signals:
+            item = QListWidgetItem(f"📡  {s.name}")
+            item.setForeground(QColor("#06b6d4"))
+            self.sig_list.addItem(item)
+        self.sig_list.blockSignals(False)
+
+    def _on_select(self, row: int):
+        if self._suppress:
+            return
+        if 0 <= row < len(self._signals):
+            self._current = row
+            s = self._signals[row]
+            self._suppress = True
+            self.name_edit.setText(s.name)
+            self.desc_edit.setText(getattr(s, "description", ""))
+            self._suppress = False
+            self._editor_widget.setEnabled(True)
+        else:
+            self._current = -1
+            self._editor_widget.setEnabled(False)
+
+    def _emit(self):
+        if self._suppress or self._current < 0:
+            return
+        s = self._signals[self._current]
+        s.name = self.name_edit.text().strip() or "unnamed_signal"
+        s.description = self.desc_edit.text().strip()
+        self._refresh_list()
+        self.changed.emit()
+
+    def load_signals(self, signals: list[GameSignal]):
+        self._signals = signals
+        self._refresh_list()
+        if self._signals:
+            self.sig_list.setCurrentRow(0)
+        else:
+            self._current = -1
+            self._editor_widget.setEnabled(False)
+
+
+# ─────────────────────────────────────────────────────────────
 #  INPUT PANEL
 # ─────────────────────────────────────────────────────────────
 
@@ -1594,6 +1760,11 @@ class GameDataTab(QWidget):
         self.input_panel.changed.connect(self._on_changed)
         self.sub_tabs.addTab(self.input_panel, "Input")
 
+        # Signals
+        self.signals_panel = SignalsPanel()
+        self.signals_panel.changed.connect(self._on_changed)
+        self.sub_tabs.addTab(self.signals_panel, "Signals")
+
         # Project settings
         self.settings_panel = ProjectSettingsPanel()
         self.settings_panel.changed.connect(self._on_changed)
@@ -1611,6 +1782,7 @@ class GameDataTab(QWidget):
         self.vars_panel.load_variables(project.game_data.variables)
         self.inv_panel.load_data(project.game_data.inventory_items, project.images)
         self.input_panel.load_items(project.game_data.input_actions, project)
+        self.signals_panel.load_signals(project.game_data.signals)
         self.settings_panel.load_project(project)
 
     def _on_images_changed(self):
