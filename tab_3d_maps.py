@@ -13,14 +13,14 @@ Layout:
 from __future__ import annotations
 import math
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QSizePolicy, QSpinBox, QComboBox,
     QCheckBox, QButtonGroup, QAbstractButton, QColorDialog,
     QGroupBox,
 )
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, pyqtSignal
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal
+from PySide6.QtGui import (
     QColor, QPixmap, QPainter, QPen, QBrush,
     QMouseEvent, QPaintEvent, QWheelEvent,
 )
@@ -133,7 +133,7 @@ class MapGridWidget(QWidget):
     Draws the 2D map grid and handles mouse painting.
     Emits map_changed whenever a cell is edited.
     """
-    map_changed = pyqtSignal()
+    map_changed = Signal()
 
     def __init__(self, map_data: MapData, parent=None):
         super().__init__(parent)
@@ -364,8 +364,8 @@ class ToolButton(QPushButton):
 # ─────────────────────────────────────────────────────────────
 
 class LeftPanel(QWidget):
-    tool_changed       = pyqtSignal(str)
-    paint_value_changed = pyqtSignal(int)
+    tool_changed       = Signal(str)
+    paint_value_changed = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -520,7 +520,7 @@ class LeftPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class RightPanel(QWidget):
-    map_settings_changed = pyqtSignal()
+    map_settings_changed = Signal()
 
     def __init__(self, map_data: MapData, parent=None):
         super().__init__(parent)

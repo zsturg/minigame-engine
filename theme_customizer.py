@@ -8,14 +8,14 @@ Invoke via Tools → Customize Appearance in main.py
 from __future__ import annotations
 import json
 from pathlib import Path
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QColorDialog, QListWidget, QListWidgetItem, QWidget,
     QSpinBox, QCheckBox, QFileDialog, QMessageBox, QGroupBox,
     QScrollArea, QTabWidget, QTextEdit, QComboBox
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette, QBrush, QPixmap, QPainter
+from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtGui import QColor, QPalette, QBrush, QPixmap, QPainter
 
 # ─────────────────────────────────────────────────────────────
 #  DEFAULT THEME (matches main.py's current colors)
@@ -61,7 +61,7 @@ DEFAULT_THEME = {
 
 class ColorPickerWidget(QWidget):
     """A row with a color label, preview, and hex input."""
-    changed = pyqtSignal(str, str)  # key, new_color
+    changed = Signal(str, str)  # key, new_color
 
     def __init__(self, key: str, color: str, label: str = None, parent=None):
         super().__init__(parent)
@@ -146,7 +146,7 @@ class ColorPickerWidget(QWidget):
 
 class TexturePickerWidget(QWidget):
     """Row for texture selection with opacity slider."""
-    changed = pyqtSignal(str, object)
+    changed = Signal(str, object)
 
     def __init__(self, key: str, value: dict, parent=None):
         super().__init__(parent)
@@ -230,7 +230,7 @@ class TexturePickerWidget(QWidget):
 
 class ThemeCustomizerDialog(QDialog):
     """Large dialog for editing app appearance."""
-    theme_applied = pyqtSignal(dict)  # emits full theme dict when applied
+    theme_applied = Signal(dict)  # emits full theme dict when applied
 
     def __init__(self, current_theme: dict = None, parent=None):
         super().__init__(parent)

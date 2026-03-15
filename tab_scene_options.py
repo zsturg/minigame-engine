@@ -8,14 +8,14 @@ selecting one reveals its config panel on the right.
 """
 
 from __future__ import annotations
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QLineEdit, QComboBox, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFileDialog, QFrame, QScrollArea, QStackedWidget,
     QSizePolicy, QDialog, QDialogButtonBox, QColorDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 
 from models import (
     Project, Scene, SceneComponent, make_component,
@@ -225,7 +225,7 @@ class AddComponentDialog(QDialog):
 # ─────────────────────────────────────────────────────────────
 
 class BackgroundConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -331,7 +331,7 @@ class BackgroundConfigPanel(QWidget):
 
 
 class ForegroundConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -380,7 +380,7 @@ class ForegroundConfigPanel(QWidget):
 
 class LayerConfigPanel(QWidget):
     """Config panel for the multi-instance Layer component."""
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -573,7 +573,7 @@ class LayerConfigPanel(QWidget):
 
 
 class MusicConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -669,7 +669,7 @@ class MusicConfigPanel(QWidget):
 
 
 class VNDialogBoxConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     BOX_W = 880
     BOX_H = 200
@@ -1027,7 +1027,7 @@ class VNDialogBoxConfigPanel(QWidget):
 
 
 class ChoiceMenuConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1106,7 +1106,7 @@ class ChoiceMenuConfigPanel(QWidget):
 
 
 class HUDConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1120,7 +1120,7 @@ class HUDConfigPanel(QWidget):
 
 
 class VideoConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1169,7 +1169,7 @@ class VideoConfigPanel(QWidget):
 
 
 class TransitionConfigPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1270,8 +1270,8 @@ class EmptyConfigPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class SceneOptionsTab(QWidget):
-    changed = pyqtSignal()
-    scene_selected = pyqtSignal(int)  # emitted when user picks a scene from the dropdown
+    changed = Signal()
+    scene_selected = Signal(int)  # emitted when user picks a scene from the dropdown
 
     def __init__(self, parent=None):
         super().__init__(parent)

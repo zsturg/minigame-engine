@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Vita Adventure Creator
-A PyQt6 tool for building 2D adventure games for the PS Vita via LifeLua.
+Minigame Engine
+A PySIDE6 tool for building 2D adventure games for the PS Vita via Lua Player Plus.
 """
 
 import sys
@@ -14,15 +14,15 @@ import zipfile
 import tempfile
 import os
 from pathlib import Path
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QListWidget, QListWidgetItem, QTabWidget,
     QFrame, QSplitter, QMessageBox, QFileDialog, QScrollArea,
     QSizePolicy, QMenuBar, QMenu, QDialog, QDialogButtonBox,
     QSpinBox, QCheckBox, QComboBox, QLineEdit, QFormLayout, QGroupBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPalette, QAction, QFontDatabase
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QColor, QPalette, QAction, QFontDatabase
 from windows_exporter import export_windows_game
 from models import Project, Scene, SCENE_TEMPLATES
 from tab_gamedata import GameDataTab
@@ -573,7 +573,6 @@ class MainWindow(QMainWindow):
             ("Save Project",      "Ctrl+S",       self.save_project),
             ("Save Project As…",  "Ctrl+Shift+S", self.save_project_as),
             (None, None, None),
-            ("Export to VPK…",    "Ctrl+E",       self.export_vpk),
             ("Export to VPK (LPP)…",     "Ctrl+Shift+E", self.export_vpk_lpp),
             ("Export to Windows…", "Ctrl+W", self.export_windows),
         ]:
@@ -587,9 +586,9 @@ class MainWindow(QMainWindow):
                 file_menu.addAction(action)
 
         tools_menu = mb.addMenu("Tools")
-        ss_action = QAction("Spritesheet Builder…", self)
-        ss_action.triggered.connect(self.open_spritesheet_tool)
-        tools_menu.addAction(ss_action)
+        level_editor_action = QAction("Level Editor…", self)
+        level_editor_action.triggered.connect(self.open_level_editor)
+        tools_menu.addAction(level_editor_action)
 
         tileset_action = QAction("Tileset Manager…", self)
         tileset_action.triggered.connect(self.open_tileset_manager)
@@ -1202,8 +1201,19 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(self, "Export Failed", f"An unexpected error occurred:\n{e}")
 
-    def open_spritesheet_tool(self):
-        QMessageBox.information(self, "Coming Soon", "Spritesheet Builder will be implemented as a separate tool window.")
+    def open_level_editor(self):
+        from level_editor import MainWindow as LevelEditorWindow
+
+        # Keep a reference so it isn't garbage collected
+        self._level_editor_window = LevelEditorWindow()
+        self._level_editor_window.setStyleSheet("""
+            QMainWindow, QWidget {
+                background: #1a1a1a; color: #ccc;
+                font-family: 'Consolas','Courier New',monospace; font-size: 11px;
+            }
+        """)
+        self._level_editor_window.resize(1440, 820)
+        self._level_editor_window.show()
 
     def open_tileset_manager(self):
         from tileset_manager import TilesetManagerDialog

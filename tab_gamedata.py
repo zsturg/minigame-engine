@@ -7,15 +7,15 @@ This tab feeds every dropdown in the rest of the app.
 
 from __future__ import annotations
 from pathlib import Path
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QLineEdit, QComboBox, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFileDialog, QFrame, QSplitter, QScrollArea,
     QTextEdit, QGroupBox, QSizePolicy, QAbstractItemView,
     QMessageBox, QColorDialog, QTabWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QColor, QPixmap, QIcon, QPainter
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QColor, QPixmap, QIcon, QPainter
 from project_explorer import import_asset_to_project
 from models import (
     Project, RegisteredImage, RegisteredAudio, RegisteredFont,
@@ -223,7 +223,7 @@ class RegistryPanel(QWidget):
     Reusable panel: a list on the left, an editor on the right.
     Subclasses implement _build_editor(), _load_item(), _save_item(), _new_item().
     """
-    changed = pyqtSignal()  # emitted whenever registry data changes
+    changed = Signal()  # emitted whenever registry data changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -701,7 +701,7 @@ class FontRegistryPanel(RegistryPanel):
 # ─────────────────────────────────────────────────────────────
 
 class VariablesPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -904,7 +904,7 @@ class VariablesPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class InventoryPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1109,7 +1109,7 @@ class InventoryPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class SignalsPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1412,7 +1412,7 @@ class InputPanel(RegistryPanel):
 # ─────────────────────────────────────────────────────────────
 
 class ProjectSettingsPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1696,7 +1696,7 @@ class GameDataTab(QWidget):
     Exposes a .changed signal so MainWindow can mark the project dirty.
     Call .load_project(project) whenever the project changes.
     """
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

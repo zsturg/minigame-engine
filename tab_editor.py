@@ -8,15 +8,15 @@ and a tabbed inspector (Object tab + Scene tab) with behavior/action editing.
 from __future__ import annotations
 import copy
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QFrame, QScrollArea,
     QDialog, QDialogButtonBox, QCheckBox, QComboBox,
     QSpinBox, QDoubleSpinBox, QSlider, QTabWidget,
     QLineEdit, QStackedWidget, QSizePolicy, QSplitter,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QRect
-from PyQt6.QtGui import (
+from PySide6.QtCore import Qt, Signal, QPoint, QRect
+from PySide6.QtGui import (
     QColor, QPixmap, QPainter, QPen, QBrush,
     QMouseEvent, QPaintEvent,
 )
@@ -106,6 +106,8 @@ ACTION_PALETTE = {
         ("camera_stop_follow","Stop Following",        "Stop the camera from following any object."),
         ("camera_reset",      "Reset Camera",          "Return camera to default center position (480, 272)."),
         ("camera_shake",      "Shake Camera",          "Shake the screen with a given intensity and duration."),
+        ("camera_set_zoom",   "Set Camera Zoom",       "Instantly set the camera zoom level (1.0 = normal)."),
+        ("camera_zoom_to",    "Zoom Camera To",        "Smoothly tween the camera zoom to a target level."),
     ],
     "Animation": [
         ("ani_play",      "Play Animation",    "Start or resume an animation object."),
@@ -378,6 +380,8 @@ ACTION_FIELDS = {
     "camera_stop_follow":[],
     "camera_reset":      [("camera_duration","Duration (sec)","dspin",{"min":0.0,"max":30.0,"step":0.1}),("camera_easing","Easing","combo",{"options":["linear","ease_in","ease_out","ease_in_out"]})],
     "camera_shake":      [("shake_intensity","Intensity","dspin",{"min":1.0,"max":50.0,"step":1.0}),("shake_duration","Duration (sec)","dspin",{"min":0.0,"max":10.0,"step":0.1})],
+    "camera_set_zoom":   [("camera_zoom_target","Zoom Level","dspin",{"min":0.25,"max":4.0,"step":0.05})],
+    "camera_zoom_to":    [("camera_zoom_target","Zoom Level","dspin",{"min":0.25,"max":4.0,"step":0.05}),("camera_zoom_duration","Duration (sec)","dspin",{"min":0.0,"max":30.0,"step":0.1}),("camera_zoom_easing","Easing","combo",{"options":["linear","ease_in","ease_out","ease_in_out"]})],
     "ani_play":          [("object_def_id","Target Object","object",{})],
     "ani_pause":         [("object_def_id","Target Object","object",{})],
     "ani_stop":          [("object_def_id","Target Object","object",{})],
@@ -453,6 +457,8 @@ def _action_summary(action: BehaviorAction) -> str:
         "camera_stop_follow":"",
         "camera_reset":      "",
         "camera_shake":      f"x{getattr(action, 'shake_intensity', 5)}",
+        "camera_set_zoom":   f"zoom={getattr(action, 'camera_zoom_target', 1.0)}",
+        "camera_zoom_to":    f"zoom={getattr(action, 'camera_zoom_target', 1.0)} over {getattr(action, 'camera_zoom_duration', 0.0)}s",
         "ani_play":          getattr(action, 'object_def_id', '') or "self",
         "ani_pause":         getattr(action, 'object_def_id', '') or "self",
         "ani_stop":          getattr(action, 'object_def_id', '') or "self",
@@ -887,7 +893,7 @@ class BranchEditorWidget(QWidget):
     A compact action list for editing one branch (true_actions or false_actions)
     of a conditional BehaviorAction.  Does NOT nest further branch editors.
     """
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, label: str, branch_field: str, parent=None):
         """
@@ -1020,7 +1026,7 @@ class BranchEditorWidget(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class ActionDetailPanel(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1224,7 +1230,7 @@ class ActionDetailPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class BehaviorEditorWidget(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, available_triggers: list[tuple[str, str]], parent=None):
         super().__init__(parent)
@@ -1641,8 +1647,8 @@ class BehaviorEditorWidget(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class SceneComponentsPanel(QWidget):
-    changed = pyqtSignal()
-    tile_layer_selected = pyqtSignal(str)  # emits tileset_id (or "" if none)
+    changed = Signal()
+    tile_layer_selected = Signal(str)  # emits tileset_id (or "" if none)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2156,7 +2162,7 @@ class SceneComponentsPanel(QWidget):
         if not available:
             return
         # Simple pick dialog
-        from PyQt6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog
         names = [f"{n}  ({iid})" for iid, n in available]
         choice, ok = QInputDialog.getItem(self, "Add Selectable", "Pick an object:", names, 0, False)
         if ok and choice:
@@ -2268,8 +2274,8 @@ class SceneComponentsPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class TabbedInspector(QWidget):
-    changed = pyqtSignal()
-    tile_layer_selected = pyqtSignal(str)  # forwarded from SceneComponentsPanel
+    changed = Signal()
+    tile_layer_selected = Signal(str)  # forwarded from SceneComponentsPanel
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2411,12 +2417,27 @@ class TabbedInspector(QWidget):
 
         # [2] OBJECT BEHAVIORS
         self.beh_box = CollapsibleBox("BEHAVIORS")
-        self.obj_beh_editor = BehaviorEditorWidget(OBJECT_TRIGGERS)
-        self.obj_beh_editor.changed.connect(lambda: self.changed.emit())
-        self.beh_box.addWidget(self.obj_beh_editor)
-        
-        # FIX: Removed 'stretch=1' here so it snaps up when above items collapse
-        ov.addWidget(self.beh_box) 
+
+        self._beh_summary = QLabel("No behaviors.")
+        self._beh_summary.setWordWrap(True)
+        self._beh_summary.setStyleSheet(
+            f"color: {TEXT_DIM}; font-size: 11px; background: transparent; padding: 2px 0;"
+        )
+        self.beh_box.addWidget(self._beh_summary)
+
+        self._beh_edit_btn = QPushButton("⬡  Edit Behaviors")
+        self._beh_edit_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {SURFACE2}; color: {ACCENT};
+                border: 1px solid {ACCENT}; border-radius: 4px;
+                padding: 5px 12px; font-size: 11px;
+            }}
+            QPushButton:hover {{ background: {ACCENT}; color: white; }}
+        """)
+        self._beh_edit_btn.clicked.connect(self._open_behavior_graph)
+        self.beh_box.addWidget(self._beh_edit_btn)
+
+        ov.addWidget(self.beh_box)
 
         # FIX: Added stretch at the very bottom to push everything up
         ov.addStretch()
@@ -2488,6 +2509,35 @@ class TabbedInspector(QWidget):
         self.draw_layer_spin.setVisible(self._instance.layer_id == "")
         self.changed.emit()
 
+
+
+
+    def _open_behavior_graph(self):
+        if self._instance is None or self._project is None:
+            return
+        od = self._project.get_object_def(self._instance.object_def_id)
+        if od is None:
+            return
+        from behavior_node_graph import BehaviorGraphDialog
+        dlg = BehaviorGraphDialog(od, parent=self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            self._refresh_beh_summary(od)
+            self.changed.emit()
+
+    def _refresh_beh_summary(self, od):
+        if not od or not od.behaviors:
+            self._beh_summary.setText("No behaviors.")
+            return
+        lines = []
+        for b in od.behaviors:
+            lines.append(f"• {b.trigger}  ({len(b.actions)} actions)")
+        self._beh_summary.setText("\n".join(lines))
+
+
+
+
+
+
     def load_instance(self, instance: PlacedObject, project: Project, scene: Scene):
         self._instance = instance
         self._project  = project
@@ -2526,7 +2576,7 @@ class TabbedInspector(QWidget):
         # Only show draw_layer spin when no layer component is assigned
         self.draw_layer_spin.setVisible(current_layer_id == "")
 
-        self.obj_beh_editor.load(instance.instance_behaviors, project)
+        self._refresh_beh_summary(od)
         self._obj_body.setEnabled(True)
         self._suppress = False
 
@@ -2560,8 +2610,8 @@ class TabbedInspector(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class VitaCanvas(QWidget):
-    object_moved    = pyqtSignal(str, int, int)
-    object_selected = pyqtSignal(int)
+    object_moved    = Signal(str, int, int)
+    object_selected = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2966,11 +3016,11 @@ class VitaCanvas(QWidget):
                 tag_w = max(120, len(speaker) * 9 + 24)
                 p.fillRect(60, 310, tag_w, 26, QColor(40, 40, 80, 220))
                 p.setPen(QColor(255, 255, 255))
-                from PyQt6.QtGui import QFont as _QFont
+                from PySide6.QtGui import QFont as _QFont
                 p.setFont(_QFont("Segoe UI", 11, _QFont.Weight.Bold))
                 p.drawText(70, 328, speaker)
             lines = [l for l in cfg.get("lines", []) if l.strip()]
-            from PyQt6.QtGui import QFont as _QFont
+            from PySide6.QtGui import QFont as _QFont
             p.setFont(_QFont("Segoe UI", 11))
             p.setPen(QColor(240, 240, 240))
             for i, line in enumerate(lines[:4]):
@@ -3109,11 +3159,11 @@ class VitaCanvas(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class SceneListPanel(QWidget):
-    scene_selected   = pyqtSignal(int)
-    scene_added      = pyqtSignal()
-    scene_deleted    = pyqtSignal(int)
-    scene_moved      = pyqtSignal(int, int)
-    scene_duplicated = pyqtSignal(int)
+    scene_selected   = Signal(int)
+    scene_added      = Signal()
+    scene_deleted    = Signal(int)
+    scene_moved      = Signal(int, int)
+    scene_duplicated = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3195,7 +3245,7 @@ class SceneListPanel(QWidget):
 # ─────────────────────────────────────────────────────────────
 
 class EditorTab(QWidget):
-    instance_changed = pyqtSignal()
+    instance_changed = Signal()
 
     def __init__(self, main_window, parent=None):
         super().__init__(parent)

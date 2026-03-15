@@ -7,14 +7,14 @@ Object definition editor (frames, behaviors, VNCharacter config) + per-scene pla
 """
 
 from __future__ import annotations
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QLineEdit, QComboBox, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFrame, QScrollArea, QSplitter, QSizePolicy, QAbstractItemView,
     QColorDialog, QDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 
 from models import (
     Project, Scene, ObjectDefinition, SpriteFrame, Behavior,
@@ -175,7 +175,7 @@ def _make_dim_label(text):
 
 class ActionEditor(QWidget):
     """Wrapper that uses ActionDetailPanel from editor_tab"""
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -207,7 +207,7 @@ class ActionEditor(QWidget):
 # -- Behavior editor -----------------------------------------------------------
 
 class BehaviorEditor(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -479,7 +479,7 @@ class BehaviorEditor(QWidget):
 # -- Object definition editor --------------------------------------------------
 
 class ObjectDefEditor(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -821,6 +821,19 @@ class ObjectDefEditor(QWidget):
         lag_row.addWidget(self.cam_lag_spin)
         lag_row.addWidget(_make_dim_label("(0=instant, 0.9=slow)"))
         cg.addLayout(lag_row)
+
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(_make_dim_label("Default Zoom:"))
+        self.cam_zoom_spin = QDoubleSpinBox()
+        self.cam_zoom_spin.setRange(0.25, 4.0)
+        self.cam_zoom_spin.setSingleStep(0.05)
+        self.cam_zoom_spin.setValue(1.0)
+        self.cam_zoom_spin.setDecimals(2)
+        self.cam_zoom_spin.setStyleSheet(_field_style())
+        self.cam_zoom_spin.valueChanged.connect(self._emit)
+        zoom_row.addWidget(self.cam_zoom_spin)
+        zoom_row.addWidget(_make_dim_label("(1.0=normal, 2.0=2× in, 0.5=2× out)"))
+        cg.addLayout(zoom_row)
         
         self._camera_group.setVisible(False)
         self._layout.addWidget(self._camera_group)
@@ -910,28 +923,25 @@ class ObjectDefEditor(QWidget):
 
         # Behaviors
         self._layout.addWidget(_section("BEHAVIORS"))
-        beh_btn_row = QHBoxLayout()
-        beh_btn_row.setSpacing(4)
-        add_beh_btn = _btn("+ Behavior", accent=True, small=True)
-        add_beh_btn.clicked.connect(self._add_behavior)
-        del_beh_btn = _btn("x", danger=True, small=True)
-        del_beh_btn.setFixedWidth(32)
-        del_beh_btn.clicked.connect(self._del_behavior)
-        beh_btn_row.addWidget(add_beh_btn)
-        beh_btn_row.addWidget(del_beh_btn)
-        beh_btn_row.addStretch()
-        self._layout.addLayout(beh_btn_row)
 
-        self.behavior_list = QListWidget()
-        self.behavior_list.setStyleSheet(_list_style())
-        self.behavior_list.setFixedHeight(90)
-        self.behavior_list.currentRowChanged.connect(self._on_behavior_selected)
-        self._layout.addWidget(self.behavior_list)
+        self._beh_summary = QLabel("No behaviors.")
+        self._beh_summary.setWordWrap(True)
+        self._beh_summary.setStyleSheet(
+            f"color: {DIM}; font-size: 11px; background: transparent; padding: 2px 0;"
+        )
+        self._layout.addWidget(self._beh_summary)
 
-        self.behavior_editor = BehaviorEditor()
-        self.behavior_editor.changed.connect(self._on_behavior_changed)
-        self.behavior_editor.setVisible(False)
-        self._layout.addWidget(self.behavior_editor)
+        self._beh_edit_btn = QPushButton("⬡  Edit Behaviors")
+        self._beh_edit_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {SURF2}; color: {ACCENT};
+                border: 1px solid {ACCENT}; border-radius: 4px;
+                padding: 5px 12px; font-size: 11px;
+            }}
+            QPushButton:hover {{ background: {ACCENT}; color: white; }}
+        """)
+        self._beh_edit_btn.clicked.connect(self._open_behavior_graph)
+        self._layout.addWidget(self._beh_edit_btn)
 
         self._layout.addStretch()
         scroll.setWidget(body)
@@ -977,6 +987,7 @@ class ObjectDefEditor(QWidget):
         o.camera_bounds_width = self.cam_w_spin.value()
         o.camera_bounds_height = self.cam_h_spin.value()
         o.camera_follow_lag = self.cam_lag_spin.value()
+        o.camera_zoom_default = self.cam_zoom_spin.value()
         self.changed.emit()
 
     def _on_behavior_type_changed(self, btype: str):
@@ -1115,47 +1126,23 @@ class ObjectDefEditor(QWidget):
 
     # -- Behaviors -------------------------------------------------------------
 
-    def _add_behavior(self):
-        if self._obj is None:
+    def _open_behavior_graph(self):
+        if self._obj is None or self._project is None:
             return
-        self._obj.behaviors.append(Behavior())
-        self._refresh_behavior_list()
-        self.behavior_list.setCurrentRow(len(self._obj.behaviors) - 1)
-        self.changed.emit()
-
-    def _del_behavior(self):
-        if self._obj is None:
-            return
-        row = self.behavior_list.currentRow()
-        if 0 <= row < len(self._obj.behaviors):
-            self._obj.behaviors.pop(row)
-            self._refresh_behavior_list()
-            self.behavior_editor.setVisible(False)
+        from behavior_node_graph import BehaviorGraphDialog
+        dlg = BehaviorGraphDialog(self._obj, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._refresh_beh_summary()
             self.changed.emit()
 
-    def _refresh_behavior_list(self):
-        if self._obj is None:
+    def _refresh_beh_summary(self):
+        if self._obj is None or not self._obj.behaviors:
+            self._beh_summary.setText("No behaviors.")
             return
-        self.behavior_list.blockSignals(True)
-        self.behavior_list.clear()
-        tmap = {tup[0]: tup[1] for tup in OBJECT_TRIGGERS}
+        lines = []
         for b in self._obj.behaviors:
-            label = tmap.get(b.trigger, b.trigger)
-            if b.trigger in BUTTON_TRIGGERS and b.button:
-                label = f"{label}: {b.button}"
-            self.behavior_list.addItem(label)
-        self.behavior_list.blockSignals(False)
-
-    def _on_behavior_selected(self, row: int):
-        if self._obj is None or row < 0 or row >= len(self._obj.behaviors):
-            self.behavior_editor.setVisible(False)
-            return
-        self.behavior_editor.load_behavior(self._obj.behaviors[row], self._project)
-        self.behavior_editor.setVisible(True)
-
-    def _on_behavior_changed(self):
-        self._refresh_behavior_list()
-        self.changed.emit()
+            lines.append(f"• {b.trigger}  ({len(b.actions)} actions)")
+        self._beh_summary.setText("\n".join(lines))
 
     # -- Public ----------------------------------------------------------------
 
@@ -1271,6 +1258,7 @@ class ObjectDefEditor(QWidget):
             self.cam_w_spin.setValue(obj.camera_bounds_width)
             self.cam_h_spin.setValue(obj.camera_bounds_height)
             self.cam_lag_spin.setValue(obj.camera_follow_lag)
+            self.cam_zoom_spin.setValue(getattr(obj, "camera_zoom_default", 1.0))
 
 
         # Animation fields
@@ -1295,9 +1283,9 @@ class ObjectDefEditor(QWidget):
 
         self._refresh_frame_list()
         self._update_fps_label()
-        self._refresh_behavior_list()
+        self._refresh_beh_summary()
         self._frame_editor.setVisible(False)
-        self.behavior_editor.setVisible(False)
+        #self.behavior_editor.setVisible(False)
 
         self._suppress = False
 
@@ -1305,7 +1293,7 @@ class ObjectDefEditor(QWidget):
 # -- Objects Tab ---------------------------------------------------------------
 
 class ObjectsTab(QWidget):
-    changed = pyqtSignal()
+    changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

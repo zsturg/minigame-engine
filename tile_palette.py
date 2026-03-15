@@ -6,12 +6,12 @@ Replaces the Project Explorer in the editor when a TileLayer component is active
 Tile size comes from the RegisteredTileset — nothing is hardcoded here.
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
     QSizePolicy, QComboBox, QPushButton
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRect
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
+from PySide6.QtCore import Qt, Signal, QRect
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen
 
 from models import Project, RegisteredTileset
 
@@ -32,7 +32,7 @@ class PaletteGrid(QWidget):
     Clickable tile grid. Tile display size is derived from the tileset tile_size.
     index -1 = eraser.
     """
-    tile_selected = pyqtSignal(int)
+    tile_selected = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -158,8 +158,8 @@ class TilePalette(QWidget):
         tile_selected(int)         — user clicked a tile
         paint_mode_changed(bool)   — paintbrush toggled on/off
     """
-    tile_selected      = pyqtSignal(int)
-    paint_mode_changed = pyqtSignal(bool)
+    tile_selected      = Signal(int)
+    paint_mode_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)

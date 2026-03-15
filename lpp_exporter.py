@@ -234,6 +234,7 @@ def _make_camera_lib() -> str:
         "camera = {",
         "    x               = 480,",
         "    y               = 272,",
+        "    zoom            = 1.0,",
         "    bounds_enabled  = false,",
         "    bounds_width    = 960,",
         "    bounds_height   = 544,",
@@ -246,6 +247,7 @@ def _make_camera_lib() -> str:
         "function camera_reset_state()",
         "    camera.x               = 480",
         "    camera.y               = 272",
+        "    camera.zoom            = 1.0",
         "    camera.bounds_enabled  = false",
         "    camera.bounds_width    = 960",
         "    camera.bounds_height   = 544",
@@ -256,19 +258,24 @@ def _make_camera_lib() -> str:
         "end",
         "",
         "function world_to_screen(wx, wy)",
-        "    return wx - camera.x + 480, wy - camera.y + 272",
+        "    local z = camera.zoom",
+        "    return (wx - camera.x) * z + 480, (wy - camera.y) * z + 272",
         "end",
         "",
         "function camera_bg_offset(parallax)",
-        "    return -(camera.x - 480) * parallax, -(camera.y - 272) * parallax",
+        "    local z = camera.zoom",
+        "    return -(camera.x - 480) * parallax * z, -(camera.y - 272) * parallax * z",
         "end",
         "",
         "function camera_apply_bounds()",
         "    if not camera.bounds_enabled then return end",
-        "    if camera.x < 480 then camera.x = 480 end",
-        "    if camera.y < 272 then camera.y = 272 end",
-        "    if camera.x > camera.bounds_width  - 480 then camera.x = camera.bounds_width  - 480 end",
-        "    if camera.y > camera.bounds_height - 272 then camera.y = camera.bounds_height - 272 end",
+        "    local z   = camera.zoom",
+        "    local hw  = math.floor(480 / z)",
+        "    local hh  = math.floor(272 / z)",
+        "    if camera.x < hw  then camera.x = hw  end",
+        "    if camera.y < hh  then camera.y = hh  end",
+        "    if camera.x > camera.bounds_width  - hw then camera.x = camera.bounds_width  - hw end",
+        "    if camera.y > camera.bounds_height - hh then camera.y = camera.bounds_height - hh end",
         "end",
         "",
         "function camera_update_follow()",
@@ -707,6 +714,22 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
         lines.append(f"shake_intensity = {intensity}")
         lines.append(f"shake_timer = {frames}")
 
+    elif t == "camera_set_zoom":
+        zoom = getattr(action, "camera_zoom_target", 1.0)
+        lines.append(f"camera.zoom = {zoom}")
+        lines.append("camera_apply_bounds()")
+
+    elif t == "camera_zoom_to":
+        zoom = getattr(action, "camera_zoom_target", 1.0)
+        dur  = getattr(action, "camera_zoom_duration", 0.0)
+        ease = getattr(action, "camera_zoom_easing", "linear")
+        if dur > 0:
+            frames = int(dur * 60)
+            lines.append(f'tween_add("cam_zoom", camera, "zoom", {zoom}, {frames}, "{ease}")')
+        else:
+            lines.append(f"camera.zoom = {zoom}")
+        lines.append("camera_apply_bounds()")
+
     elif t == "flash_screen":
         hex_color = (action.color or "#ffffff").lstrip("#")
         try:
@@ -1128,6 +1151,9 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         else:
             out.append(f"    camera.bounds_enabled = false")
         out.append(f"    camera.follow_lag = {camera_obj.camera_follow_lag}")
+        zoom_default = getattr(camera_obj, "camera_zoom_default", 1.0)
+        if zoom_default != 1.0:
+            out.append(f"    camera.zoom = {zoom_default}")
 
     for po in scene.placed_objects:
         od = project.get_object_def(po.object_def_id)
@@ -1563,10 +1589,10 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f'                local _frow = math.floor({vname}_ani_frame / _cols)')
                     out.append(f'                local _fsx  = _fcol * _ani_d.frame_width')
                     out.append(f'                local _fsy  = _frow * _ani_d.frame_height')
-                    out.append(f'                local _ox   = _sx + math.floor(_ani_d.frame_width  * {vname}_scale * 0.5){shk_x}')
-                    out.append(f'                local _oy   = _sy + math.floor(_ani_d.frame_height * {vname}_scale * 0.5){shk_y}')
+                    out.append(f'                local _ox   = _sx + math.floor(_ani_d.frame_width  * {vname}_scale * camera.zoom * 0.5){shk_x}')
+                    out.append(f'                local _oy   = _sy + math.floor(_ani_d.frame_height * {vname}_scale * camera.zoom * 0.5){shk_y}')
                     out.append(f'                local _tc   = Color.new(255, 255, 255, {vname}_opacity)')
-                    out.append(f'                Graphics.drawImageExtended(_ox, _oy, _sheet, _fsx, _fsy, _ani_d.frame_width, _ani_d.frame_height, {vname}_rotation, {vname}_scale, {vname}_scale, _tc)')
+                    out.append(f'                Graphics.drawImageExtended(_ox, _oy, _sheet, _fsx, _fsy, _ani_d.frame_width, _ani_d.frame_height, {vname}_rotation, {vname}_scale * camera.zoom, {vname}_scale * camera.zoom, _tc)')
                     out.append(f'            end')
                     out.append(f'        end')
             else:
@@ -1579,9 +1605,9 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                         out.append(f'            local _iw = Graphics.getImageWidth(images[{_lua_str(fname)}])')
                         out.append(f'            local _ih = Graphics.getImageHeight(images[{_lua_str(fname)}])')
                         out.append(f'            local _tc = Color.new(255, 255, 255, {vname}_opacity)')
-                        out.append(f'            local _ox = _sx + math.floor(_iw * {vname}_scale * 0.5){shk_x}')
-                        out.append(f'            local _oy = _sy + math.floor(_ih * {vname}_scale * 0.5){shk_y}')
-                        out.append(f'            Graphics.drawImageExtended(_ox, _oy, images[{_lua_str(fname)}], 0, 0, _iw, _ih, {vname}_rotation, {vname}_scale, {vname}_scale, _tc)')
+                        out.append(f'            local _ox = _sx + math.floor(_iw * {vname}_scale * camera.zoom * 0.5){shk_x}')
+                        out.append(f'            local _oy = _sy + math.floor(_ih * {vname}_scale * camera.zoom * 0.5){shk_y}')
+                        out.append(f'            Graphics.drawImageExtended(_ox, _oy, images[{_lua_str(fname)}], 0, 0, _iw, _ih, {vname}_rotation, {vname}_scale * camera.zoom, {vname}_scale * camera.zoom, _tc)')
                         out.append(f'        end')
                 else:
                     all_behs = list(od.behaviors) + list(po.instance_behaviors)
@@ -1650,6 +1676,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                         chunks_y = math.ceil(world_h / CHUNK_SIZE)
                         out.append(f"        -- TileLayer {safe_id}")
                         out.append(f"        do")
+                        out.append(f"            local _z  = camera.zoom")
                         out.append(f"            local _cl = camera.x - 480")
                         out.append(f"            local _ct = camera.y - 272")
                         out.append(f"            local _cx0 = math.floor(_cl / {CHUNK_SIZE})")
@@ -1660,9 +1687,11 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                         out.append(f"                        local _k = 'tl_{safe_id}_' .. _dcx .. '_' .. _dcy")
                         out.append(f"                        local _im = tile_chunks[_k]")
                         out.append(f"                        if _im then")
-                        out.append(f"                            local _dx = _dcx * {CHUNK_SIZE} - _cl + shake_offset_x")
-                        out.append(f"                            local _dy = _dcy * {CHUNK_SIZE} - _ct + shake_offset_y")
-                        out.append(f"                            Graphics.drawImage(_dx, _dy, _im)")
+                        out.append(f"                            local _wx = _dcx * {CHUNK_SIZE}")
+                        out.append(f"                            local _wy = _dcy * {CHUNK_SIZE}")
+                        out.append(f"                            local _dx = (_wx - camera.x) * _z + 480 + shake_offset_x")
+                        out.append(f"                            local _dy = (_wy - camera.y) * _z + 272 + shake_offset_y")
+                        out.append(f"                            Graphics.drawScaleImage(_dx, _dy, _im, _z, _z, Color.new(255, 255, 255, 255))")
                         out.append(f"                        end")
                         out.append(f"                    end")
                         out.append(f"                end")
@@ -1744,9 +1773,9 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         out.append("                    local _liw = Graphics.getImageWidth(_limg)")
         out.append("                    local _lih = Graphics.getImageHeight(_limg)")
         out.append("                    local _ltc = Color.new(255, 255, 255, _lo.opacity)")
-        out.append("                    local _lox = _lsx + math.floor(_liw * _lo.scale * 0.5) + shake_offset_x")
-        out.append("                    local _loy = _lsy + math.floor(_lih * _lo.scale * 0.5) + shake_offset_y")
-        out.append("                    Graphics.drawImageExtended(_lox, _loy, _limg, 0, 0, _liw, _lih, _lo.rotation, _lo.scale, _lo.scale, _ltc)")
+        out.append("                    local _lox = _lsx + math.floor(_liw * _lo.scale * camera.zoom * 0.5) + shake_offset_x")
+        out.append("                    local _loy = _lsy + math.floor(_lih * _lo.scale * camera.zoom * 0.5) + shake_offset_y")
+        out.append("                    Graphics.drawImageExtended(_lox, _loy, _limg, 0, 0, _liw, _lih, _lo.rotation, _lo.scale * camera.zoom, _lo.scale * camera.zoom, _ltc)")
         out.append("                end")
         out.append("            end")
         out.append("        end")

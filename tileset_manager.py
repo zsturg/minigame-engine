@@ -5,13 +5,13 @@ Lets the dev register PNG spritesheets as tilesets for use in TileLayer componen
 Lives under Tools > Tileset Manager…
 """
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QVBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QLabel, QLineEdit, QFileDialog, QMessageBox,
     QWidget, QScrollArea, QSizePolicy, QSpinBox
 )
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QPixmap, QPainter, QColor, QPen
 
 from models import Project, RegisteredTileset
 

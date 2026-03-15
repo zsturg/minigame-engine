@@ -271,6 +271,9 @@ class BehaviorAction:
     camera_follow_offset_y: int = 0
     shake_intensity: float = 5.0             # screen shake strength
     shake_duration: float = 0.5              # screen shake seconds
+    camera_zoom_target: float = 1.0          # target zoom level for camera_set_zoom / camera_zoom_to
+    camera_zoom_duration: float = 0.0        # 0 = instant; used by camera_zoom_to
+    camera_zoom_easing: str = "linear"       # easing for camera_zoom_to
 
     # ── Animation object actions ─────────────────────────────
     ani_target_frame: int = 0                # ani_set_frame target
@@ -379,6 +382,7 @@ class ObjectDefinition:
     camera_bounds_width: int = 960           # manual bounds width (only if enabled)
     camera_bounds_height: int = 544          # manual bounds height (only if enabled)
     camera_follow_lag: float = 0.0           # 0 = instant, higher = smoother (0.0 to 0.95)
+    camera_zoom_default: float = 1.0         # starting zoom level for this camera (0.25 – 4.0)
 
     # Animation config — only meaningful when behavior_type == "Animation"
     ani_file_id: str = ""                    # reference to AnimationExport.id
@@ -420,6 +424,7 @@ class ObjectDefinition:
             "camera_bounds_width": self.camera_bounds_width,
             "camera_bounds_height": self.camera_bounds_height,
             "camera_follow_lag": self.camera_follow_lag,
+            "camera_zoom_default": self.camera_zoom_default,
             "ani_file_id": self.ani_file_id,
             "ani_loop": self.ani_loop,
             "ani_play_on_spawn": self.ani_play_on_spawn,
@@ -459,6 +464,7 @@ class ObjectDefinition:
         obj.camera_bounds_width = d.get("camera_bounds_width", 960)
         obj.camera_bounds_height = d.get("camera_bounds_height", 544)
         obj.camera_follow_lag = d.get("camera_follow_lag", 0.0)
+        obj.camera_zoom_default = d.get("camera_zoom_default", 1.0)
         obj.ani_file_id = d.get("ani_file_id", "")
         obj.ani_loop = d.get("ani_loop", True)
         obj.ani_play_on_spawn = d.get("ani_play_on_spawn", True)

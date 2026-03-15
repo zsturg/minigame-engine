@@ -3,17 +3,17 @@
 Appearance Customizer - Standalone dialog.
 Import this from main.py. Can be excluded from LLM conversations.
 """
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PySide6.QtCore import Qt, QSize, Signal
 import json
 from typing import Dict
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QColorDialog, QListWidget, QListWidgetItem, QWidget,
     QSpinBox, QCheckBox, QFileDialog, QMessageBox, QGroupBox,
     QScrollArea, QTabWidget, QTextEdit, QComboBox, QSlider
 )
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QColor
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QColor
 
 from theme_utils import get_default_theme, theme_to_stylesheet
 
@@ -40,7 +40,7 @@ DEFAULT_THEME = {
 
 class ColorRow(QWidget):
     """Simple row: label + color button + hex input."""
-    changed = pyqtSignal(str, str)  # key, new_color
+    changed = Signal(str, str)  # key, new_color
     
     def __init__(self, key: str, color: str, label: str = None):
         super().__init__()

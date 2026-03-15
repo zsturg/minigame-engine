@@ -11,13 +11,13 @@ import shutil
 from pathlib import Path
 from typing import Optional, List
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QComboBox, QFrame, QFileDialog,
     QMessageBox, QAbstractItemView, QMenu
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QUrl
-from PyQt6.QtGui import QIcon, QPixmap, QDragEnterEvent, QDropEvent, QColor
+from PySide6.QtCore import Qt, Signal, QMimeData, QUrl
+from PySide6.QtGui import QIcon, QPixmap, QDragEnterEvent, QDropEvent, QColor
 
 # ─────────────────────────────────────────────────────────────
 #  COLORS (matches main app theme)
@@ -137,7 +137,7 @@ def copy_file_to_project(source_path: str, project_folder: Path) -> Optional[str
 class DropEnabledListWidget(QListWidget):
     """QListWidget that accepts file drops to copy files into the project folder."""
     
-    files_dropped = pyqtSignal(list)  # Emits list of source file paths
+    files_dropped = Signal(list)  # Emits list of source file paths
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -189,7 +189,7 @@ class ProjectExplorer(QWidget):
     Supports drag-and-drop to import files.
     """
     
-    files_imported = pyqtSignal(list)  # Emits list of imported filenames
+    files_imported = Signal(list)  # Emits list of imported filenames
     
     def __init__(self, parent=None):
         super().__init__(parent)
