@@ -32,5 +32,8 @@
       "tab_radius": 0
     }
   },
-  "show_explorer": true
+  "show_explorer": true,
+  "show_3d_maps": false,
+  "show_sfx": false,
+  "show_paperdoll": false
 }

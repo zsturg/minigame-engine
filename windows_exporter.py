@@ -29,8 +29,9 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QMessageBox, QFileDialog
 from lpp_exporter import export_lpp, bake_tile_chunks, get_asset_mapping
+from resource_path import resource_path
 
-LOVE_RUNTIME_DIR = Path("love_runtime")
+LOVE_RUNTIME_DIR = Path(resource_path("love_runtime"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,7 +92,8 @@ function Color.new(r, g, b, a)
 end
 
 -- ── Font ────────────────────────────────────────────────────
-local _font_cache  = {}
+local _font_cache  = {}   -- "path:size" → LÖVE font object
+local _font_paths  = {}   -- font object → clean path string
 local _font_sizes  = {}   -- font object → current pixel size
 local _default_font = nil
 
@@ -99,30 +101,61 @@ Font = {}
 function Font.load(path)
     -- strip Vita-specific prefixes
     local clean = path:gsub("app0:/", ""):gsub("sa0:data/font/pvf/", ""):gsub("ux0:data/", "")
-    if not _font_cache[clean] then
+    local key = clean .. ":20"
+    if not _font_cache[key] then
         local ok, f = pcall(love.graphics.newFont, clean, 20)
         if not ok then
             f = love.graphics.newFont(20)
         end
-        _font_cache[clean] = f
+        _font_cache[key] = f
+        _font_paths[f]   = clean
+        _font_sizes[f]   = 20
     end
-    return _font_cache[clean]
+    return _font_cache[key]
 end
 
 function Font.setPixelSizes(fobj, size)
-    _font_sizes[fobj] = size or 20
+    -- In LÖVE font size is baked at creation time.
+    -- We cache and return a new font at the requested size.
+    -- The caller may not use the return value (LPP mutates in place),
+    -- so we also swap _font_cache so future Font.print calls pick it up.
+    size = size or 20
+    if not fobj then return end
+    _font_sizes[fobj] = size
+end
+
+-- Internal: get (or create) a font at a specific size for a given base font
+local function _get_sized_font(fobj, size)
+    local path = _font_paths[fobj]
+    if not path then return fobj end
+    local key = path .. ":" .. tostring(size)
+    if not _font_cache[key] then
+        local ok, f = pcall(love.graphics.newFont, path, size)
+        if not ok then
+            f = love.graphics.newFont(size)
+        end
+        _font_cache[key] = f
+        _font_paths[f]   = path
+        _font_sizes[f]   = size
+    end
+    return _font_cache[key]
 end
 
 function Font.print(fobj, x, y, text, col)
     if not fobj then return end
-    love.graphics.setFont(fobj)
+    -- Use the sized variant if setPixelSizes was called
+    local sz = _font_sizes[fobj]
+    local actual = (sz and sz ~= 20) and _get_sized_font(fobj, sz) or fobj
+    love.graphics.setFont(actual)
     if col then love.graphics.setColor(col) else love.graphics.setColor(1,1,1,1) end
     love.graphics.print(tostring(text), x, y)
 end
 
 function Font.getTextWidth(fobj, text)
     if not fobj then return 0 end
-    return fobj:getWidth(tostring(text))
+    local sz = _font_sizes[fobj]
+    local actual = (sz and sz ~= 20) and _get_sized_font(fobj, sz) or fobj
+    return actual:getWidth(tostring(text))
 end
 
 -- ── Image wrapper ───────────────────────────────────────────
@@ -198,6 +231,13 @@ function Graphics.drawImageExtended(cx, cy, img, sx, sy, sw, sh, angle_deg, xsca
                        sw * 0.5, sh * 0.5)
 end
 
+function Graphics.drawScaleImage(x, y, img, xscale, yscale, col)
+    -- LPP: drawScaleImage(x, y, img, x_scale, y_scale, color)
+    if not img or not img._data then return end
+    if col then love.graphics.setColor(col) else love.graphics.setColor(1,1,1,1) end
+    love.graphics.draw(img._data, x, y, 0, xscale or 1, yscale or 1)
+end
+
 function Graphics.fillRect(x1, x2, y1, y2, col)
     -- LPP: fillRect(x1, x2, y1, y2, color)  ← note x1/x2 then y1/y2
     if col then love.graphics.setColor(col) else love.graphics.setColor(0,0,0,1) end
@@ -258,6 +298,14 @@ function Sound.close(src)
     -- LÖVE GCs the source when no references remain.
 end
 
+function Sound.pause(src)
+    if src and src:isPlaying() then src:pause() end
+end
+
+function Sound.resume(src)
+    if src and not src:isPlaying() then src:play() end
+end
+
 function Sound.setVolume(src, lpp_vol)
     -- LPP volume range: 0-32767
     if src then src:setVolume((lpp_vol or 32767) / 32767) end
@@ -266,6 +314,26 @@ end
 function Sound.getVolume(src)
     if src then return math.floor(src:getVolume() * 32767) end
     return 0
+end
+
+-- ── Timer ───────────────────────────────────────────────────
+-- LPP Timer returns milliseconds; we use love.timer.getTime() (seconds) × 1000.
+Timer = {}
+function Timer.new()
+    return { _start = love.timer.getTime() }
+end
+
+function Timer.reset(t)
+    if t then t._start = love.timer.getTime() end
+end
+
+function Timer.getTime(t)
+    if not t then return 0 end
+    return math.floor((love.timer.getTime() - t._start) * 1000)
+end
+
+function Timer.destroy(t)
+    -- no-op; Lua GC handles it
 end
 
 -- ── Controls ────────────────────────────────────────────────
@@ -294,6 +362,19 @@ function Controls.check(pad_snap, btn)
     return false
 end
 
+-- Touch → mouse mapping for LÖVE
+-- LPP readTouch returns (x, y) of front touchscreen; we map to mouse.
+-- The Vita front touch panel maps roughly to screen coords.
+local _mouse_down = false
+
+function Controls.readTouch()
+    if _mouse_down then
+        local mx, my = love.mouse.getPosition()
+        return mx, my
+    end
+    return 0, 0
+end
+
 -- ── System ──────────────────────────────────────────────────
 System = {}
 function System.setCpuSpeed(mhz) end  -- no-op
@@ -314,10 +395,94 @@ function RayCast3D.loadMap(cells, w, h, tile_size, wall_height)
     _rc.map=cells; _rc.map_w=w; _rc.map_h=h
     _rc.tile_size=tile_size; _rc.wall_height=wall_height
 end
-function RayCast3D.setWallColor(col)  _rc.wall_col  = col end
-function RayCast3D.useShading(b)      _rc.shading   = b   end
-function RayCast3D.setAccuracy(n)     end
-function RayCast3D.spawnPlayer(x,y,a) _rc.px=x; _rc.py=y; _rc.angle=a end
+function RayCast3D.setWallColor(col)   _rc.wall_col  = col end
+function RayCast3D.setFloorColor(col)  _rc.floor_col = col end
+function RayCast3D.setSkyColor(col)    _rc.ceil_col  = col end
+function RayCast3D.enableFloor(b)      _rc.floor_on  = b   end
+function RayCast3D.enableSky(b)        _rc.sky_on    = b   end
+function RayCast3D.useShading(b)       _rc.shading   = b   end
+function RayCast3D.setAccuracy(n)      end
+function RayCast3D.spawnPlayer(x,y,a)  _rc.px=x; _rc.py=y; _rc.angle=a end
+
+function RayCast3D.getPlayer()
+    return { x = _rc.px, y = _rc.py, angle = _rc.angle }
+end
+
+function RayCast3D.setPlayerPos(x, y)
+    _rc.px = x; _rc.py = y
+end
+
+-- ── 3D Sprite system (billboard objects in 3D scenes) ───────
+local _rc_sprites = {}
+
+function RayCast3D.addSprite(wx, wy, img, scale, voffset, blocking)
+    _rc_sprites[#_rc_sprites + 1] = {
+        x = wx, y = wy, img = img,
+        scale = scale or 1.0, voffset = voffset or 0,
+        blocking = blocking or false, visible = true,
+    }
+end
+
+function RayCast3D.setSpriteVisible(idx, vis)
+    if _rc_sprites[idx] then _rc_sprites[idx].visible = vis end
+end
+
+function RayCast3D.checkSpriteCollision(radius)
+    -- Simple distance check: return count of blocking sprites within radius
+    local count = 0
+    for _, sp in ipairs(_rc_sprites) do
+        if sp.visible and sp.blocking then
+            local dx = _rc.px - sp.x
+            local dy = _rc.py - sp.y
+            if math.sqrt(dx*dx + dy*dy) < radius + 16 then
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
+function RayCast3D.renderSprites(ox, oy)
+    -- Billboard sprite rendering: project each sprite to screen space
+    if #_rc_sprites == 0 then return end
+    local cam_rad = _rc.angle * math.pi / 180
+    local cam_dx  = math.cos(cam_rad)
+    local cam_dy  = math.sin(cam_rad)
+    local half_fov = math.rad(_rc.fov / 2)
+    -- Collect visible sprites with distances
+    local draw_list = {}
+    for _, sp in ipairs(_rc_sprites) do
+        if sp.visible and sp.img and sp.img._data then
+            local rx = sp.x - _rc.px
+            local ry = sp.y - _rc.py
+            -- Transform to camera space
+            local tz = rx * cam_dx + ry * cam_dy       -- depth
+            local tx = -rx * cam_dy + ry * cam_dx      -- lateral
+            if tz > 1 then
+                draw_list[#draw_list + 1] = { sp = sp, tx = tx, tz = tz }
+            end
+        end
+    end
+    -- Sort back-to-front
+    table.sort(draw_list, function(a, b) return a.tz > b.tz end)
+    -- Draw
+    for _, entry in ipairs(draw_list) do
+        local sp = entry.sp
+        local screen_x = 480 + (entry.tx / (entry.tz * math.tan(half_fov))) * 480
+        local proj_h   = (_rc.tile_size * sp.scale * 544) / entry.tz
+        local screen_y = 272 - proj_h * 0.5 - sp.voffset * (544 / entry.tz)
+        local img_w = sp.img._w
+        local img_h = sp.img._h
+        local sx_scale = proj_h / img_h
+        local sy_scale = proj_h / img_h
+        local shade = _rc.shading and math.max(0.2, 1 - entry.tz / 400) or 1
+        love.graphics.setColor(shade, shade, shade, 1)
+        love.graphics.draw(sp.img._data,
+            ox + screen_x - (img_w * sx_scale * 0.5),
+            oy + screen_y,
+            0, sx_scale, sy_scale)
+    end
+end
 
 function RayCast3D.movePlayer(dir, spd)
     local rad = _rc.angle * math.pi / 180
@@ -331,8 +496,8 @@ function RayCast3D.movePlayer(dir, spd)
 end
 
 function RayCast3D.rotateCamera(dir, deg)
-    if dir == LEFT_DIR  then _rc.angle = _rc.angle - deg end
-    if dir == RIGHT_DIR then _rc.angle = _rc.angle + deg end
+    if dir == LEFT  then _rc.angle = _rc.angle - deg end
+    if dir == RIGHT then _rc.angle = _rc.angle + deg end
 end
 
 function RayCast3D.renderScene(ox, oy)
@@ -406,6 +571,14 @@ function love.keyreleased(k)
         _held[btn]    = false
         _released[btn] = true
     end
+end
+
+function love.mousepressed(x, y, button)
+    if button == 1 then _mouse_down = true end
+end
+
+function love.mousereleased(x, y, button)
+    if button == 1 then _mouse_down = false end
 end
 
 function love.update(dt)
@@ -586,7 +759,7 @@ def export_windows_game(project, parent_window):
                 shutil.copy(src_path, dest_file)
 
         # Bundled default font (font.ttf) – copy if present next to the script
-        default_font_src = Path("assets/fonts/font.ttf")
+        default_font_src = Path(resource_path("assets/fonts/font.ttf"))
         default_font_dst = build_dir / "assets" / "fonts" / "font.ttf"
         if default_font_src.exists():
             default_font_dst.parent.mkdir(parents=True, exist_ok=True)

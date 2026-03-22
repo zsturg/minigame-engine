@@ -105,16 +105,9 @@ try:
 except ImportError:
     HAS_NOISE = False
 
-try:
-    import opensimplex as _osx_lib; HAS_OPENSIMPLEX = True
-except ImportError:
-    HAS_OPENSIMPLEX = False
-
 NOISE_TYPES = ["Perlin (built-in)"]
 if HAS_NOISE:
     NOISE_TYPES += ["Perlin Tiling (noise lib)", "Simplex (noise lib)"]
-if HAS_OPENSIMPLEX:
-    NOISE_TYPES.append("OpenSimplex")
 
 # ── Color ramp presets ────────────────────────────────────────────────────────
 RAMP_PRESETS = {
@@ -216,17 +209,6 @@ def generate_noise_array(W, H, scale, octaves, persistence, lacunarity,
                     octaves=octaves, persistence=persistence,
                     lacunarity=lacunarity, base=seed % 256)
                 arr[y, x] = (v + 1.0) * 0.5
-    elif noise_type == "OpenSimplex" and HAS_OPENSIMPLEX:
-        gen = _osx_lib.OpenSimplex(seed)
-        inv = 1.0 / max(scale, 0.001)
-        xs_1d = (np.arange(W, dtype=np.float64) + ox) * inv
-        ys_1d = (np.arange(H, dtype=np.float64) + oy) * inv
-        total = np.zeros((H, W), dtype=np.float64)
-        max_v = 0.0; freq = amp = 1.0
-        for _ in range(octaves):
-            total += gen.noise2array(xs_1d*freq, ys_1d*freq) * amp
-            max_v += amp; amp *= persistence; freq *= lacunarity
-        arr = ((total / max_v + 1.0) * 0.5).astype(np.float32)
     else:
         arr = _gen_builtin_perlin(W, H, scale, octaves, persistence, lacunarity, seed, ox, oy)
     arr = (arr - 0.5) * contrast + 0.5 + brightness

@@ -1016,10 +1016,11 @@ class VectorLineNode(BaseNode):
 class TextNode(BaseNode):
     def __init__(self):
         super().__init__("Text")
-        self.inputs = []
+        self.inputs = [None]  # Support for image texture fill
         self.add_property("Text", "Hello", is_string=True)
         self.add_property("Font", "Arial", is_string=True)
         self.add_property("Size", 48, 8, 500)
+        self.add_property("Vertical", 0.0, is_bool=True)
         self.add_property("Fill R", 1.0, 0, 1)
         self.add_property("Fill G", 1.0, 0, 1)
         self.add_property("Fill B", 1.0, 0, 1)
@@ -1036,6 +1037,7 @@ class TextNode(BaseNode):
         text = str(p["Text"].get_value(frame))
         font_name = str(p["Font"].get_value(frame))
         font_size = int(p["Size"].get_value(frame))
+        vertical = bool(p["Vertical"].get_value(frame)) if "Vertical" in p else False
         
         fill_color = QColor.fromRgbF(
             p["Fill R"].get_value(frame), p["Fill G"].get_value(frame),
@@ -1053,29 +1055,56 @@ class TextNode(BaseNode):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         
-        font = QFont(font_name, font_size)
+        scale_factor = w / PROJECT.width if PROJECT.width > 0 else 1.0
+        font = QFont(font_name, max(1, int(font_size * scale_factor)))
         painter.setFont(font)
         
-        # Get text bounds for centering
         fm = painter.fontMetrics()
-        text_rect = fm.boundingRect(text)
+        
+        # Determine lines for standard/vertical typing
+        if vertical:
+            lines = list(text.replace('\n', ''))
+        else:
+            lines = text.split('\n')
+            
+        line_spacing = fm.lineSpacing()
+        total_height = fm.height() + line_spacing * max(0, len(lines) - 1)
+        start_y = -total_height / 2 + fm.ascent()
+        
+        # Build text path (enables multi-line, vertical layout, and texture fill masking)
+        path = QPainterPath()
+        for i, line in enumerate(lines):
+            line_width = fm.horizontalAdvance(line)
+            path.addText(-line_width / 2, start_y + i * line_spacing, font, line)
         
         painter.translate(w/2 + px * w/2, h/2 + py * h/2)
         painter.rotate(rot)
         painter.scale(sx, sy)
         
-        # Draw stroke first (if any)
+        # Draw stroke first
         if stroke_w > 0 and stroke_color.alphaF() > 0:
-            path = QPainterPath()
-            path.addText(-text_rect.width()/2, text_rect.height()/4, font, text)
             painter.setPen(QPen(stroke_color, stroke_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
         
         # Draw fill
-        if fill_color.alphaF() > 0:
-            painter.setPen(fill_color)
-            painter.drawText(QPointF(-text_rect.width()/2, text_rect.height()/4), text)
+        if self.inputs[0]:
+            fill_arr = self.inputs[0].evaluate(frame, w, h)
+            fill_arr = np.clip(fill_arr * 255, 0, 255).astype(np.uint8)
+            if not fill_arr.flags['C_CONTIGUOUS']:
+                fill_arr = np.ascontiguousarray(fill_arr)
+            fill_img = QImage(fill_arr.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+            
+            brush = QBrush(QPixmap.fromImage(fill_img))
+            # Inverse transform so the texture inherently maps 1:1 with canvas space over the text mask
+            brush.setTransform(painter.transform().inverted()[0])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(brush)
+            painter.drawPath(path)
+        elif fill_color.alphaF() > 0:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill_color)
+            painter.drawPath(path)
         
         painter.end()
         
@@ -1525,6 +1554,189 @@ class BrickPatternNode(BaseNode):
         out[..., 3] = 1.0
         
         return out
+
+@register_node
+class TileablePatternNode(BaseNode):
+    def __init__(self):
+        super().__init__("Tileable Patterns")
+        self.inputs = [None, None]
+        self.input_names = ["UV Warp", "Mask"]
+
+        # --- 1. CORE TILE STRUCTURES ---
+        layouts = ["Grid", "Brick", "Half-Drop", "Mirror (Ogee)", "Hex Stagger", "Polar Fold"]
+        self.add_property("Layout", 0.0, 0.0, len(layouts)-1, is_enum=True, items=layouts)
+        self.add_property("Repeat X", 4.0, 0.1, 100.0)
+        self.add_property("Repeat Y", 4.0, 0.1, 100.0)
+        self.add_property("Offset X", 0.0, -10.0, 10.0)
+        self.add_property("Offset Y", 0.0, -10.0, 10.0)
+        self.add_property("Warp Strength", 0.2, 0.0, 2.0)
+
+        # --- 2. SHAPES & GEOMETRY ---
+        shapes = ["Circle", "Square", "Stripe V", "Cross", "Cellular (Voronoi)",
+                  "Checkerboard", "Diagonal Stripes", "Sine Wave", "Chevron/ZigZag",
+                  "N-Point Star", "Value Noise"]
+        self.add_property("Shape", 0.0, 0.0, len(shapes)-1, is_enum=True, items=shapes)
+
+        # --- 3. ADVANCED CONTROLS ---
+        self.add_property("Thickness/Size", 0.8, 0.0, 2.0)
+        self.add_property("Softness", 0.02, 0.0, 1.0)
+        self.add_property("Symmetry Points", 6.0, 3.0, 16.0)
+        self.add_property("Jitter", 1.0, 0.0, 1.0)
+
+    def evaluate(self, frame, w, h):
+        # Fetch params
+        layout = int(self.properties["Layout"].get_value(frame))
+        rep_x = self.properties["Repeat X"].get_value(frame)
+        rep_y = self.properties["Repeat Y"].get_value(frame)
+        off_x = self.properties["Offset X"].get_value(frame)
+        off_y = self.properties["Offset Y"].get_value(frame)
+        warp = self.properties["Warp Strength"].get_value(frame)
+
+        shape_type = int(self.properties["Shape"].get_value(frame))
+        size = self.properties["Thickness/Size"].get_value(frame)
+        softness = self.properties["Softness"].get_value(frame)
+        symmetry = np.floor(self.properties["Symmetry Points"].get_value(frame))
+        jitter = self.properties["Jitter"].get_value(frame)
+
+        # Generate base normalized UVs
+        x = np.linspace(0, 1, w, dtype=np.float32)
+        y = np.linspace(0, 1, h, dtype=np.float32)
+        U, V = np.meshgrid(x, y)
+
+        # Apply External UV Warping (Organic wood/marble patterns)
+        if self.inputs[0]:
+            warp_map = self.inputs[0].evaluate(frame, w, h)
+            U += (warp_map[..., 0] - 0.5) * warp
+            V += (warp_map[..., 1] - 0.5) * warp
+
+        # Apply Scale & Offset
+        U = (U * rep_x) + off_x
+        V = (V * rep_y) + off_y
+
+        # ==========================================
+        # PHASE 1: CORE TILING LAYOUTS (UV MUTATION)
+        # ==========================================
+        if layout == 1:   # BRICK
+            U += (np.floor(V) % 2) * 0.5
+        elif layout == 2: # HALF-DROP
+            V += (np.floor(U) % 2) * 0.5
+        elif layout == 4: # HEX STAGGER
+            V *= 1.1547
+            U += (np.floor(V) % 2) * 0.5
+
+        # Local Tile UVs
+        if layout == 3: # MIRROR / OGEE REPEAT
+            cell_U = np.abs((U % 2.0) - 1.0)
+            cell_V = np.abs((V % 2.0) - 1.0)
+        else:
+            cell_U = U % 1.0
+            cell_V = V % 1.0
+
+        # Center coordinates for SDF math (-0.5 to 0.5)
+        cx = cell_U - 0.5
+        cy = cell_V - 0.5
+
+        # POLAR KALEIDOSCOPE FOLDING (Islamic Geometry base)
+        if layout == 5:
+            r = np.sqrt(cx**2 + cy**2)
+            theta = np.arctan2(cy, cx)
+            segment = (np.pi * 2.0) / symmetry
+            theta = (theta % segment) - (segment / 2.0)
+            cx = r * np.cos(theta)
+            cy = r * np.sin(theta)
+
+        # ==========================================
+        # PHASE 2 & 3: SHAPES & SDFs
+        # ==========================================
+        d = np.zeros_like(U)
+        is_direct_mask = False
+
+        if shape_type == 0:   # Circle
+            d = np.sqrt(cx**2 + cy**2)
+        elif shape_type == 1: # Square
+            d = np.maximum(np.abs(cx), np.abs(cy))
+        elif shape_type == 2: # Stripe V
+            d = np.abs(cx)
+        elif shape_type == 3: # Cross
+            d = np.minimum(np.abs(cx), np.abs(cy))
+
+        elif shape_type == 4: # CELLULAR / VORONOI
+            ix, iy = np.floor(U), np.floor(V)
+            min_dist = np.ones_like(U) * 10.0
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    nx, ny = ix + dx, iy + dy
+                    h1 = np.sin(nx * 12.9898 + ny * 78.233) * 43758.5453
+                    h2 = np.sin(nx * 39.346 + ny * 11.135) * 43758.5453
+                    px = (h1 - np.floor(h1)) * jitter + 0.5 * (1.0 - jitter)
+                    py = (h2 - np.floor(h2)) * jitter + 0.5 * (1.0 - jitter)
+                    vx, vy = dx + px - cell_U, dy + py - cell_V
+                    min_dist = np.minimum(min_dist, np.sqrt(vx**2 + vy**2))
+            d = min_dist
+
+        elif shape_type == 5: # CHECKERBOARD
+            mask = (np.floor(U) + np.floor(V)) % 2
+            is_direct_mask = True
+
+        elif shape_type == 6: # DIAGONAL STRIPES
+            d = np.abs(((cell_U + cell_V) % 1.0) - 0.5)
+
+        elif shape_type == 7: # SINE WAVE
+            d = np.abs(cy - (np.sin(cell_U * np.pi * 2.0) * 0.25))
+
+        elif shape_type == 8: # CHEVRON / ZIGZAG
+            d = np.abs(cy - (np.abs(cx) * 1.0))
+
+        elif shape_type == 9: # N-POINT STAR
+            an = np.arctan2(cy, cx)
+            ra = np.sqrt(cx**2 + cy**2)
+            seg = (np.pi * 2.0) / symmetry
+            an = (an % seg) - (seg / 2.0)
+            d = ra * np.cos(an)
+
+        elif shape_type == 10: # VALUE NOISE
+            iU = np.floor(U)
+            iV = np.floor(V)
+            fU = U % 1.0
+            fV = V % 1.0
+            u = fU * fU * (3.0 - 2.0 * fU)
+            v = fV * fV * (3.0 - 2.0 * fV)
+
+            def hash2(x, y):
+                hv = np.sin(x * 12.9898 + y * 78.233) * 43758.5453
+                return hv - np.floor(hv)
+
+            a = hash2(iU, iV)
+            b = hash2(iU + 1.0, iV)
+            c = hash2(iU, iV + 1.0)
+            e = hash2(iU + 1.0, iV + 1.0)
+            mask = a + (b - a) * u + (c - a) * v + (a - b - c + e) * u * v
+            is_direct_mask = True
+
+        # Mask modifier via Socket 1
+        if self.inputs[1]:
+            mask_map = self.inputs[1].evaluate(frame, w, h)
+            size = size * mask_map[..., 0]
+
+        # ==========================================
+        # PHASE 4: EDGE BLENDING
+        # ==========================================
+        if not is_direct_mask:
+            radius = size * 0.5
+            edge_outer = radius + (softness * 0.5)
+            edge_inner = radius - (softness * 0.5)
+            diff = np.maximum(1e-5, edge_outer - edge_inner)
+            t = np.clip((edge_outer - d) / diff, 0.0, 1.0)
+            mask = t * t * (3.0 - 2.0 * t) # Smoothstep
+
+        # Pack into RGBA
+        arr = np.zeros((h, w, 4), dtype=np.float32)
+        arr[..., 0] = mask
+        arr[..., 1] = mask
+        arr[..., 2] = mask
+        arr[..., 3] = 1.0
+
+        return arr
 
 @register_node
 class PolarCoordsNode(BaseNode):
@@ -2936,6 +3148,7 @@ NODE_COLORS = {
     ParticleEmitterNode: QColor(120, 80, 40),
     RandomSelectNode: QColor(80, 80, 100),
     BrickPatternNode: QColor(100, 50, 50),
+    TileablePatternNode: QColor(110, 60, 45),
     PolarCoordsNode:  QColor(50, 100, 100),
     DisplacementNode: QColor(100, 50, 100),
     ColorAdjustNode:  QColor(100, 100, 50),
@@ -2994,9 +3207,11 @@ class GfxNode(QGraphicsItem):
             VectorRectNode: [("W",)],
             VectorEllipseNode: [("Rx",)],
             VectorPolygonNode: [("R",)],
+            TextNode:[("Fill",)],
             ParticleEmitterNode: [("Sprite",)],
             RandomSelectNode: [("1",), ("2",), ("3",), ("4",)],
             BrickPatternNode: [],
+            TileablePatternNode: [("UV",), ("Mask",)],
             PolarCoordsNode: [("Img",)],
             DisplacementNode: [("Src",), ("Map",)],
             ColorAdjustNode: [("Img",)],
@@ -3222,6 +3437,7 @@ class GraphView(QGraphicsView):
         gen.addAction("PNG Sequence",  lambda: spawn(PNGSequenceNode))
         gen.addAction("Wave Texture",   lambda: spawn(WaveNode))
         gen.addAction("Oscilloscope",   lambda: spawn(OscilloscopeNode))
+        gen.addAction("Tileable Patterns", lambda: spawn(TileablePatternNode))
 
         # --- Modifiers ---
         mod = menu.addMenu("Modifiers")
@@ -3414,6 +3630,7 @@ class Inspector(QWidget):
 
     def __init__(self, timeline_ref):
         super().__init__()
+        self.setMinimumWidth(300)
         self.timeline_ref = timeline_ref
         self.current_node = None
         
@@ -3655,9 +3872,15 @@ class Inspector(QWidget):
         btn.setStyleSheet("QToolButton:checked { color: yellow; font-weight: bold; }")
         
         if prop.is_string:
-            w = QLineEdit()
-            w.setText(str(prop.default_value))
-            w.textChanged.connect(lambda t: self.on_val(prop, t, w))
+            # Check if this is the Font property to use the native system font picker
+            if name == "Font":
+                w = QFontComboBox()
+                w.setCurrentFont(QFont(str(prop.default_value)))
+                w.currentFontChanged.connect(lambda f: self.on_val(prop, f.family(), w))
+            else:
+                w = QLineEdit()
+                w.setText(str(prop.default_value))
+                w.textChanged.connect(lambda t: self.on_val(prop, t, w))
         elif prop.is_bool:
             w = QCheckBox()
             w.setChecked(bool(prop.default_value))
@@ -3677,6 +3900,9 @@ class Inspector(QWidget):
 
         def gv():
             if prop.is_string:
+                # Handle getting the value from either a Font Box or a Line Edit
+                if isinstance(w, QFontComboBox):
+                    return w.currentFont().family()
                 return w.text()
             elif prop.is_bool:
                 return 1.0 if w.isChecked() else 0.0
@@ -3722,7 +3948,11 @@ class Inspector(QWidget):
             val = prop.get_value(f)
             w.blockSignals(True)
             if prop.is_string:
-                w.setText(str(val))
+                # Handle setting the value for either a Font Box or a Line Edit
+                if isinstance(w, QFontComboBox):
+                    w.setCurrentFont(QFont(str(val)))
+                else:
+                    w.setText(str(val))
             elif prop.is_bool:
                 w.setChecked(bool(val))
             elif prop.is_enum:
@@ -3960,7 +4190,6 @@ class AnimationGraphTab(QWidget):
         self.timeline.set_main_ref(self)
         self.inspector = Inspector(self.timeline)
         self.preview_lbl = QLabel()
-        self.preview_lbl.setMinimumSize(400, 250)
         self.preview_lbl.setStyleSheet("border: 2px solid #555;")
         self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -4000,19 +4229,20 @@ class AnimationGraphTab(QWidget):
         btn_row.addWidget(bs)
         btn_row.addWidget(ba)
         ll.addLayout(btn_row)
-        ll.addWidget(QLabel("Preview"))
-        
         # Preview mode dropdown
         preview_row = QHBoxLayout()
-        preview_row.addWidget(QLabel("Mode:"))
+        preview_row.addWidget(QLabel("Preview Mode:"))
         self.preview_mode_combo = QComboBox()
         self.preview_mode_combo.addItems(["Fit", "Actual Size", "Full Screen Context"])
         self.preview_mode_combo.setCurrentText(PROJECT.preview_mode)
         self.preview_mode_combo.currentTextChanged.connect(self.on_preview_mode_changed)
         preview_row.addWidget(self.preview_mode_combo)
         ll.addLayout(preview_row)
-        
-        ll.addWidget(self.preview_lbl)
+
+        # Fixed-size preview label: 320x180 locks the 16:9 ratio of 960x544
+        self.preview_lbl.setFixedSize(320, 180)
+        ll.addWidget(self.preview_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
+
         bp = QPushButton("▶ Play / Stop")
         bp.clicked.connect(self.toggle_play)
         ll.addWidget(bp)
@@ -4020,7 +4250,12 @@ class AnimationGraphTab(QWidget):
         be.setStyleSheet("background-color: #2a6e2a; font-weight: bold; padding: 8px;")
         be.clicked.connect(self.export_png_sequence)
         ll.addWidget(be)
-        
+
+        bf = QPushButton("🖼 Export Single Frame")
+        bf.setStyleSheet("background-color: #2a5a7a; font-weight: bold; padding: 8px;")
+        bf.clicked.connect(self.export_single_frame)
+        ll.addWidget(bf)
+
         bv = QPushButton("🎮 Export for Vita (.ani/.trans)")
         bv.setStyleSheet("background-color: #6a2a9e; font-weight: bold; padding: 8px;")
         bv.clicked.connect(self.export_for_vita)
@@ -4147,6 +4382,7 @@ class AnimationGraphTab(QWidget):
         gen.addAction("PNG Sequence",  lambda: spawn(PNGSequenceNode))
         gen.addAction("Wave Texture",   lambda: spawn(WaveNode))
         gen.addAction("Oscilloscope",   lambda: spawn(OscilloscopeNode))
+        gen.addAction("Tileable Patterns", lambda: spawn(TileablePatternNode))
         mod = menu.addMenu("Modifiers")
         mod.addAction("Blur",                 lambda: spawn(BlurNode))
         mod.addAction("Edge Detect",          lambda: spawn(EdgeDetectNode))
@@ -4192,7 +4428,7 @@ class AnimationGraphTab(QWidget):
         ui.addAction("UI Button",   lambda: spawn(UIButtonNode))
         ui.addAction("UI Checkbox", lambda: spawn(UICheckboxNode))
 
-        menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+        menu.exec(self.view.mapToGlobal(self.view.rect().topLeft()))
 
 
 
@@ -4222,49 +4458,81 @@ class AnimationGraphTab(QWidget):
     def render_preview(self, frame):
         if not self.output_node: return
         d = PROJECT.preview_divisor
-        w = max(PROJECT.width // d, 1)
-        h = max(PROJECT.height // d, 1)
+        mode = PROJECT.preview_mode
+        preview_w = self.preview_lbl.width()
+        preview_h = self.preview_lbl.height()
+
+        if mode == "Actual Size":
+            # Render at full project resolution — 1:1 pixel mapping
+            w = PROJECT.width
+            h = PROJECT.height
+        else:
+            # Fit and Full Screen Context render at reduced quality for speed
+            w = max(PROJECT.width // d, 1)
+            h = max(PROJECT.height // d, 1)
+
         arr = self.output_node.evaluate(frame, w, h)
         arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
         if not arr.flags['C_CONTIGUOUS']: arr = np.ascontiguousarray(arr)
         ha, wa, _ = arr.shape
-        preview_w = self.preview_lbl.width()
-        preview_h = self.preview_lbl.height()
-        mode = PROJECT.preview_mode
-        
+
         if mode == "Fit":
+            # Scale the rendered image to fill the preview label, keeping aspect ratio
             img = QImage(arr.data, wa, ha, wa * 4, QImage.Format.Format_RGBA8888)
             pix = QPixmap.fromImage(img)
-            self.preview_lbl.setPixmap(pix.scaled(preview_w, preview_h, Qt.AspectRatioMode.KeepAspectRatio))
+            self.preview_lbl.setPixmap(
+                pix.scaled(preview_w, preview_h,
+                           Qt.AspectRatioMode.KeepAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+            )
+
         elif mode == "Actual Size":
+            # Draw the full-res image 1:1, centered; crop to preview label bounds
             img = QImage(arr.data, wa, ha, wa * 4, QImage.Format.Format_RGBA8888)
             result = QImage(preview_w, preview_h, QImage.Format.Format_RGBA8888)
             result.fill(Qt.GlobalColor.transparent)
             painter = QPainter(result)
+            # Center the full-res canvas inside the (much smaller) preview label
             x = (preview_w - wa) // 2
             y = (preview_h - ha) // 2
             painter.drawImage(x, y, img)
             painter.end()
             self.preview_lbl.setPixmap(QPixmap.fromImage(result))
+
         elif mode == "Full Screen Context":
-            scale = min(preview_w / PROJECT.width, preview_h / PROJECT.height) * 0.9
-            ref_w = int(PROJECT.width * scale); ref_h = int(PROJECT.height * scale)
+            # Show what the image looks like relative to the 960x544 Vita screen.
+            # Scale the full 960x544 "screen" down to fit inside the preview label,
+            # then draw the rendered image scaled to match that same reduction.
+            VITA_W, VITA_H = 960, 544
+            scale = min(preview_w / VITA_W, preview_h / VITA_H) * 0.9
+            ref_w = int(VITA_W * scale)
+            ref_h = int(VITA_H * scale)
             result = QImage(preview_w, preview_h, QImage.Format.Format_RGBA8888)
             result.fill(QColor(40, 40, 40))
             painter = QPainter(result)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            ref_x = (preview_w - ref_w) // 2; ref_y = (preview_h - ref_h) // 2
-            if PROJECT.bg_style == "Black": painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(0, 0, 0))
-            elif PROJECT.bg_style == "Dark Gray": painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(51, 51, 51))
+            ref_x = (preview_w - ref_w) // 2
+            ref_y = (preview_h - ref_h) // 2
+            # Draw background inside the screen rect
+            if PROJECT.bg_style == "Black":
+                painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(0, 0, 0))
+            elif PROJECT.bg_style == "Dark Gray":
+                painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(51, 51, 51))
             else:
                 checker_size = 8
                 for cy in range(ref_h // checker_size + 1):
                     for cx in range(ref_w // checker_size + 1):
                         c = QColor(60, 60, 60) if (cx + cy) % 2 == 0 else QColor(80, 80, 80)
-                        painter.fillRect(ref_x + cx * checker_size, ref_y + cy * checker_size, checker_size, checker_size, c)
+                        painter.fillRect(ref_x + cx * checker_size, ref_y + cy * checker_size,
+                                         checker_size, checker_size, c)
             painter.setClipRect(ref_x, ref_y, ref_w, ref_h)
             img = QImage(arr.data, wa, ha, wa * 4, QImage.Format.Format_RGBA8888)
-            scaled_img = img.scaled(int(wa * scale), int(ha * scale), Qt.AspectRatioMode.KeepAspectRatio)
+            # Scale by project dimensions so a 64x64 canvas appears small inside a 960x544 screen rect
+            img_scaled_w = int(PROJECT.width * scale)
+            img_scaled_h = int(PROJECT.height * scale)
+            scaled_img = img.scaled(img_scaled_w, img_scaled_h,
+                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation)
             content_x = ref_x + (ref_w - scaled_img.width()) // 2
             content_y = ref_y + (ref_h - scaled_img.height()) // 2
             painter.drawImage(content_x, content_y, scaled_img)
@@ -4452,3 +4720,46 @@ class AnimationGraphTab(QWidget):
             img = QImage(arr.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
             img.save(os.path.join(folder, f"frame_{frame:04d}.png"), "PNG")
         progress.setValue(total); progress.close()
+    def export_single_frame(self):
+        """Export the current frame as a quantized 8-bit indexed PNG."""
+        if not self.output_node:
+            return
+
+        frame = self.timeline.current_frame
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Single Frame", f"frame_{frame:04d}.png",
+            "PNG Image (*.png)"
+        )
+        if not path:
+            return
+
+        w, h = PROJECT.width, PROJECT.height
+        arr = self.output_node.evaluate(frame, w, h)
+        arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
+        if not arr.flags['C_CONTIGUOUS']:
+            arr = np.ascontiguousarray(arr)
+
+        img_rgba = PILImage.fromarray(arr, 'RGBA')
+
+        # Split alpha so quantization only touches RGB
+        r, g, b, alpha = img_rgba.split()
+        img_rgb = PILImage.merge('RGB', (r, g, b))
+
+        # Quantize RGB to 255 colors (reserve index 0 for transparent)
+        img_p = img_rgb.quantize(colors=255, method=PILImage.Quantize.MEDIANCUT)
+
+        # Shift all palette indices up by 1 to free index 0 for transparency
+        data = np.array(img_p, dtype=np.uint8)
+        data = data + 1  # 0-254 -> 1-255
+
+        # Build new palette: slot 0 = black placeholder (marked transparent), slots 1-255 = original colors
+        palette_bytes = img_p.getpalette()  # R,G,B x 256
+        new_palette = [0, 0, 0] + palette_bytes[:255 * 3]
+
+        # Any pixel where alpha < 128 gets index 0 (transparent)
+        alpha_arr = np.array(alpha, dtype=np.uint8)
+        data[alpha_arr < 128] = 0
+
+        img_out = PILImage.fromarray(data, mode='P')
+        img_out.putpalette(new_palette)
+        img_out.save(path, "PNG", transparency=0)

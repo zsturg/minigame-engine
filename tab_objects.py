@@ -13,18 +13,14 @@ from PySide6.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QFrame, QScrollArea, QSplitter, QSizePolicy, QAbstractItemView,
     QColorDialog, QDialog
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QWheelEvent, QMouseEvent
 
 from models import (
     Project, Scene, ObjectDefinition, SpriteFrame, Behavior,
-    BehaviorAction, PlacedObject
+    BehaviorAction, PlacedObject, CollisionBox
 )
-# We import the action components from tab_editor to ensure the action lists are identical
-from tab_editor import (
-    ACTION_PALETTE, ACTION_FIELDS, ActionDetailPanel, ActionPickerDialog,
-    TriggerPickerDialog, _action_summary, OBJECT_TRIGGERS, BUTTON_TRIGGERS, BUTTON_OPTIONS
-)
+
 
 # -- Colours -------------------------------------------------------------------
 DARK    = "#0f0f12"
@@ -45,7 +41,7 @@ TRIGGER_TYPES = [
     "on_create", "on_interact", "on_input", "on_frame", "on_true", "on_false", "on_destroy",
     "on_enter", "on_exit", "on_overlap", "on_interact_zone",
 ]
-BEHAVIOR_TYPES = ["default", "VNCharacter", "GUI_Label", "GUI_Button", "GUI_Panel", "Animation","Camera"]
+BEHAVIOR_TYPES = ["default", "VNCharacter", "GUI_Label", "GUI_Button", "GUI_Panel", "Animation", "LayerAnimation", "Camera"]
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -171,311 +167,6 @@ def _make_dim_label(text):
     return lbl
 
 
-# -- Action editor (uses editor_tab's system) ----------------------------------
-
-class ActionEditor(QWidget):
-    """Wrapper that uses ActionDetailPanel from editor_tab"""
-    changed = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._action: BehaviorAction | None = None
-        self._project: Project | None = None
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        
-        layout.addWidget(_section("ACTION PARAMETERS"))
-        layout.addWidget(_divider())
-        
-        self.detail_panel = ActionDetailPanel()
-        self.detail_panel.changed.connect(self._emit)
-        layout.addWidget(self.detail_panel)
-
-    def _emit(self):
-        self.changed.emit()
-
-    def load_action(self, action: BehaviorAction, project: Project):
-        self._action = action
-        self._project = project
-        self.detail_panel.load(action, project)
-
-
-# -- Behavior editor -----------------------------------------------------------
-
-class BehaviorEditor(QWidget):
-    changed = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._behavior: Behavior | None = None
-        self._project: Project | None = None
-        self._suppress = False
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        layout.addWidget(_section("BEHAVIOR"))
-        layout.addWidget(_divider())
-
-        trig_lbl = QLabel("Trigger:")
-        trig_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
-        layout.addWidget(trig_lbl)
-
-        trig_row = QHBoxLayout()
-        trig_row.setSpacing(6)
-        self._trigger_label = QLabel("—")
-        self._trigger_label.setStyleSheet(f"color: {TEXT}; font-size: 12px;")
-        self._trigger_change_btn = _btn("change", small=True)
-        self._trigger_change_btn.setEnabled(False)
-        self._trigger_change_btn.clicked.connect(self._change_trigger)
-        trig_row.addWidget(self._trigger_label, stretch=1)
-        trig_row.addWidget(self._trigger_change_btn)
-        layout.addLayout(trig_row)
-
-        # Button field row (on_button_pressed/held/released)
-        self._button_row = QWidget()
-        br2 = QHBoxLayout(self._button_row)
-        br2.setContentsMargins(0, 0, 0, 0)
-        br2.setSpacing(8)
-        btn_lbl = QLabel("Button:")
-        btn_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
-        self.button_combo = QComboBox()
-        self.button_combo.setStyleSheet(_field_style())
-        for b in BUTTON_OPTIONS:
-            self.button_combo.addItem(b)
-        self.button_combo.currentTextChanged.connect(self._on_button_changed)
-        br2.addWidget(btn_lbl)
-        br2.addWidget(self.button_combo)
-        br2.addStretch()
-        self._button_row.setVisible(False)
-        layout.addWidget(self._button_row)
-
-        self._frame_row = QWidget()
-        fr = QHBoxLayout(self._frame_row)
-        fr.setContentsMargins(0, 0, 0, 0)
-        fr.setSpacing(8)
-        fc_lbl = QLabel("Frame count:")
-        fc_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
-        self.frame_count_spin = QSpinBox()
-        self.frame_count_spin.setRange(1, 99999)
-        self.frame_count_spin.setValue(60)
-        self.frame_count_spin.setStyleSheet(_field_style())
-        self.frame_count_spin.valueChanged.connect(self._on_frame_count_changed)
-        self.frame_sec_lbl = QLabel("~1.00s at 60fps")
-        self.frame_sec_lbl.setStyleSheet(f"color: {DIM}; font-size: 11px;")
-        fr.addWidget(fc_lbl)
-        fr.addWidget(self.frame_count_spin)
-        fr.addWidget(self.frame_sec_lbl)
-        fr.addStretch()
-        self._frame_row.setVisible(False)
-        layout.addWidget(self._frame_row)
-
-        self._bool_row = QWidget()
-        br = QHBoxLayout(self._bool_row)
-        br.setContentsMargins(0, 0, 0, 0)
-        br.setSpacing(8)
-        bv_lbl = QLabel("Variable:")
-        bv_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
-        self.bool_var_combo = QComboBox()
-        self.bool_var_combo.setStyleSheet(_field_style())
-        self.bool_var_combo.currentTextChanged.connect(self._emit)
-        br.addWidget(bv_lbl)
-        br.addWidget(self.bool_var_combo)
-        br.addStretch()
-        self._bool_row.setVisible(False)
-        layout.addWidget(self._bool_row)
-
-        self._input_row = QWidget()
-        ir = QHBoxLayout(self._input_row)
-        ir.setContentsMargins(0, 0, 0, 0)
-        ir.setSpacing(8)
-        ia_lbl = QLabel("Action:")
-        ia_lbl.setStyleSheet(f"color: {DIM}; font-size: 12px;")
-        self.input_action_combo = QComboBox()
-        self.input_action_combo.setStyleSheet(_field_style())
-        self.input_action_combo.currentTextChanged.connect(self._emit)
-        ir.addWidget(ia_lbl)
-        ir.addWidget(self.input_action_combo)
-        ir.addStretch()
-        self._input_row.setVisible(False)
-        layout.addWidget(self._input_row)
-
-        layout.addWidget(_section("ACTIONS"))
-
-        act_btn_row = QHBoxLayout()
-        act_btn_row.setSpacing(4)
-        add_act_btn = _btn("+ Add Action", accent=True, small=True)
-        add_act_btn.clicked.connect(self._add_action)
-        del_act_btn = _btn("x", danger=True, small=True)
-        del_act_btn.setFixedWidth(32)
-        del_act_btn.clicked.connect(self._del_action)
-        act_btn_row.addWidget(add_act_btn)
-        act_btn_row.addWidget(del_act_btn)
-        act_btn_row.addStretch()
-        layout.addLayout(act_btn_row)
-
-        self.action_list = QListWidget()
-        self.action_list.setStyleSheet(_list_style())
-        self.action_list.setFixedHeight(100)
-        self.action_list.currentRowChanged.connect(self._on_action_selected)
-        layout.addWidget(self.action_list)
-
-        self.action_editor = ActionEditor()
-        self.action_editor.changed.connect(self._on_action_changed)
-        self.action_editor.setVisible(False)
-        layout.addWidget(self.action_editor)
-
-        self._layout = layout
-
-    def _change_trigger(self):
-        if self._behavior is None:
-            return
-        dlg = TriggerPickerDialog(OBJECT_TRIGGERS, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        code = dlg.selected_trigger()
-        if not code:
-            return
-        self._behavior.trigger = code
-        self._update_trigger_label(code)
-        self._update_button_row(code)
-        self._frame_row.setVisible(code in ("on_frame", "on_timer"))
-        self._bool_row.setVisible(code in ("on_true", "on_false"))
-        self._input_row.setVisible(code == "on_input")
-        self._emit()
-
-    def _update_trigger_label(self, code: str):
-        tmap = {tup[0]: tup[1] for tup in OBJECT_TRIGGERS}
-        self._trigger_label.setText(tmap.get(code, code))
-
-    def _update_button_row(self, code: str):
-        is_btn = code in BUTTON_TRIGGERS
-        self._button_row.setVisible(is_btn)
-        if is_btn and self._behavior:
-            self._suppress = True
-            idx = self.button_combo.findText(self._behavior.button or "cross")
-            self.button_combo.setCurrentIndex(idx if idx >= 0 else 0)
-            self._suppress = False
-
-    def _on_button_changed(self, value: str):
-        if self._suppress or self._behavior is None:
-            return
-        self._behavior.button = value
-        self._emit()
-
-    def _on_trigger_changed(self, trigger: str):
-        # kept for internal visibility row updates only
-        code = trigger
-        self._frame_row.setVisible(code in ("on_frame", "on_timer"))
-        self._bool_row.setVisible(code in ("on_true", "on_false"))
-        self._input_row.setVisible(code == "on_input")
-        self._emit()
-
-    def _on_frame_count_changed(self, v: int):
-        self.frame_sec_lbl.setText(f"~{v/60:.2f}s at 60fps")
-        self._emit()
-
-    def _emit(self):
-        if self._suppress or self._behavior is None:
-            return
-        b = self._behavior
-        b.frame_count = self.frame_count_spin.value()
-        b.bool_var = self.bool_var_combo.currentText()
-        b.input_action_name = self.input_action_combo.currentText()
-        if b.trigger in BUTTON_TRIGGERS:
-            b.button = self.button_combo.currentText()
-        self.changed.emit()
-
-    def _add_action(self):
-        if self._behavior is None or self._project is None:
-            return
-        # This uses the ActionPickerDialog from tab_editor, so the list is identical
-        dlg = ActionPickerDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        action_type = dlg.selected_action_type()
-        if not action_type:
-            return
-        new_action = BehaviorAction(action_type=action_type)
-        self._behavior.actions.append(new_action)
-        self._refresh_action_list()
-        self.action_list.setCurrentRow(len(self._behavior.actions) - 1)
-        self.changed.emit()
-
-    def _del_action(self):
-        if self._behavior is None:
-            return
-        row = self.action_list.currentRow()
-        if 0 <= row < len(self._behavior.actions):
-            self._behavior.actions.pop(row)
-            self._refresh_action_list()
-            self.action_editor.setVisible(False)
-            self.changed.emit()
-
-    def _refresh_action_list(self):
-        if self._behavior is None:
-            return
-        self.action_list.blockSignals(True)
-        self.action_list.clear()
-        for i, a in enumerate(self._behavior.actions):
-            self.action_list.addItem(f"{i+1:02d}. {_action_summary(a)}")
-        self.action_list.blockSignals(False)
-
-    def _on_action_selected(self, row: int):
-        if self._behavior is None or row < 0 or row >= len(self._behavior.actions):
-            self.action_editor.setVisible(False)
-            return
-        self.action_editor.load_action(self._behavior.actions[row], self._project)
-        self.action_editor.setVisible(True)
-
-    def _on_action_changed(self):
-        row = self.action_list.currentRow()
-        if self._behavior and 0 <= row < len(self._behavior.actions):
-            self.action_list.item(row).setText(f"{row+1:02d}. {_action_summary(self._behavior.actions[row])}")
-        self.changed.emit()
-
-    def load_behavior(self, behavior: Behavior, project: Project):
-        self._behavior = behavior
-        self._project = project
-        self._suppress = True
-
-        self.bool_var_combo.clear()
-        for v in project.game_data.variables:
-            if v.var_type == "bool":
-                self.bool_var_combo.addItem(v.name)
-
-        self.input_action_combo.clear()
-        for ia in project.game_data.input_actions:
-            self.input_action_combo.addItem(ia.name)
-
-        self._trigger_change_btn.setEnabled(True)
-        self._update_trigger_label(behavior.trigger)
-        self._update_button_row(behavior.trigger)
-        self._frame_row.setVisible(behavior.trigger in ("on_frame", "on_timer"))
-        self._bool_row.setVisible(behavior.trigger in ("on_true", "on_false"))
-        self._input_row.setVisible(behavior.trigger == "on_input")
-
-        self.frame_count_spin.setValue(behavior.frame_count)
-        self.frame_sec_lbl.setText(f"~{behavior.frame_count/60:.2f}s at 60fps")
-        bi = self.bool_var_combo.findText(behavior.bool_var)
-        if bi >= 0:
-            self.bool_var_combo.setCurrentIndex(bi)
-        ii = self.input_action_combo.findText(getattr(behavior, "input_action_name", ""))
-        if ii >= 0:
-            self.input_action_combo.setCurrentIndex(ii)
-
-        self._refresh_action_list()
-        self.action_editor.setVisible(False)
-        self._suppress = False
-
-
 # -- Object definition editor --------------------------------------------------
 
 class ObjectDefEditor(QWidget):
@@ -508,6 +199,14 @@ class ObjectDefEditor(QWidget):
         self.name_edit.setStyleSheet(_field_style())
         self.name_edit.textChanged.connect(self._emit)
         self._layout.addWidget(self.name_edit)
+
+        # Groups
+        self._layout.addWidget(_make_dim_label("Groups (comma-separated):"))
+        self.groups_edit = QLineEdit()
+        self.groups_edit.setPlaceholderText("e.g. enemies, coins, pickups")
+        self.groups_edit.setStyleSheet(_field_style())
+        self.groups_edit.textChanged.connect(self._emit)
+        self._layout.addWidget(self.groups_edit)
 
         # Behavior type
         self._layout.addWidget(_section("BEHAVIOR TYPE"))
@@ -772,6 +471,42 @@ class ObjectDefEditor(QWidget):
         self._ani_group.setVisible(False)
         self._layout.addWidget(self._ani_group)
 
+        # ── LayerAnimation config (shown when behavior_type == LayerAnimation) ──
+        self._layer_anim_group = QWidget()
+        lag = QVBoxLayout(self._layer_anim_group)
+        lag.setContentsMargins(0, 0, 0, 0)
+        lag.setSpacing(6)
+
+        lag.addWidget(_section("LAYER ANIMATION"))
+        lag.addWidget(_divider())
+
+        lag.addWidget(_make_dim_label("Paper Doll Asset:"))
+        self.layer_anim_combo = QComboBox()
+        self.layer_anim_combo.setStyleSheet(_field_style())
+        self.layer_anim_combo.currentIndexChanged.connect(self._emit)
+        lag.addWidget(self.layer_anim_combo)
+
+        self.layer_anim_blink_check = QCheckBox("Blink enabled at spawn")
+        self.layer_anim_blink_check.setStyleSheet(_field_style())
+        self.layer_anim_blink_check.setChecked(True)
+        self.layer_anim_blink_check.stateChanged.connect(self._emit)
+        lag.addWidget(self.layer_anim_blink_check)
+
+        self.layer_anim_talk_check = QCheckBox("Talk enabled at spawn")
+        self.layer_anim_talk_check.setStyleSheet(_field_style())
+        self.layer_anim_talk_check.setChecked(True)
+        self.layer_anim_talk_check.stateChanged.connect(self._emit)
+        lag.addWidget(self.layer_anim_talk_check)
+
+        self.layer_anim_idle_check = QCheckBox("Idle breathing enabled at spawn")
+        self.layer_anim_idle_check.setStyleSheet(_field_style())
+        self.layer_anim_idle_check.setChecked(True)
+        self.layer_anim_idle_check.stateChanged.connect(self._emit)
+        lag.addWidget(self.layer_anim_idle_check)
+
+        self._layer_anim_group.setVisible(False)
+        self._layout.addWidget(self._layer_anim_group)
+
         # Track GUI colors
         self._gui_text_color = "#FFFFFF"
         self._gui_bg_color = "#000000"
@@ -871,6 +606,12 @@ class ObjectDefEditor(QWidget):
         self.visible_check.stateChanged.connect(self._emit)
         self._layout.addWidget(self.visible_check)
 
+        self.gravity_check = QCheckBox("Affected by gravity")
+        self.gravity_check.setStyleSheet(_field_style())
+        self.gravity_check.setChecked(False)
+        self.gravity_check.stateChanged.connect(self._emit)
+        self._layout.addWidget(self.gravity_check)
+
         # Frames
         self._frames_section = QWidget()
         fsl = QVBoxLayout(self._frames_section)
@@ -958,9 +699,13 @@ class ObjectDefEditor(QWidget):
             return
         o = self._obj
         o.name = self.name_edit.text().strip() or "Object"
+        # Groups: parse comma-separated string → list of stripped non-empty strings
+        raw_groups = self.groups_edit.text()
+        o.groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
         o.width = self.width_spin.value()
         o.height = self.height_spin.value()
         o.visible_default = self.visible_check.isChecked()
+        o.affected_by_gravity = self.gravity_check.isChecked()
         o.vn_display_name = self.vn_name_edit.text()
         o.vn_name_color = self._vn_color
         # GUI fields
@@ -982,6 +727,11 @@ class ObjectDefEditor(QWidget):
         o.ani_start_paused = self.ani_start_paused_check.isChecked()
         o.ani_pause_frame = self.ani_pause_frame_spin.value()
         o.ani_fps_override = self.ani_fps_spin.value()
+        # LayerAnimation fields
+        o.layer_anim_id = self.layer_anim_combo.currentData() or ""
+        o.layer_anim_blink = self.layer_anim_blink_check.isChecked()
+        o.layer_anim_talk = self.layer_anim_talk_check.isChecked()
+        o.layer_anim_idle = self.layer_anim_idle_check.isChecked()
         # Camera fields
         o.camera_bounds_enabled = self.cam_bounds_check.isChecked()
         o.camera_bounds_width = self.cam_w_spin.value()
@@ -998,6 +748,7 @@ class ObjectDefEditor(QWidget):
         is_gui = btype.startswith("GUI_")
         self._gui_group.setVisible(is_gui)
         self._ani_group.setVisible(btype == "Animation")
+        self._layer_anim_group.setVisible(btype == "LayerAnimation")
 
     def _on_camera_bounds_changed(self, state):
         self._cam_bounds_row.setVisible(bool(state))
@@ -1045,6 +796,7 @@ class ObjectDefEditor(QWidget):
         if self._obj is None:
             return
         self._obj.frames.append(SpriteFrame())
+        self._obj.sync_collision_frames()
         self._refresh_frame_list()
         self.frame_list.setCurrentRow(len(self._obj.frames) - 1)
         self._update_fps_label()
@@ -1056,6 +808,7 @@ class ObjectDefEditor(QWidget):
         row = self.frame_list.currentRow()
         if 0 <= row < len(self._obj.frames):
             self._obj.frames.pop(row)
+            self._obj.sync_collision_frames()
             self._refresh_frame_list()
             self._frame_editor.setVisible(False)
             self._update_fps_label()
@@ -1152,9 +905,11 @@ class ObjectDefEditor(QWidget):
         self._suppress = True
 
         self.name_edit.setText(obj.name)
+        self.groups_edit.setText(", ".join(obj.groups) if obj.groups else "")
         self.width_spin.setValue(obj.width)
         self.height_spin.setValue(obj.height)
         self.visible_check.setChecked(obj.visible_default)
+        self.gravity_check.setChecked(getattr(obj, 'affected_by_gravity', False))
 
         # Behavior type
         idx = self.behavior_type_combo.findText(obj.behavior_type)
@@ -1178,6 +933,7 @@ class ObjectDefEditor(QWidget):
         
         self._size_row.setVisible(not is_cam)
         self.visible_check.setVisible(not is_cam)
+        self.gravity_check.setVisible(not is_cam)
         self._frames_section.setVisible(not is_cam)
         
         if is_gui:
@@ -1281,6 +1037,24 @@ class ObjectDefEditor(QWidget):
         self.ani_pause_frame_spin.setValue(getattr(obj, 'ani_pause_frame', 0))
         self.ani_fps_spin.setValue(getattr(obj, 'ani_fps_override', 0))
 
+        # LayerAnimation fields
+        self._layer_anim_group.setVisible(obj.behavior_type == "LayerAnimation")
+        self.layer_anim_combo.blockSignals(True)
+        self.layer_anim_combo.clear()
+        self.layer_anim_combo.addItem("(none)", "")
+        if hasattr(project, 'paper_dolls'):
+            for pd in project.paper_dolls:
+                self.layer_anim_combo.addItem(pd.name, pd.id)
+        if getattr(obj, 'layer_anim_id', ''):
+            for i in range(self.layer_anim_combo.count()):
+                if self.layer_anim_combo.itemData(i) == obj.layer_anim_id:
+                    self.layer_anim_combo.setCurrentIndex(i)
+                    break
+        self.layer_anim_combo.blockSignals(False)
+        self.layer_anim_blink_check.setChecked(getattr(obj, 'layer_anim_blink', True))
+        self.layer_anim_talk_check.setChecked(getattr(obj, 'layer_anim_talk', True))
+        self.layer_anim_idle_check.setChecked(getattr(obj, 'layer_anim_idle', True))
+
         self._refresh_frame_list()
         self._update_fps_label()
         self._refresh_beh_summary()
@@ -1288,6 +1062,645 @@ class ObjectDefEditor(QWidget):
         #self.behavior_editor.setVisible(False)
 
         self._suppress = False
+
+
+# -- Collision Preview Widget --------------------------------------------------
+
+class CollisionPreviewWidget(QWidget):
+    """Zoomable, pannable sprite preview with draggable collision boxes."""
+    box_changed = Signal()   # emitted when a box is moved / resized
+
+    _HANDLE = 6              # edge-handle grab radius in screen px
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap: QPixmap | None = None
+        self._boxes: list[CollisionBox] = []
+        self._selected: int = -1
+
+        # view transform
+        self._zoom: float = 1.0
+        self._pan: QPointF = QPointF(0, 0)
+
+        # interaction state
+        self._dragging: bool = False
+        self._resizing: str = ""          # "", "l", "r", "t", "b", "tl", "tr", "bl", "br"
+        self._drag_start: QPointF = QPointF()
+        self._box_start: tuple = (0, 0, 0, 0)
+        self._mid_panning: bool = False
+        self._pan_start: QPointF = QPointF()
+        self._pan_origin: QPointF = QPointF()
+
+        self.setMinimumSize(200, 200)
+        self.setMouseTracking(True)
+        self.setStyleSheet(f"background: {DARK};")
+
+    # -- public api --
+
+    def set_pixmap(self, pm: QPixmap | None):
+        self._pixmap = pm
+        self._fit_view()
+        self.update()
+
+    def set_boxes(self, boxes: list[CollisionBox], selected: int = -1):
+        self._boxes = boxes
+        self._selected = selected
+        self.update()
+
+    def set_selected(self, idx: int):
+        self._selected = idx
+        self.update()
+
+    # -- coordinate helpers --
+
+    def _widget_to_sprite(self, pos: QPointF) -> QPointF:
+        """Convert widget pixel → sprite pixel coords."""
+        return QPointF(
+            (pos.x() - self._pan.x()) / self._zoom,
+            (pos.y() - self._pan.y()) / self._zoom,
+        )
+
+    def _sprite_to_widget(self, pos: QPointF) -> QPointF:
+        return QPointF(
+            pos.x() * self._zoom + self._pan.x(),
+            pos.y() * self._zoom + self._pan.y(),
+        )
+
+    def _box_widget_rect(self, cb: CollisionBox) -> QRectF:
+        tl = self._sprite_to_widget(QPointF(cb.x, cb.y))
+        br = self._sprite_to_widget(QPointF(cb.x + cb.width, cb.y + cb.height))
+        return QRectF(tl, br)
+
+    def _fit_view(self):
+        if self._pixmap is None or self._pixmap.isNull():
+            self._zoom = 1.0
+            self._pan = QPointF(0, 0)
+            return
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        ww, wh = self.width(), self.height()
+        margin = 20
+        sx = (ww - margin * 2) / max(pw, 1)
+        sy = (wh - margin * 2) / max(ph, 1)
+        self._zoom = min(sx, sy, 4.0)
+        self._pan = QPointF(
+            (ww - pw * self._zoom) / 2,
+            (wh - ph * self._zoom) / 2,
+        )
+
+    # -- hit testing --
+
+    def _edge_hit(self, pos: QPointF) -> tuple[int, str]:
+        """Return (box_index, edge_code) under widget pos. Prefer selected box."""
+        h = self._HANDLE
+        order = list(range(len(self._boxes)))
+        if 0 <= self._selected < len(self._boxes):
+            order.remove(self._selected)
+            order.append(self._selected)  # check selected last → highest priority
+        for i in reversed(order):
+            r = self._box_widget_rect(self._boxes[i])
+            on_l = abs(pos.x() - r.left()) < h
+            on_r = abs(pos.x() - r.right()) < h
+            on_t = abs(pos.y() - r.top()) < h
+            on_b = abs(pos.y() - r.bottom()) < h
+            in_x = r.left() - h < pos.x() < r.right() + h
+            in_y = r.top() - h < pos.y() < r.bottom() + h
+
+            if on_t and on_l and in_x and in_y:
+                return i, "tl"
+            if on_t and on_r and in_x and in_y:
+                return i, "tr"
+            if on_b and on_l and in_x and in_y:
+                return i, "bl"
+            if on_b and on_r and in_x and in_y:
+                return i, "br"
+            if on_l and in_y:
+                return i, "l"
+            if on_r and in_y:
+                return i, "r"
+            if on_t and in_x:
+                return i, "t"
+            if on_b and in_x:
+                return i, "b"
+            if r.contains(pos):
+                return i, "move"
+        return -1, ""
+
+    # -- painting --
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # checkerboard background
+        p.fillRect(self.rect(), QColor(DARK))
+
+        if self._pixmap and not self._pixmap.isNull():
+            # draw sprite
+            pw, ph = self._pixmap.width(), self._pixmap.height()
+            dst = QRectF(
+                self._pan.x(), self._pan.y(),
+                pw * self._zoom, ph * self._zoom,
+            )
+            p.drawPixmap(dst.toRect(), self._pixmap)
+            # sprite boundary outline
+            p.setPen(QPen(QColor(BORDER), 1, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(dst)
+
+        # draw collision boxes
+        for i, cb in enumerate(self._boxes):
+            r = self._box_widget_rect(cb)
+            is_sel = (i == self._selected)
+            fill = QColor(ACCENT)
+            fill.setAlpha(60 if is_sel else 30)
+            border_color = QColor(ACCENT) if is_sel else QColor("#4ade80")
+            p.setBrush(QBrush(fill))
+            p.setPen(QPen(border_color, 2 if is_sel else 1))
+            p.drawRect(r)
+            # corner handles for selected
+            if is_sel:
+                hs = 4
+                for corner in [r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()]:
+                    p.fillRect(QRectF(corner.x() - hs, corner.y() - hs, hs * 2, hs * 2), border_color)
+            # label
+            p.setPen(QPen(border_color))
+            p.drawText(r.adjusted(3, 1, 0, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, str(i))
+
+        p.end()
+
+    # -- mouse events --
+
+    def wheelEvent(self, event: QWheelEvent):
+        old_zoom = self._zoom
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self._zoom = max(0.1, min(self._zoom * factor, 20.0))
+        # zoom toward cursor
+        cursor = QPointF(event.position())
+        self._pan = cursor - (cursor - self._pan) * (self._zoom / old_zoom)
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        pos = QPointF(event.position())
+        # middle button → pan
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._mid_panning = True
+            self._pan_start = pos
+            self._pan_origin = QPointF(self._pan)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        idx, edge = self._edge_hit(pos)
+        if idx >= 0:
+            self._selected = idx
+            cb = self._boxes[idx]
+            self._box_start = (cb.x, cb.y, cb.width, cb.height)
+            self._drag_start = self._widget_to_sprite(pos)
+            if edge == "move":
+                self._dragging = True
+            else:
+                self._resizing = edge
+            self.box_changed.emit()
+            self.update()
+        else:
+            self._selected = -1
+            self.box_changed.emit()
+            self.update()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        pos = QPointF(event.position())
+        if self._mid_panning:
+            delta = pos - self._pan_start
+            self._pan = self._pan_origin + delta
+            self.update()
+            return
+
+        if self._dragging and 0 <= self._selected < len(self._boxes):
+            sp = self._widget_to_sprite(pos)
+            dx = int(sp.x() - self._drag_start.x())
+            dy = int(sp.y() - self._drag_start.y())
+            cb = self._boxes[self._selected]
+            cb.x = self._box_start[0] + dx
+            cb.y = self._box_start[1] + dy
+            self.box_changed.emit()
+            self.update()
+            return
+
+        if self._resizing and 0 <= self._selected < len(self._boxes):
+            sp = self._widget_to_sprite(pos)
+            dx = int(sp.x() - self._drag_start.x())
+            dy = int(sp.y() - self._drag_start.y())
+            ox, oy, ow, oh = self._box_start
+            cb = self._boxes[self._selected]
+            e = self._resizing
+            nx, ny, nw, nh = ox, oy, ow, oh
+            if "l" in e:
+                nx = ox + dx
+                nw = ow - dx
+            if "r" in e:
+                nw = ow + dx
+            if "t" in e:
+                ny = oy + dy
+                nh = oh - dy
+            if "b" in e:
+                nh = oh + dy
+            # enforce minimum size
+            if nw < 4:
+                if "l" in e:
+                    nx = ox + ow - 4
+                nw = 4
+            if nh < 4:
+                if "t" in e:
+                    ny = oy + oh - 4
+                nh = 4
+            cb.x, cb.y, cb.width, cb.height = nx, ny, nw, nh
+            self.box_changed.emit()
+            self.update()
+            return
+
+        # cursor shape based on hover
+        idx, edge = self._edge_hit(pos)
+        if edge in ("l", "r"):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif edge in ("t", "b"):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif edge in ("tl", "br"):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif edge in ("tr", "bl"):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif edge == "move":
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._mid_panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+        self._dragging = False
+        self._resizing = ""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_view()
+
+
+# -- Collision Editor Panel (right side) ---------------------------------------
+
+class CollisionEditorPanel(QWidget):
+    """Replaces 'Placed in Scene' — edits per-frame collision boxes on an ObjectDefinition."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._obj: ObjectDefinition | None = None
+        self._project: Project | None = None
+        self._frame_idx: int = 0
+        self._suppress = False
+        self._build_ui()
+
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        title = QLabel("COLLISION EDITOR")
+        title.setStyleSheet(f"color: {DIM}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;")
+        lay.addWidget(title)
+
+        # Preview canvas
+        self._preview = CollisionPreviewWidget()
+        self._preview.box_changed.connect(self._on_box_dragged)
+        lay.addWidget(self._preview, stretch=1)
+
+        # Frame navigation
+        nav = QHBoxLayout()
+        nav.setSpacing(4)
+        self._prev_btn = _btn("◀", small=True)
+        self._prev_btn.setFixedWidth(32)
+        self._prev_btn.clicked.connect(self._prev_frame)
+        self._next_btn = _btn("▶", small=True)
+        self._next_btn.setFixedWidth(32)
+        self._next_btn.clicked.connect(self._next_frame)
+        self._frame_label = QLabel("Frame 1 / 1")
+        self._frame_label.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+        self._frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nav.addWidget(self._prev_btn)
+        nav.addWidget(self._frame_label, stretch=1)
+        nav.addWidget(self._next_btn)
+        lay.addLayout(nav)
+
+        lay.addWidget(_divider())
+
+        # Box list
+        box_hdr = QHBoxLayout()
+        box_hdr.setSpacing(4)
+        box_lbl = QLabel("BOXES")
+        box_lbl.setStyleSheet(f"color: {DIM}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;")
+        box_hdr.addWidget(box_lbl)
+        box_hdr.addStretch()
+        self._add_box_btn = _btn("+", accent=True, small=True)
+        self._add_box_btn.setFixedWidth(28)
+        self._add_box_btn.setToolTip("Add collision box")
+        self._add_box_btn.clicked.connect(self._add_box)
+        self._del_box_btn = _btn("x", danger=True, small=True)
+        self._del_box_btn.setFixedWidth(28)
+        self._del_box_btn.setToolTip("Delete selected box")
+        self._del_box_btn.clicked.connect(self._del_box)
+        box_hdr.addWidget(self._add_box_btn)
+        box_hdr.addWidget(self._del_box_btn)
+        lay.addLayout(box_hdr)
+
+        self._box_list = QListWidget()
+        self._box_list.setMaximumHeight(100)
+        self._box_list.setStyleSheet(_list_style())
+        self._box_list.currentRowChanged.connect(self._on_box_selected)
+        lay.addWidget(self._box_list)
+
+        # Manual fields for selected box
+        self._fields_widget = QWidget()
+        fl = QVBoxLayout(self._fields_widget)
+        fl.setContentsMargins(0, 4, 0, 0)
+        fl.setSpacing(4)
+
+        r1 = QHBoxLayout()
+        r1.setSpacing(4)
+        r1.addWidget(_make_dim_label("X:"))
+        self._bx_spin = QSpinBox()
+        self._bx_spin.setRange(-9999, 9999)
+        self._bx_spin.setFixedWidth(60)
+        self._bx_spin.setStyleSheet(_field_style())
+        self._bx_spin.valueChanged.connect(self._on_field_changed)
+        r1.addWidget(self._bx_spin)
+        r1.addWidget(_make_dim_label("Y:"))
+        self._by_spin = QSpinBox()
+        self._by_spin.setRange(-9999, 9999)
+        self._by_spin.setFixedWidth(60)
+        self._by_spin.setStyleSheet(_field_style())
+        self._by_spin.valueChanged.connect(self._on_field_changed)
+        r1.addWidget(self._by_spin)
+        r1.addStretch()
+        fl.addLayout(r1)
+
+        r2 = QHBoxLayout()
+        r2.setSpacing(4)
+        r2.addWidget(_make_dim_label("W:"))
+        self._bw_spin = QSpinBox()
+        self._bw_spin.setRange(1, 9999)
+        self._bw_spin.setFixedWidth(60)
+        self._bw_spin.setStyleSheet(_field_style())
+        self._bw_spin.valueChanged.connect(self._on_field_changed)
+        r2.addWidget(self._bw_spin)
+        r2.addWidget(_make_dim_label("H:"))
+        self._bh_spin = QSpinBox()
+        self._bh_spin.setRange(1, 9999)
+        self._bh_spin.setFixedWidth(60)
+        self._bh_spin.setStyleSheet(_field_style())
+        self._bh_spin.valueChanged.connect(self._on_field_changed)
+        r2.addWidget(self._bh_spin)
+        r2.addStretch()
+        fl.addLayout(r2)
+
+        self._fields_widget.setVisible(False)
+        lay.addWidget(self._fields_widget)
+
+        # Copy helpers
+        copy_row = QHBoxLayout()
+        copy_row.setSpacing(4)
+        self._copy_prev_btn = _btn("Copy ◀ Prev", small=True)
+        self._copy_prev_btn.setToolTip("Copy boxes from previous frame")
+        self._copy_prev_btn.clicked.connect(self._copy_from_prev)
+        self._copy_all_btn = _btn("Copy → All", small=True)
+        self._copy_all_btn.setToolTip("Copy this frame's boxes to all frames")
+        self._copy_all_btn.clicked.connect(self._copy_to_all)
+        copy_row.addWidget(self._copy_prev_btn)
+        copy_row.addWidget(self._copy_all_btn)
+        copy_row.addStretch()
+        lay.addLayout(copy_row)
+
+        lay.addStretch()
+
+    # -- public api --
+
+    def load_object(self, obj: ObjectDefinition | None, project: Project | None):
+        self._obj = obj
+        self._project = project
+        self._frame_idx = 0
+        if obj:
+            obj.sync_collision_frames(self._frame_count())
+        self._refresh()
+
+    # -- frame navigation --
+
+    def _frame_count(self) -> int:
+        if self._obj is None:
+            return 0
+        # Animation behavior type: frame count comes from the .ani export
+        if self._obj.behavior_type == "Animation" and self._obj.ani_file_id and self._project:
+            ani = self._project.get_animation_export(self._obj.ani_file_id)
+            if ani:
+                return max(ani.frame_count, 1)
+        return max(len(self._obj.frames), 1)
+
+    def _prev_frame(self):
+        if self._frame_idx > 0:
+            self._frame_idx -= 1
+            self._refresh()
+
+    def _next_frame(self):
+        if self._frame_idx < self._frame_count() - 1:
+            self._frame_idx += 1
+            self._refresh()
+
+    # -- refresh everything --
+
+    def _refresh(self):
+        if self._obj is None:
+            self._preview.set_pixmap(None)
+            self._preview.set_boxes([])
+            self._box_list.clear()
+            self._frame_label.setText("No object")
+            self._fields_widget.setVisible(False)
+            return
+
+        self._obj.sync_collision_frames(self._frame_count())
+        fc = self._frame_count()
+        self._frame_idx = max(0, min(self._frame_idx, fc - 1))
+        self._frame_label.setText(f"Frame {self._frame_idx + 1} / {fc}")
+        self._prev_btn.setEnabled(self._frame_idx > 0)
+        self._next_btn.setEnabled(self._frame_idx < fc - 1)
+
+        # load sprite pixmap for current frame
+        pm = None
+        if self._project and self._obj.behavior_type == "Animation" and self._obj.ani_file_id:
+            # Animation object: crop frame from spritesheet
+            ani = self._project.get_animation_export(self._obj.ani_file_id)
+            if ani and ani.spritesheet_path and self._project.project_folder:
+                import os
+                sheet_path = os.path.join(self._project.project_folder, "animations", ani.spritesheet_path)
+                sheet_pm = QPixmap(sheet_path)
+                if not sheet_pm.isNull():
+                    cols = max(ani.sheet_width // max(ani.frame_width, 1), 1)
+                    col = self._frame_idx % cols
+                    row = self._frame_idx // cols
+                    sx = col * ani.frame_width
+                    sy = row * ani.frame_height
+                    pm = sheet_pm.copy(sx, sy, ani.frame_width, ani.frame_height)
+                    if pm.isNull():
+                        pm = None
+        elif self._project and self._obj.frames:
+            # Regular sprite frames: look up registered image
+            fidx = min(self._frame_idx, len(self._obj.frames) - 1)
+            sf = self._obj.frames[fidx]
+            if sf.image_id:
+                img = self._project.get_image(sf.image_id)
+                if img and img.path:
+                    pm = QPixmap(img.path)
+                    if pm.isNull():
+                        pm = None
+        # fallback: show blank area sized to object w/h
+        if pm is None:
+            pm = QPixmap(max(self._obj.width, 16), max(self._obj.height, 16))
+            pm.fill(QColor(SURFACE))
+        self._preview.set_pixmap(pm)
+
+        # boxes for this frame
+        boxes = self._obj.collision_boxes[self._frame_idx] if self._frame_idx < len(self._obj.collision_boxes) else []
+        sel = min(self._box_list.currentRow(), len(boxes) - 1)
+        self._preview.set_boxes(boxes, sel)
+        self._refresh_box_list(sel)
+
+    def _refresh_box_list(self, select: int = -1):
+        if self._obj is None:
+            self._box_list.clear()
+            return
+        boxes = self._current_boxes()
+        self._box_list.blockSignals(True)
+        self._box_list.clear()
+        for i, cb in enumerate(boxes):
+            self._box_list.addItem(f"Box {i}: ({cb.x},{cb.y}) {cb.width}×{cb.height}")
+        self._box_list.blockSignals(False)
+        if 0 <= select < len(boxes):
+            self._box_list.setCurrentRow(select)
+        self._on_box_selected(self._box_list.currentRow())
+
+    def _current_boxes(self) -> list[CollisionBox]:
+        if self._obj is None or self._frame_idx >= len(self._obj.collision_boxes):
+            return []
+        return self._obj.collision_boxes[self._frame_idx]
+
+    # -- box operations --
+
+    def _add_box(self):
+        if self._obj is None:
+            return
+        self._obj.sync_collision_frames(self._frame_count())
+        # default box centered on object — use ani frame size for Animation types
+        obj_w, obj_h = self._obj.width, self._obj.height
+        if self._obj.behavior_type == "Animation" and self._obj.ani_file_id and self._project:
+            ani = self._project.get_animation_export(self._obj.ani_file_id)
+            if ani:
+                obj_w, obj_h = ani.frame_width, ani.frame_height
+        bw = max(obj_w // 2, 8)
+        bh = max(obj_h // 2, 8)
+        bx = (obj_w - bw) // 2
+        by = (obj_h - bh) // 2
+        cb = CollisionBox(x=bx, y=by, width=bw, height=bh)
+        self._obj.collision_boxes[self._frame_idx].append(cb)
+        self._refresh_box_list(len(self._obj.collision_boxes[self._frame_idx]) - 1)
+        self._preview.set_boxes(self._current_boxes(), self._box_list.currentRow())
+        self.changed.emit()
+
+    def _del_box(self):
+        if self._obj is None:
+            return
+        boxes = self._current_boxes()
+        row = self._box_list.currentRow()
+        if 0 <= row < len(boxes):
+            boxes.pop(row)
+            new_sel = min(row, len(boxes) - 1)
+            self._refresh_box_list(new_sel)
+            self._preview.set_boxes(self._current_boxes(), new_sel)
+            self.changed.emit()
+
+    def _on_box_selected(self, row: int):
+        boxes = self._current_boxes()
+        if 0 <= row < len(boxes):
+            self._suppress = True
+            cb = boxes[row]
+            self._bx_spin.setValue(cb.x)
+            self._by_spin.setValue(cb.y)
+            self._bw_spin.setValue(cb.width)
+            self._bh_spin.setValue(cb.height)
+            self._suppress = False
+            self._fields_widget.setVisible(True)
+            self._preview.set_selected(row)
+        else:
+            self._fields_widget.setVisible(False)
+            self._preview.set_selected(-1)
+
+    def _on_field_changed(self):
+        if self._suppress or self._obj is None:
+            return
+        boxes = self._current_boxes()
+        row = self._box_list.currentRow()
+        if 0 <= row < len(boxes):
+            cb = boxes[row]
+            cb.x = self._bx_spin.value()
+            cb.y = self._by_spin.value()
+            cb.width = self._bw_spin.value()
+            cb.height = self._bh_spin.value()
+            self._refresh_box_list(row)
+            self._preview.set_boxes(self._current_boxes(), row)
+            self.changed.emit()
+
+    def _on_box_dragged(self):
+        """Called when user drags a box in the preview canvas."""
+        row = self._preview._selected
+        boxes = self._current_boxes()
+        if 0 <= row < len(boxes):
+            if self._box_list.currentRow() != row:
+                self._box_list.setCurrentRow(row)
+            self._suppress = True
+            cb = boxes[row]
+            self._bx_spin.setValue(cb.x)
+            self._by_spin.setValue(cb.y)
+            self._bw_spin.setValue(cb.width)
+            self._bh_spin.setValue(cb.height)
+            self._suppress = False
+            # refresh list text
+            self._box_list.blockSignals(True)
+            item = self._box_list.item(row)
+            if item:
+                item.setText(f"Box {row}: ({cb.x},{cb.y}) {cb.width}×{cb.height}")
+            self._box_list.blockSignals(False)
+            self.changed.emit()
+
+    # -- copy helpers --
+
+    def _copy_from_prev(self):
+        if self._obj is None or self._frame_idx <= 0:
+            return
+        import json
+        prev = self._obj.collision_boxes[self._frame_idx - 1]
+        clones = [CollisionBox.from_dict(cb.to_dict()) for cb in prev]
+        self._obj.collision_boxes[self._frame_idx] = clones
+        self._refresh_box_list(0 if clones else -1)
+        self._preview.set_boxes(self._current_boxes(), self._box_list.currentRow())
+        self.changed.emit()
+
+    def _copy_to_all(self):
+        if self._obj is None:
+            return
+        import json
+        src = self._obj.collision_boxes[self._frame_idx]
+        for i in range(len(self._obj.collision_boxes)):
+            if i != self._frame_idx:
+                self._obj.collision_boxes[i] = [CollisionBox.from_dict(cb.to_dict()) for cb in src]
+        self.changed.emit()
 
 
 # -- Objects Tab ---------------------------------------------------------------
@@ -1370,78 +1783,15 @@ class ObjectsTab(QWidget):
         self.def_editor.setEnabled(False)
         splitter.addWidget(self.def_editor)
 
-        # Right: placed instances
-        right = QWidget()
-        right.setMinimumWidth(200)
-        right.setMaximumWidth(280)
-        right.setStyleSheet(f"background: {PANEL}; border-left: 1px solid {BORDER};")
-        self._right_panel = right
-        rv = QVBoxLayout(right)
-        rv.setContentsMargins(8, 8, 8, 8)
-        rv.setSpacing(6)
-
-        inst_title = QLabel("PLACED IN SCENE")
-        inst_title.setStyleSheet(f"color: {DIM}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px;")
-        rv.addWidget(inst_title)
-
-        self.inst_list = QListWidget()
-        self.inst_list.setStyleSheet(_list_style())
-        self.inst_list.currentRowChanged.connect(self._on_inst_selected)
-        rv.addWidget(self.inst_list)
-
-        inst_btns = QHBoxLayout()
-        inst_btns.setSpacing(4)
-        add_inst_btn = _btn("+ Place", accent=True, small=True)
-        add_inst_btn.clicked.connect(self._add_instance)
-        del_inst_btn = _btn("x", danger=True, small=True)
-        del_inst_btn.setFixedWidth(32)
-        del_inst_btn.clicked.connect(self._del_instance)
-        inst_btns.addWidget(add_inst_btn)
-        inst_btns.addWidget(del_inst_btn)
-        inst_btns.addStretch()
-        rv.addLayout(inst_btns)
-
-        inst_def_lbl = _make_dim_label("Object def:")
-        self.inst_def_combo = QComboBox()
-        self.inst_def_combo.setStyleSheet(_field_style())
-        self.inst_def_combo.currentIndexChanged.connect(self._on_inst_def_changed)
-
-        pos_row = QHBoxLayout()
-        pos_row.setSpacing(6)
-        self.inst_x = QSpinBox()
-        self.inst_x.setRange(-9999, 9999)
-        self.inst_x.setFixedWidth(70)
-        self.inst_x.setStyleSheet(_field_style())
-        self.inst_x.valueChanged.connect(self._on_inst_changed)
-        self.inst_y = QSpinBox()
-        self.inst_y.setRange(-9999, 9999)
-        self.inst_y.setFixedWidth(70)
-        self.inst_y.setStyleSheet(_field_style())
-        self.inst_y.valueChanged.connect(self._on_inst_changed)
-        pos_row.addWidget(_make_dim_label("X:"))
-        pos_row.addWidget(self.inst_x)
-        pos_row.addWidget(_make_dim_label("Y:"))
-        pos_row.addWidget(self.inst_y)
-        pos_row.addStretch()
-
-        self.inst_visible = QCheckBox("Visible")
-        self.inst_visible.setStyleSheet(_field_style())
-        self.inst_visible.setChecked(True)
-        self.inst_visible.stateChanged.connect(self._on_inst_changed)
-
-        self._inst_editor_widget = QWidget()
-        iew = QVBoxLayout(self._inst_editor_widget)
-        iew.setContentsMargins(0, 0, 0, 0)
-        iew.addWidget(inst_def_lbl)
-        iew.addWidget(self.inst_def_combo)
-        iew.addLayout(pos_row)
-        iew.addWidget(self.inst_visible)
-        self._inst_editor_widget.setEnabled(False)
-
-        rv.addWidget(self._inst_editor_widget)
-        rv.addStretch()
-        splitter.addWidget(right)
-        splitter.setSizes([210, 500, 220])
+        # Right: collision editor
+        self.collision_editor = CollisionEditorPanel()
+        self.collision_editor.setMinimumWidth(240)
+        self.collision_editor.setMaximumWidth(360)
+        self.collision_editor.setStyleSheet(f"background: {PANEL}; border-left: 1px solid {BORDER};")
+        self.collision_editor.changed.connect(self._on_collision_changed)
+        self._right_panel = self.collision_editor
+        splitter.addWidget(self.collision_editor)
+        splitter.setSizes([210, 500, 280])
         root.addWidget(splitter)
 
     # -- Object def operations -------------------------------------------------
@@ -1461,13 +1811,15 @@ class ObjectsTab(QWidget):
     def _on_def_selected(self, row: int):
         if self._project is None or row < 0 or row >= len(self._project.object_defs):
             self.def_editor.setEnabled(False)
+            self.collision_editor.load_object(None, None)
             return
         self.def_editor.setEnabled(True)
         self.def_editor.load_object(self._project.object_defs[row], self._project)
+        self.collision_editor.load_object(self._project.object_defs[row], self._project)
 
     def _on_def_changed(self):
         self._refresh_def_list()
-        self._refresh_inst_def_combo()
+        self._update_collision_editor()
         self.changed.emit()
 
     def _add_def(self):
@@ -1509,86 +1861,21 @@ class ObjectsTab(QWidget):
                 self.def_editor.setEnabled(False)
             self.changed.emit()
 
-    # -- Placed instance operations --------------------------------------------
+    # -- Collision editor callback ------------------------------------------------
 
-    def _refresh_inst_def_combo(self):
-        if self._project is None:
-            return
-        self.inst_def_combo.blockSignals(True)
-        self.inst_def_combo.clear()
-        self.inst_def_combo.addItem("-- none --", None)
-        for od in self._project.object_defs:
-            self.inst_def_combo.addItem(od.name, od.id)
-        self.inst_def_combo.blockSignals(False)
-
-    def _refresh_inst_list(self):
-        if self._scene is None or self._project is None:
-            return
-        self.inst_list.blockSignals(True)
-        self.inst_list.clear()
-        for po in self._scene.placed_objects:
-            od = self._project.get_object_def(po.object_def_id)
-            label = f"{od.name if od else '?'}  ({po.x}, {po.y})"
-            self.inst_list.addItem(label)
-        self.inst_list.blockSignals(False)
-
-    def _on_inst_selected(self, row: int):
-        if self._scene is None or row < 0 or row >= len(self._scene.placed_objects):
-            self._inst_editor_widget.setEnabled(False)
-            return
-        po = self._scene.placed_objects[row]
-        self._suppress = True
-        for i in range(self.inst_def_combo.count()):
-            if self.inst_def_combo.itemData(i) == po.object_def_id:
-                self.inst_def_combo.setCurrentIndex(i)
-                break
-        self.inst_x.setValue(po.x)
-        self.inst_y.setValue(po.y)
-        self.inst_visible.setChecked(po.visible)
-        self._suppress = False
-        self._inst_editor_widget.setEnabled(True)
-
-    def _on_inst_def_changed(self):
-        if self._suppress or self._scene is None:
-            return
-        row = self.inst_list.currentRow()
-        if 0 <= row < len(self._scene.placed_objects):
-            self._scene.placed_objects[row].object_def_id = self.inst_def_combo.currentData() or ""
-            self._refresh_inst_list()
-            self.changed.emit()
-
-    def _on_inst_changed(self):
-        if self._suppress or self._scene is None:
-            return
-        row = self.inst_list.currentRow()
-        if 0 <= row < len(self._scene.placed_objects):
-            po = self._scene.placed_objects[row]
-            po.x = self.inst_x.value()
-            po.y = self.inst_y.value()
-            po.visible = self.inst_visible.isChecked()
-            self._refresh_inst_list()
-            self.changed.emit()
-
-    def _add_instance(self):
-        if self._scene is None:
-            return
-        po = PlacedObject()
-        if self._project and self._project.object_defs:
-            po.object_def_id = self._project.object_defs[0].id
-        self._scene.placed_objects.append(po)
-        self._refresh_inst_list()
-        self.inst_list.setCurrentRow(len(self._scene.placed_objects) - 1)
+    def _on_collision_changed(self):
         self.changed.emit()
 
-    def _del_instance(self):
-        if self._scene is None:
+    def _update_collision_editor(self):
+        """Feed the currently selected object def to the collision editor."""
+        if self._project is None:
+            self.collision_editor.load_object(None, None)
             return
-        row = self.inst_list.currentRow()
-        if 0 <= row < len(self._scene.placed_objects):
-            self._scene.placed_objects.pop(row)
-            self._refresh_inst_list()
-            self._inst_editor_widget.setEnabled(False)
-            self.changed.emit()
+        row = self.def_list.currentRow()
+        if 0 <= row < len(self._project.object_defs):
+            self.collision_editor.load_object(self._project.object_defs[row], self._project)
+        else:
+            self.collision_editor.load_object(None, None)
 
     # -- Public API ------------------------------------------------------------
 
@@ -1604,25 +1891,19 @@ class ObjectsTab(QWidget):
             QListWidget::item:hover:!selected {{ background: {c['SURFACE2']}; }}
         """
         self.def_list.setStyleSheet(list_style)
-        self.inst_list.setStyleSheet(list_style)
 
     def load_project(self, project: Project):
         self._project = project
         self._refresh_def_list()
-        self._refresh_inst_def_combo()
         if project.object_defs:
             self.def_list.setCurrentRow(0)
         else:
             self.def_editor.setEnabled(False)
+            self.collision_editor.load_object(None, None)
 
     def load_scene(self, scene: Scene, project: Project):
         self._scene = scene
         self._project = project
-        self._refresh_inst_def_combo()
-        self._refresh_inst_list()
-        self._inst_editor_widget.setEnabled(False)
-        if self._scene.placed_objects:
-            self.inst_list.setCurrentRow(0)
 
     def save_scene(self, scene: Scene):
         pass

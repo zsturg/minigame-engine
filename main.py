@@ -31,10 +31,13 @@ from tab_3d_maps import MapsTab3D
 from tab_objects import ObjectsTab
 from tab_editor import EditorTab
 from tab_animation_graph import AnimationGraphTab
+from tab_sfx import TabSfx, SfxPlayer
+from tab_paperdoll import PaperDollTab
 from theme_utils import theme_to_stylesheet, get_default_theme
 import json
+from resource_path import resource_path, writable_path
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+CONFIG_PATH = Path(writable_path("config.json"))
 
 def load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -506,10 +509,10 @@ class NewSceneDialog(QDialog):
 
         TEMPLATE_DESCRIPTIONS = {
             "BLANK":        "Empty — no components pre-added",
-            "VN_SCENE":     "Background + Music + VN Dialog Box",
-            "CHOICE_SCENE": "Background + Music + VN Dialog Box + Choice Menu",
-            "START_SCREEN": "Background + Music  [role: start]",
-            "END_SCENE":    "Background + Music  [role: end]",
+            "VN_SCENE":     "Music + VN Dialog Box",
+            "CHOICE_SCENE": "Music + VN Dialog Box + Choice Menu",
+            "START_SCREEN": "Music  [role: start]",
+            "END_SCENE":    "Music  [role: end]",
             "CUTSCENE":     "Video component",
             "3D_SCENE":     "Raycaster map — free, grid, or scripted movement",
         }
@@ -549,6 +552,9 @@ class MainWindow(QMainWindow):
         cfg = load_config()
         self.current_theme = cfg.get("theme", {"colors": get_default_theme()})
         self._show_explorer = cfg.get("show_explorer", True)
+        self._show_3d_maps = cfg.get("show_3d_maps", False)
+        self._show_sfx = cfg.get("show_sfx", False)
+        self._show_paperdoll = cfg.get("show_paperdoll", False)
 
         self.setWindowTitle("MINIGAME ENGINE")
         self.setMinimumSize(1280, 760)
@@ -594,6 +600,10 @@ class MainWindow(QMainWindow):
         tileset_action.triggered.connect(self.open_tileset_manager)
         tools_menu.addAction(tileset_action)
 
+        spritesheet_action = QAction("Spritesheet Tool…", self)
+        spritesheet_action.triggered.connect(self.open_spritesheet_tool)
+        tools_menu.addAction(spritesheet_action)
+
         theme_action = QAction("Customize Appearance…", self)
         theme_action.triggered.connect(self.open_theme_customizer)
         tools_menu.addAction(theme_action)
@@ -606,11 +616,75 @@ class MainWindow(QMainWindow):
         self.show_explorer_action.triggered.connect(self._toggle_explorer)
         view_menu.addAction(self.show_explorer_action)
 
+        self.show_3d_maps_action = QAction("Show 3D Maps Tab", self)
+        self.show_3d_maps_action.setCheckable(True)
+        self.show_3d_maps_action.setChecked(self._show_3d_maps)
+        self.show_3d_maps_action.triggered.connect(self._toggle_3d_maps_tab)
+        view_menu.addAction(self.show_3d_maps_action)
+
+        self.show_sfx_action = QAction("Show SFX Generator Tab", self)
+        self.show_sfx_action.setCheckable(True)
+        self.show_sfx_action.setChecked(self._show_sfx)
+        self.show_sfx_action.triggered.connect(self._toggle_sfx_tab)
+        view_menu.addAction(self.show_sfx_action)
+
+        self.show_paperdoll_action = QAction("Show Layer Animation Tab", self)
+        self.show_paperdoll_action.setCheckable(True)
+        self.show_paperdoll_action.setChecked(self._show_paperdoll)
+        self.show_paperdoll_action.triggered.connect(self._toggle_paperdoll_tab)
+        view_menu.addAction(self.show_paperdoll_action)
+
     def _toggle_explorer(self, checked: bool):
         """Toggle project explorer visibility."""
         self._show_explorer = checked
         self.editor_tab.set_explorer_visible(checked)
         save_config({"show_explorer": checked})
+
+    def _toggle_3d_maps_tab(self, checked: bool):
+        """Toggle 3D Maps tab visibility."""
+        self._show_3d_maps = checked
+        if checked:
+            # Insert before Game Data (last tab)
+            insert_idx = self.tabs.count() - 1
+            self.tabs.insertTab(insert_idx, self.maps3d_tab, "  3D Maps")
+        else:
+            idx = self.tabs.indexOf(self.maps3d_tab)
+            if idx >= 0:
+                self.tabs.removeTab(idx)
+        save_config({"show_3d_maps": checked})
+
+    def _ensure_3d_maps_visible(self):
+        """Show the 3D Maps tab if it's currently hidden."""
+        if self.tabs.indexOf(self.maps3d_tab) < 0:
+            self._show_3d_maps = True
+            self.show_3d_maps_action.setChecked(True)
+            insert_idx = self.tabs.count() - 1
+            self.tabs.insertTab(insert_idx, self.maps3d_tab, "  3D Maps")
+            save_config({"show_3d_maps": True})
+
+    def _toggle_sfx_tab(self, checked: bool):
+        """Toggle SFX Generator tab visibility."""
+        self._show_sfx = checked
+        if checked:
+            insert_idx = self.tabs.count() - 1
+            self.tabs.insertTab(insert_idx, self.sfx_tab, "  SFX Generator")
+        else:
+            idx = self.tabs.indexOf(self.sfx_tab)
+            if idx >= 0:
+                self.tabs.removeTab(idx)
+        save_config({"show_sfx": checked})
+
+    def _toggle_paperdoll_tab(self, checked: bool):
+        """Toggle Layer Animation tab visibility."""
+        self._show_paperdoll = checked
+        if checked:
+            insert_idx = self.tabs.count() - 1
+            self.tabs.insertTab(insert_idx, self.paperdoll_tab, "  Layer Animation")
+        else:
+            idx = self.tabs.indexOf(self.paperdoll_tab)
+            if idx >= 0:
+                self.tabs.removeTab(idx)
+        save_config({"show_paperdoll": checked})
 
     def open_theme_customizer(self):
         from appearance_customizer import ThemeCustomizer
@@ -667,7 +741,7 @@ class MainWindow(QMainWindow):
         #    of the tab files themselves; they just receive the colors dict
         #    and decide what to do with it. If a tab doesn't implement
         #    restyle() yet, we skip it without crashing.
-        for tab in (self.editor_tab, self.obj_tab, self.scene_tab, self.anim_tab, self.data_tab, self.maps3d_tab):
+        for tab in (self.editor_tab, self.obj_tab, self.scene_tab, self.anim_tab, self.data_tab, self.maps3d_tab, self.sfx_tab, self.paperdoll_tab):
             if hasattr(tab, "restyle"):
                 tab.restyle(c)
 
@@ -709,13 +783,29 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.anim_tab, "  Animation Graph")
 
         self.maps3d_tab = MapsTab3D(self)
-        self.tabs.addTab(self.maps3d_tab, "  3D Maps")
+        if self._show_3d_maps:
+            self.tabs.addTab(self.maps3d_tab, "  3D Maps")
+
+        # SFX Generator tab
+        self.sfx_tab = TabSfx()
+        self._sfx_player = SfxPlayer(parent=self)
+        self.sfx_tab.play_requested.connect(self._sfx_player.play)
+        self.sfx_tab.export_requested.connect(self._sfx_player.export)
+        if self._show_sfx:
+            self.tabs.addTab(self.sfx_tab, "  SFX Generator")
+
+        # Layer Animation (Paper Doll) tab
+        self.paperdoll_tab = PaperDollTab()
+        self.paperdoll_tab.changed.connect(self._mark_unsaved)
+        if self._show_paperdoll:
+            self.tabs.addTab(self.paperdoll_tab, "  Layer Animation")
 
         # Tab 5: Game Data
         self.data_tab = GameDataTab()
         self.data_tab.changed.connect(self._mark_unsaved)
         self.tabs.addTab(self.data_tab, "  Game Data")
 
+        self.tabs.currentChanged.connect(self._on_tab_switched)
         root.addWidget(self.tabs)
 
         self.status_label = QLabel("Ready")
@@ -760,8 +850,9 @@ class MainWindow(QMainWindow):
 
     # ── Refresh ─────────────────────────────────────────────
 
-    def _refresh(self):
-        self.editor_tab.refresh(self.project, self.current_scene_index)
+    def _refresh(self, skip_editor=False):
+        if not skip_editor:
+            self.editor_tab.refresh(self.project, self.current_scene_index)
         self.scene_tab.refresh_project(self.project, self.current_scene_index)
         name = self.current_project_path.stem if self.current_project_path else self.project.title
         self.project_name_label.setText(name)
@@ -773,13 +864,39 @@ class MainWindow(QMainWindow):
         self.data_tab.load_project(self.project)
         self.obj_tab.load_project(self.project)
         self.obj_tab.load_scene(self.project.scenes[0], self.project)
+        self.maps3d_tab.set_project(self.project)
+        self.paperdoll_tab.load_project(self.project)
+        scene0 = self.project.scenes[0]
+        if getattr(scene0, "scene_type", "2d") == "3d":
+            self.maps3d_tab.load_scene(scene0)
+            self._ensure_3d_maps_visible()
+        else:
+            self.maps3d_tab.clear_scene()
         self.scene_tab.refresh_project(self.project, self.current_scene_index)
         self.editor_tab.refresh(self.project, self.current_scene_index)
         self._refresh()
 
     def _mark_unsaved(self):
         self.unsaved = True
-        self._refresh()
+        self._refresh(skip_editor=True)
+
+    def _on_tab_switched(self, index: int):
+        """Re-push current project data into the newly-visible tab so that
+        dropdowns reflect any assets added in Game Data since the last visit."""
+        widget = self.tabs.widget(index)
+        scene = self.project.scenes[self.current_scene_index] if self.project.scenes else None
+        if widget is self.scene_tab and scene is not None:
+            # Force full reload (refresh_project skips if same scene object)
+            self.scene_tab.load_scene(scene, self.project)
+        elif widget is self.obj_tab and scene is not None:
+            self.obj_tab.load_scene(scene, self.project)
+        elif widget is self.editor_tab:
+            self.editor_tab.refresh(self.project, self.current_scene_index)
+        elif widget is self.maps3d_tab and scene is not None:
+            if getattr(scene, "scene_type", "2d") == "3d":
+                self.maps3d_tab.load_scene(scene)
+        elif widget is self.paperdoll_tab:
+            self.paperdoll_tab.load_project(self.project)
 
     def _set_status(self, msg: str):
         self.status_label.setText(msg)
@@ -794,6 +911,7 @@ class MainWindow(QMainWindow):
             self.obj_tab.load_scene(scene, self.project)
             if getattr(scene, "scene_type", "2d") == "3d":
                 self.maps3d_tab.load_scene(scene)
+                self._ensure_3d_maps_visible()
                 self.tabs.setCurrentWidget(self.maps3d_tab)
             else:
                 self.maps3d_tab.clear_scene()
@@ -809,6 +927,11 @@ class MainWindow(QMainWindow):
             self.editor_tab.refresh(self.project, index)
             scene = self.project.scenes[index]
             self.obj_tab.load_scene(scene, self.project)
+            if getattr(scene, "scene_type", "2d") == "3d":
+                self.maps3d_tab.load_scene(scene)
+                self._ensure_3d_maps_visible()
+            else:
+                self.maps3d_tab.clear_scene()
             name = self.current_project_path.stem if self.current_project_path else self.project.title
             self.project_name_label.setText(name)
             self.unsaved_dot.setVisible(self.unsaved)
@@ -825,7 +948,8 @@ class MainWindow(QMainWindow):
         insert_at = self.current_scene_index + 1
         self.project.scenes.insert(insert_at, new_scene)
         self.current_scene_index = insert_at
-        self._mark_unsaved()
+        self.unsaved = True
+        self._refresh()
         self._set_status("Scene added.")
 
     def delete_scene(self, index: int):
@@ -838,14 +962,16 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.project.scenes.pop(index)
             self.current_scene_index = max(0, index - 1)
-            self._mark_unsaved()
+            self.unsaved = True
+            self._refresh()
             self._set_status("Scene deleted.")
 
     def move_scene(self, from_idx: int, to_idx: int):
         scenes = self.project.scenes
         scenes.insert(to_idx, scenes.pop(from_idx))
         self.current_scene_index = to_idx
-        self._mark_unsaved()
+        self.unsaved = True
+        self._refresh()
 
     def duplicate_scene(self, index: int):
         import json
@@ -856,8 +982,377 @@ class MainWindow(QMainWindow):
         clone.name = (clone.name + " Copy") if clone.name else ""
         self.project.scenes.insert(index + 1, clone)
         self.current_scene_index = index + 1
-        self._mark_unsaved()
+        self.unsaved = True
+        self._refresh()
         self._set_status("Scene duplicated.")
+
+    # ── Scene save / load ──────────────────────────────────
+
+    def _collect_scene_dependencies(self, scene: Scene) -> dict:
+        """Walk a scene and return dicts of all referenced project assets."""
+        ref_obj_ids = set()
+        ref_image_ids = set()
+        ref_audio_ids = set()
+        ref_font_ids = set()
+        ref_tileset_ids = set()
+        ref_ani_ids = set()
+        ref_trans_ids = set()
+
+        # --- helpers ---
+        def _scan_actions(actions):
+            for a in actions:
+                if a.audio_id:
+                    ref_audio_ids.add(a.audio_id)
+                if a.image_id:
+                    ref_image_ids.add(a.image_id)
+                if a.object_def_id:
+                    ref_obj_ids.add(a.object_def_id)
+                _scan_actions(a.sub_actions if hasattr(a, 'sub_actions') else [])
+                _scan_actions(a.true_actions if hasattr(a, 'true_actions') else [])
+                _scan_actions(a.false_actions if hasattr(a, 'false_actions') else [])
+
+        def _scan_behaviors(behaviors):
+            for b in behaviors:
+                _scan_actions(b.actions)
+
+        # --- placed objects ---
+        for po in scene.placed_objects:
+            if po.object_def_id:
+                ref_obj_ids.add(po.object_def_id)
+            _scan_behaviors(po.instance_behaviors)
+
+        # --- scene-level behaviors ---
+        _scan_behaviors(scene.behaviors)
+
+        # --- components ---
+        for comp in scene.components:
+            cfg = comp.config
+            ct = comp.component_type
+            if ct == "Layer":
+                if cfg.get("image_id"):
+                    ref_image_ids.add(cfg["image_id"])
+            elif ct == "TileLayer":
+                if cfg.get("tileset_id"):
+                    ref_tileset_ids.add(cfg["tileset_id"])
+            elif ct == "Music":
+                if cfg.get("audio_id"):
+                    ref_audio_ids.add(cfg["audio_id"])
+            elif ct == "Transition":
+                if cfg.get("trans_file_id"):
+                    ref_trans_ids.add(cfg["trans_file_id"])
+
+        # --- object definitions (and their nested refs) ---
+        obj_defs_to_include = []
+        for oid in list(ref_obj_ids):
+            od = self.project.get_object_def(oid)
+            if not od:
+                continue
+            obj_defs_to_include.append(od)
+            for frame in od.frames:
+                if frame.image_id:
+                    ref_image_ids.add(frame.image_id)
+            if od.ani_file_id:
+                ref_ani_ids.add(od.ani_file_id)
+            if od.gui_font_id:
+                ref_font_ids.add(od.gui_font_id)
+            if od.gui_image_id:
+                ref_image_ids.add(od.gui_image_id)
+            _scan_behaviors(od.behaviors)
+
+        # --- 3D map skybox ---
+        if scene.scene_type == "3d" and scene.map_data.skybox_image_id:
+            ref_image_ids.add(scene.map_data.skybox_image_id)
+
+        # --- gather actual objects ---
+        result = {
+            "object_defs": [od.to_dict() for od in obj_defs_to_include],
+            "images": [i.to_dict() for i in self.project.images if i.id in ref_image_ids],
+            "audio": [a.to_dict() for a in self.project.audio if a.id in ref_audio_ids],
+            "fonts": [f.to_dict() for f in self.project.fonts if f.id in ref_font_ids],
+            "tilesets": [t.to_dict() for t in self.project.tilesets if t.id in ref_tileset_ids],
+            "animation_exports": [a.to_dict() for a in self.project.animation_exports if a.id in ref_ani_ids],
+            "transition_exports": [t.to_dict() for t in self.project.transition_exports if t.id in ref_trans_ids],
+        }
+        return result
+
+    def _reroll_scene_ids(self, scene: Scene):
+        """Re-roll all internal IDs in a loaded scene, remapping cross-references."""
+        import uuid
+
+        # Map old component IDs to new ones
+        comp_id_map = {}
+        for comp in scene.components:
+            old_id = comp.id
+            new_id = str(uuid.uuid4())[:8]
+            comp_id_map[old_id] = new_id
+            comp.id = new_id
+
+        # Re-roll placed object instance IDs, remap layer_id
+        for po in scene.placed_objects:
+            po.instance_id = str(uuid.uuid4())[:8]
+            if po.layer_id and po.layer_id in comp_id_map:
+                po.layer_id = comp_id_map[po.layer_id]
+
+        # Re-roll scene ID
+        scene.id = str(uuid.uuid4())[:8]
+
+        # Remap selectable_ids in SelectionGroup components
+        # (these reference instance_ids which just changed — but since we don't
+        # have the old→new map for instances, clear them; user can re-pick)
+        for comp in scene.components:
+            if comp.component_type == "SelectionGroup":
+                comp.config["selectable_ids"] = []
+
+    def _check_missing_gamedata_refs(self, scene: Scene) -> list[str]:
+        """Return a list of warnings for variable/signal/input names referenced
+        in behaviors but not present in the current project's GameData."""
+        warnings = []
+        gd = self.project.game_data
+        var_names = {v.name for v in gd.variables}
+        signal_names = {s.name for s in gd.signals}
+        input_names = {a.name for a in gd.input_actions}
+
+        missing_vars = set()
+        missing_signals = set()
+        missing_inputs = set()
+
+        def _scan_actions(actions):
+            for a in actions:
+                if a.var_name and a.var_name not in var_names:
+                    missing_vars.add(a.var_name)
+                if a.var_source and a.var_source not in var_names:
+                    missing_vars.add(a.var_source)
+                if a.bool_name and a.bool_name not in var_names:
+                    missing_vars.add(a.bool_name)
+                _scan_actions(getattr(a, 'sub_actions', []))
+                _scan_actions(getattr(a, 'true_actions', []))
+                _scan_actions(getattr(a, 'false_actions', []))
+
+        def _scan_behaviors(behaviors):
+            for b in behaviors:
+                if b.input_action_name and b.input_action_name not in input_names:
+                    missing_inputs.add(b.input_action_name)
+                if b.threshold_var and b.threshold_var not in var_names:
+                    missing_vars.add(b.threshold_var)
+                if b.timer_var and b.timer_var not in var_names:
+                    missing_vars.add(b.timer_var)
+                _scan_actions(b.actions)
+
+        # Scene behaviors
+        _scan_behaviors(scene.behaviors)
+        # Instance behaviors
+        for po in scene.placed_objects:
+            _scan_behaviors(po.instance_behaviors)
+        # Object def behaviors (for referenced defs)
+        for po in scene.placed_objects:
+            od = self.project.get_object_def(po.object_def_id)
+            if od:
+                _scan_behaviors(od.behaviors)
+
+        if missing_vars:
+            warnings.append(f"Variables not in GameData: {', '.join(sorted(missing_vars))}")
+        if missing_signals:
+            warnings.append(f"Signals not in GameData: {', '.join(sorted(missing_signals))}")
+        if missing_inputs:
+            warnings.append(f"Input actions not in GameData: {', '.join(sorted(missing_inputs))}")
+        return warnings
+
+    def save_scene(self, index: int):
+        """Save the scene at the given index to a .vscene file."""
+        if index < 0 or index >= len(self.project.scenes):
+            return
+
+        scene = self.project.scenes[index]
+
+        # --- build dialog ---
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Save Scene")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(380)
+        dlg.setStyleSheet(f"background: {PANEL}; color: {TEXT};")
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        info = QLabel("Save this scene to a .vscene file.\nIt can be loaded into this or another project later.")
+        info.setWordWrap(True)
+        info.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
+        lay.addWidget(info)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        name_edit = QLineEdit(scene.name or f"scene_{index+1}")
+        name_edit.setStyleSheet(f"padding: 5px; background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px;")
+        form.addRow("Filename:", name_edit)
+
+        deps_chk = QCheckBox("Include dependencies (objects, images, audio, fonts, tilesets)")
+        deps_chk.setChecked(False)
+        deps_chk.setStyleSheet(f"color: {TEXT};")
+        form.addRow(deps_chk)
+        lay.addLayout(form)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        btns.setStyleSheet(f"color: {TEXT};")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        filename = name_edit.text().strip()
+        if not filename:
+            filename = f"scene_{index+1}"
+        # Sanitize filename
+        filename = "".join(c for c in filename if c.isalnum() or c in " _-").strip()
+        if not filename:
+            filename = "scene"
+
+        include_deps = deps_chk.isChecked()
+
+        # Build the save payload
+        payload = {
+            "format": "vita_scene",
+            "version": 1,
+            "includes_dependencies": include_deps,
+            "scene": scene.to_dict(),
+        }
+        if include_deps:
+            deps = self._collect_scene_dependencies(scene)
+            payload.update(deps)
+
+        # Determine save location
+        if self.project.project_folder:
+            scenes_dir = Path(self.project.project_folder) / "scenes"
+        else:
+            scenes_dir = Path.cwd() / "scenes"
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Scene", str(scenes_dir / f"{filename}.vscene"),
+            "Vita Scene (*.vscene)")
+        if not save_path:
+            return
+
+        try:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+            self._set_status(f"Scene saved: {save_path.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save scene:\n{e}")
+
+    def load_scene(self):
+        """Load a .vscene file and insert it after the current scene."""
+        from models import (
+            RegisteredImage, RegisteredAudio, RegisteredFont,
+            RegisteredTileset, AnimationExport, TransitionExport,
+            ObjectDefinition,
+        )
+
+        # Determine starting directory
+        if self.project.project_folder:
+            start_dir = str(Path(self.project.project_folder) / "scenes")
+        else:
+            start_dir = ""
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Scene", start_dir,
+            "Vita Scene (*.vscene);;All Files (*)")
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to read scene file:\n{e}")
+            return
+
+        if data.get("format") != "vita_scene":
+            QMessageBox.warning(self, "Invalid File", "This does not appear to be a valid .vscene file.")
+            return
+
+        # Deserialize the scene
+        try:
+            new_scene = Scene.from_dict(data["scene"])
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", f"Failed to parse scene data:\n{e}")
+            return
+
+        # Re-roll all internal IDs
+        self._reroll_scene_ids(new_scene)
+
+        # Merge dependencies if present
+        if data.get("includes_dependencies"):
+            existing_obj_ids = {o.id for o in self.project.object_defs}
+            existing_img_ids = {i.id for i in self.project.images}
+            existing_aud_ids = {a.id for a in self.project.audio}
+            existing_fnt_ids = {f.id for f in self.project.fonts}
+            existing_ts_ids = {t.id for t in self.project.tilesets}
+            existing_ani_ids = {a.id for a in self.project.animation_exports}
+            existing_trn_ids = {t.id for t in self.project.transition_exports}
+
+            added_counts = {}
+
+            for d_obj in data.get("object_defs", []):
+                if d_obj.get("id") not in existing_obj_ids:
+                    self.project.object_defs.append(ObjectDefinition.from_dict(d_obj))
+                    added_counts["object defs"] = added_counts.get("object defs", 0) + 1
+
+            for d_img in data.get("images", []):
+                if d_img.get("id") not in existing_img_ids:
+                    self.project.images.append(RegisteredImage.from_dict(d_img))
+                    added_counts["images"] = added_counts.get("images", 0) + 1
+
+            for d_aud in data.get("audio", []):
+                if d_aud.get("id") not in existing_aud_ids:
+                    self.project.audio.append(RegisteredAudio.from_dict(d_aud))
+                    added_counts["audio"] = added_counts.get("audio", 0) + 1
+
+            for d_fnt in data.get("fonts", []):
+                if d_fnt.get("id") not in existing_fnt_ids:
+                    self.project.fonts.append(RegisteredFont.from_dict(d_fnt))
+                    added_counts["fonts"] = added_counts.get("fonts", 0) + 1
+
+            for d_ts in data.get("tilesets", []):
+                if d_ts.get("id") not in existing_ts_ids:
+                    self.project.tilesets.append(RegisteredTileset.from_dict(d_ts))
+                    added_counts["tilesets"] = added_counts.get("tilesets", 0) + 1
+
+            for d_ani in data.get("animation_exports", []):
+                if d_ani.get("id") not in existing_ani_ids:
+                    self.project.animation_exports.append(AnimationExport.from_dict(d_ani))
+                    added_counts["animations"] = added_counts.get("animations", 0) + 1
+
+            for d_trn in data.get("transition_exports", []):
+                if d_trn.get("id") not in existing_trn_ids:
+                    self.project.transition_exports.append(TransitionExport.from_dict(d_trn))
+                    added_counts["transitions"] = added_counts.get("transitions", 0) + 1
+
+            if added_counts:
+                summary = ", ".join(f"{v} {k}" for k, v in added_counts.items())
+                self._set_status(f"Scene loaded — added {summary} to project.")
+            else:
+                self._set_status("Scene loaded — all dependencies already in project.")
+        else:
+            self._set_status(f"Scene loaded: {Path(file_path).stem}")
+
+        # Insert after current scene
+        insert_at = self.current_scene_index + 1
+        self.project.scenes.insert(insert_at, new_scene)
+        self.current_scene_index = insert_at
+        self.unsaved = True
+        self.obj_tab._refresh_def_list()
+        self._refresh()
+
+        # Check for missing game data references
+        warnings = self._check_missing_gamedata_refs(new_scene)
+        if warnings:
+            QMessageBox.warning(self, "Missing Game Data References",
+                "The loaded scene references names not found in this project's Game Data:\n\n"
+                + "\n".join(f"• {w}" for w in warnings)
+                + "\n\nYou may need to add these in the Game Data tab.")
 
     # ── File operations ─────────────────────────────────────
 
@@ -936,134 +1431,10 @@ class MainWindow(QMainWindow):
 
     # ── Stubs ───────────────────────────────────────────────
 
-    def export_vpk(self):
-        from lua_exporter import export_main_lua
-
-        base_path = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
-        template_folder = base_path / "vpktemplate"
-        if not template_folder.exists() or not template_folder.is_dir():
-            QMessageBox.critical(self, "Error",
-                "The 'vpktemplate' folder is missing!\n\n"
-                "Place a folder named 'vpktemplate' containing eboot.bin "
-                "and sce_sys next to this script.")
-            return
-
-        # Show export dialog
-        dialog = VPKExportDialog(self.project, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        export_config = dialog.get_data()
-        title_id = export_config['title_id']
-        if len(title_id) != 9 or not title_id[:4].isalpha() or not title_id[4:].isdigit():
-            QMessageBox.warning(self, "Invalid ID",
-                "Title ID must be 4 letters followed by 5 numbers (e.g. ADVG00001).")
-            return
-
-        vpk_path_str, _ = QFileDialog.getSaveFileName(
-            self, "Save VPK", f"{title_id}.vpk", "Vita VPK (*.vpk)")
-        if not vpk_path_str:
-            return
-        vpk_path = Path(vpk_path_str)
-
-        try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                build_dir = Path(temp_dir)
-
-                # 1. Copy vpktemplate as scaffold
-                try:
-                    shutil.copytree(template_folder, build_dir, dirs_exist_ok=True)
-                except Exception as e:
-                    QMessageBox.critical(self, "Copy Error", f"Failed to copy template files:\n{e}")
-                    return
-
-                # 2. Patch PARAM.SFO
-                sfo_path = build_dir / "sce_sys" / "param.sfo"
-                if sfo_path.exists():
-                    try:
-                        editor = SFOEditor(sfo_path)
-                        editor.set_string("TITLE", export_config['title'])
-                        editor.set_string("TITLE_ID", title_id)
-                        editor.set_string("STITLE", export_config['title'])
-                        editor.save()
-                    except Exception as e:
-                        QMessageBox.warning(self, "SFO Error", f"Failed to patch PARAM.SFO:\n{e}")
-                else:
-                    QMessageBox.warning(self, "Missing SFO", "param.sfo not found in vpktemplate/sce_sys/.")
-
-                # 3. Copy LiveArea assets
-                asset_map = {
-                    'icon0':   build_dir / "sce_sys" / "icon0.png",
-                    'startup': build_dir / "sce_sys" / "livearea" / "contents" / "startup.png",
-                    'bg':      build_dir / "sce_sys" / "livearea" / "contents" / "bg.png",
-                    'pic0':    build_dir / "pic0.png",
-                }
-                for key, dest in asset_map.items():
-                    user_path = export_config['assets'].get(key)
-                    if user_path:
-                        try:
-                            dest.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy(user_path, dest)
-                        except Exception as e:
-                            print(f"Warning: Could not copy LiveArea asset {key}: {e}")
-
-                # 4. Copy all registered game assets to build root
-                copied = set()
-                for img in self.project.images:
-                    if img.path and os.path.exists(img.path) and img.path not in copied:
-                        shutil.copy(img.path, build_dir / Path(img.path).name)
-                        copied.add(img.path)
-
-                for aud in self.project.audio:
-                    if aud.path and os.path.exists(aud.path) and aud.path not in copied:
-                        shutil.copy(aud.path, build_dir / Path(aud.path).name)
-                        copied.add(aud.path)
-
-                for fnt in self.project.fonts:
-                    if fnt.path and os.path.exists(fnt.path) and fnt.path not in copied:
-                        shutil.copy(fnt.path, build_dir / Path(fnt.path).name)
-                        copied.add(fnt.path)
-
-                # 5. Generate main.lua
-                try:
-                    lua_code = export_main_lua(self.project)
-                    # Patch save path with actual title ID
-                    lua_code = lua_code.replace(
-                        f"ux0:data/{self.project.title_id}_save.dat",
-                        f"ux0:data/{title_id}_save.dat"
-                    )
-                    with open(build_dir / "main.lua", 'w', encoding='utf-8', newline='\n') as f:
-                        f.write(lua_code)
-                except Exception as e:
-                    QMessageBox.critical(self, "Code Error", f"Failed to generate Lua:\n{e}")
-                    return
-
-                # 6. ZIP into VPK (no compression — ZIP_STORED)
-                try:
-                    with zipfile.ZipFile(vpk_path, 'w', zipfile.ZIP_STORED) as zipf:
-                        for root, _, files in os.walk(build_dir):
-                            for file in files:
-                                file_path = Path(root) / file
-                                arcname = file_path.relative_to(build_dir)
-                                zipf.write(file_path, arcname)
-                except Exception as e:
-                    QMessageBox.critical(self, "Zip Error", f"Failed to create VPK:\n{e}")
-                    return
-
-            self._set_status(f"VPK exported: {vpk_path}")
-            QMessageBox.information(self, "Export Complete",
-                f"VPK created successfully!\n\nTitle: {export_config['title']}\n"
-                f"ID: {title_id}\nLocation: {vpk_path}")
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            QMessageBox.critical(self, "Export Failed", f"An unexpected error occurred:\n{e}")
-
     def export_vpk_lpp(self):
         from lpp_exporter import export_lpp, get_asset_mapping
 
-        base_path = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+        base_path = Path(resource_path(""))
         template_folder = base_path / "lpptemplate"
         if not template_folder.exists() or not template_folder.is_dir():
             QMessageBox.critical(self, "Error",
@@ -1154,12 +1525,24 @@ class MainWindow(QMainWindow):
                 # 4. Copy game assets into organized subfolders
                 asset_mapping = get_asset_mapping(self.project)
                 copied = set()
+                missing_assets = []
                 for src_path, dest_rel in asset_mapping.items():
-                    if src_path and os.path.exists(src_path) and src_path not in copied:
+                    if not src_path:
+                        continue
+                    if not os.path.exists(src_path):
+                        missing_assets.append(src_path)
+                        continue
+                    if src_path not in copied:
                         dest_abs = build_dir / dest_rel
                         dest_abs.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy(src_path, dest_abs)
                         copied.add(src_path)
+                if missing_assets:
+                    missing_list = "\n".join(f"  • {p}" for p in missing_assets)
+                    QMessageBox.warning(self, "Missing Assets",
+                        f"The following asset files could not be found and were NOT included in the VPK:\n\n"
+                        f"{missing_list}\n\n"
+                        f"Make sure the project is saved and all animation/image files exist on disk.")
                 # 4c. Bake TileLayer chunks into assets/tilechunks/
                 try:
                     from lpp_exporter import bake_tile_chunks
@@ -1221,6 +1604,12 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self._mark_unsaved()
             self.editor_tab.refresh(self.project, self.current_scene_index)
+
+    def open_spritesheet_tool(self):
+        from spritesheet_tool import SpritesheetTool
+        self._spritesheet_window = SpritesheetTool(main_window=self)
+        self._spritesheet_window.resize(1200, 750)
+        self._spritesheet_window.show()
 
     def export_windows(self):
         export_windows_game(self.project, self)

@@ -1,4 +1,17 @@
+--[[
+ This file is part of:
+   ______            _____           _   ___________ 
+   | ___ \          /  __ \         | | |____ |  _  \
+   | |_/ /__ _ _   _| /  \/ __ _ ___| |_    / / | | |
+   |    // _` | | | | |    / _` / __| __|   \ \ | | |
+   | |\ \ (_| | |_| | \__/\ (_| \__ \ |_.___/ / |/ / 
+   \_| \_\__,_|\__, |\____/\__,_|___/\__\____/|___/  
+               __/ |                                
+              |___/            by Rinnegatamante
 
+ Lua Game Engine made to create 3D games using Ray-Casting
+ algorithm.
+]]--
 
 -- Movements globals
 LEFT = 0
@@ -31,6 +44,42 @@ local tmp
 local scale_y
 local scale_x
 
+-- bit32 polyfill for Lua 5.1 (LPP-Vita)
+if not bit32 then
+	bit32 = {}
+	function bit32.rshift(x, n)
+		return math.floor(x / (2 ^ n))
+	end
+	function bit32.lshift(x, n)
+		return math.floor(x * (2 ^ n))
+	end
+	function bit32.band(a, b)
+		local result, bit = 0, 1
+		for i = 0, 31 do
+			if a % 2 == 1 and b % 2 == 1 then
+				result = result + bit
+			end
+			a = math.floor(a / 2)
+			b = math.floor(b / 2)
+			bit = bit * 2
+		end
+		return result
+	end
+	function bit32.bxor(a, b)
+		local result, bit = 0, 1
+		for i = 0, 31 do
+			local ab, bb = a % 2, b % 2
+			if ab ~= bb then
+				result = result + bit
+			end
+			a = math.floor(a / 2)
+			b = math.floor(b / 2)
+			bit = bit * 2
+		end
+		return result
+	end
+end
+
 -- Local funcs definitions (Slight speedup)
 local floor_num = math.floor
 local ceil_num = math.ceil
@@ -46,8 +95,8 @@ local doSin = math.sin
 local doCos = math.cos
 local doMin = math.min
 local PI = math.pi
-local shift_r = function(a, b) return math.floor(a / (2^b)) end
-local shift_l = function(a, b) return a * (2^b) end
+local shift_r = bit32.rshift
+local shift_l = bit32.lshift
 
  -- Colors Globals
 local floor_c = genColor(255, 255, 255, 255)
@@ -91,6 +140,12 @@ local sky = false
 local noclip = false
 local shading = false
 RayCast3D = {}
+
+-- Sprite / Billboard Globals
+local zbuffer = {}       -- per-column wall distance, populated by renderScene
+local sprites = {}       -- array of sprite entries
+local sprite_count = 0   -- number of active sprites
+local sprite_order = {}  -- reusable sort buffer
 
 -- Internal Functions (DON'T EDIT)
 local function arc2rad(val)
@@ -427,6 +482,7 @@ function RayCast3D.renderScene(x, y)
 			cell_idx = cell_idx_y
 		end
 		dist = dist / fishtable[stride]
+		zbuffer[stride] = dist
 		wh = floor_num(wall_height * dist_proj / dist)
 		bot_wall = ycenter + floor_num(wh * 0.5)
 		top_wall = vheight-bot_wall
@@ -751,4 +807,178 @@ function RayCast3D.shoot(x, y, angle)
 		y = yy
 	end
 	return {["x"] = x, ["y"] = y}
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  SPRITE / BILLBOARD SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+
+--[[addSprite: Add a billboard sprite, returns 1-based index]]--
+function RayCast3D.addSprite(wx, wy, img, scl, voff, blocking)
+	sprite_count = sprite_count + 1
+	sprites[sprite_count] = {
+		x = wx, y = wy, img = img,
+		scale = scl or 1.0, voff = voff or 0.0,
+		visible = true, blocking = blocking or false,
+	}
+	return sprite_count
+end
+
+--[[removeSprite: Remove sprite by index]]--
+function RayCast3D.removeSprite(idx)
+	if idx >= 1 and idx <= sprite_count then
+		table.remove(sprites, idx)
+		sprite_count = sprite_count - 1
+	end
+end
+
+--[[moveSprite: Set sprite world position]]--
+function RayCast3D.moveSprite(idx, wx, wy)
+	if sprites[idx] then
+		sprites[idx].x = wx
+		sprites[idx].y = wy
+	end
+end
+
+--[[setSpriteVisible: Show/hide a sprite]]--
+function RayCast3D.setSpriteVisible(idx, vis)
+	if sprites[idx] then
+		sprites[idx].visible = vis
+	end
+end
+
+--[[setSpriteImage: Change a sprite's image]]--
+function RayCast3D.setSpriteImage(idx, img)
+	if sprites[idx] then
+		sprites[idx].img = img
+	end
+end
+
+--[[clearSprites: Remove all sprites]]--
+function RayCast3D.clearSprites()
+	sprites = {}
+	sprite_count = 0
+end
+
+--[[getSpriteCount: Returns active sprite count]]--
+function RayCast3D.getSpriteCount()
+	return sprite_count
+end
+
+--[[setPlayerPos: Reposition player without resetting ycenter]]--
+function RayCast3D.setPlayerPos(nx, ny)
+	pl_x = nx
+	pl_y = ny
+end
+
+--[[checkSpriteCollision: Check if player overlaps a blocking sprite.
+    Returns the sprite index (1-based) or 0.]]--
+function RayCast3D.checkSpriteCollision(radius)
+	radius = radius or 16
+	local rsq = radius * radius
+	for i = 1, sprite_count do
+		local s = sprites[i]
+		if s and s.blocking and s.visible then
+			local dx = pl_x - s.x
+			local dy = pl_y - s.y
+			if dx * dx + dy * dy < rsq then
+				return i
+			end
+		end
+	end
+	return 0
+end
+
+--[[renderSprites: Render all visible billboard sprites using the
+    z-buffer populated by renderScene. Call AFTER renderScene.]]--
+function RayCast3D.renderSprites(x, y)
+	if sprite_count == 0 then
+		return
+	end
+
+	-- Camera direction vectors derived from pl_angle
+	local dirX = costable[pl_angle]
+	local dirY = sintable[pl_angle]
+	-- Camera plane perpendicular to direction, scaled by FOV
+	-- For 60° FOV: plane half-length = tan(30°) ≈ 0.57735
+	local planeX = -dirY * 0.57735
+	local planeY =  dirX * 0.57735
+
+	local invDet = 1.0 / (planeX * dirY - dirX * planeY)
+
+	-- Build list of visible sprites with distance
+	local count = 0
+	for i = 1, sprite_count do
+		local s = sprites[i]
+		if s and s.visible then
+			local dx = s.x - pl_x
+			local dy = s.y - pl_y
+			local dist_sq = dx * dx + dy * dy
+			count = count + 1
+			sprite_order[count] = { idx = i, dist = dist_sq }
+		end
+	end
+
+	-- Insertion sort far-to-near (descending distance)
+	for i = 2, count do
+		local key = sprite_order[i]
+		local j = i - 1
+		while j >= 1 and sprite_order[j].dist < key.dist do
+			sprite_order[j + 1] = sprite_order[j]
+			j = j - 1
+		end
+		sprite_order[j + 1] = key
+	end
+
+	local half_w = vwidth * 0.5
+
+	-- Render each sprite
+	for i = 1, count do
+		local s = sprites[sprite_order[i].idx]
+		local dx = s.x - pl_x
+		local dy = s.y - pl_y
+
+		-- Transform sprite position into camera space
+		local transformX = invDet * (dirY * dx - dirX * dy)
+		local transformY = invDet * (-planeY * dx + planeX * dy)
+
+		-- Skip sprites behind the camera
+		if transformY > 0.1 then
+			local spriteScreenX = floor_num(half_w * (1.0 + transformX / transformY))
+			local spriteHeight = floor_num(math.abs(wall_height * dist_proj / transformY) * s.scale)
+			local spriteWidth = spriteHeight  -- square billboard
+
+			-- Vertical centering on horizon, shifted by vertical offset
+			local voff_px = floor_num(s.voff * dist_proj / transformY)
+			local drawStartY = ycenter - floor_num(spriteHeight * 0.5) - voff_px
+			local drawStartX = spriteScreenX - floor_num(spriteWidth * 0.5)
+
+			-- Simple whole-sprite z-test at center column
+			local testCol = spriteScreenX
+			if testCol >= 0 and testCol < vwidth then
+				-- Only draw if sprite is closer than the wall at this column
+				-- zbuffer is keyed by stride values (0, accuracy, 2*accuracy, ...)
+				-- snap to nearest stride column
+				local snapCol = floor_num(testCol / accuracy) * accuracy
+				if zbuffer[snapCol] and transformY < zbuffer[snapCol] then
+					local img = s.img
+					if img then
+						local iw = getWidth(img)
+						local ih = getHeight(img)
+						local sx = spriteWidth / iw
+						local sy = spriteHeight / ih
+						-- drawImageExtended anchor quirk: subtract full scaled dimensions
+						local dstX = drawStartX - (iw * sx)
+						local dstY = drawStartY - (ih * sy)
+						drawImage(dstX + x, dstY + y, img, 0, 0, iw, ih, 0, sx, sy)
+					end
+				end
+			end
+		end
+	end
+
+	-- Clear sort buffer references for GC
+	for i = 1, count do
+		sprite_order[i] = nil
+	end
 end

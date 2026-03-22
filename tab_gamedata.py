@@ -1543,6 +1543,24 @@ class ProjectSettingsPanel(QWidget):
         vol_row.addStretch()
         rl.addLayout(vol_row)
 
+        rl.addSpacing(8)
+        rl.addWidget(_section("PERFORMANCE"))
+        rl.addWidget(_divider())
+
+        self.fps_cap_check = QCheckBox("Limit to 60 FPS on Vita")
+        self.fps_cap_check.setStyleSheet(_field_style())
+        self.fps_cap_check.stateChanged.connect(self._emit)
+        rl.addWidget(self.fps_cap_check)
+
+        fps_hint = QLabel(
+            "When enabled, the game loop waits until 16 ms have elapsed each frame. "
+            "This ensures consistent timing for animations, typewriter effects, and physics. "
+            "Disable only if you handle delta-time yourself."
+        )
+        fps_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        fps_hint.setWordWrap(True)
+        rl.addWidget(fps_hint)
+
         rl.addStretch()
         scroll.setWidget(rw)
 
@@ -1635,6 +1653,7 @@ class ProjectSettingsPanel(QWidget):
         self.inv_check.setChecked(project.game_data.inventory_enabled)
         self.inv_max_spin.setValue(project.game_data.inventory_max)
         self.volume_spin.setValue(project.game_data.volume_default)
+        self.fps_cap_check.setChecked(project.game_data.fps_cap_enabled)
         if project.project_folder:
             self.folder_path_label.setText(project.project_folder)
         else:
@@ -1652,6 +1671,7 @@ class ProjectSettingsPanel(QWidget):
         self._project.game_data.inventory_enabled = self.inv_check.isChecked()
         self._project.game_data.inventory_max = self.inv_max_spin.value()
         self._project.game_data.volume_default = self.volume_spin.value()
+        self._project.game_data.fps_cap_enabled = self.fps_cap_check.isChecked()
         self.changed.emit()
 
 

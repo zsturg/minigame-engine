@@ -44,15 +44,17 @@ ROLE_COLORS = {
 }
 
 COMPONENT_COLORS = {
-    "Background":  "#7c6aff",
-    "Foreground":  "#06b6d4",
-    "Layer":       "#38bdf8",
-    "Music":       "#c084fc",
-    "VNDialogBox": "#f59e0b",
-    "ChoiceMenu":  "#4ade80",
-    "HUD":         "#fb923c",
-    "Video":       "#f87171",
-    "Transition":  "#ec4899",
+    "Layer":          "#38bdf8",
+    "Music":          "#c084fc",
+    "VNDialogBox":    "#f59e0b",
+    "ChoiceMenu":     "#4ade80",
+    "HUD":            "#fb923c",
+    "Video":          "#f87171",
+    "Transition":     "#ec4899",
+    "Path":           "#06b6d4",
+    "Gravity":        "#a78bfa",
+    "LayerAnimation": "#34d399",
+    "Grid":           "#14b8a6",
 }
 
 BUTTON_CHOICES = ["cross", "square", "circle", "triangle"]
@@ -188,7 +190,7 @@ class AddComponentDialog(QDialog):
 
         # Singletons: Background, Foreground, Music, HUD, Video, VNDialogBox, ChoiceMenu
         # "Layer" is NOT a singleton — multiple are allowed
-        MULTI_ALLOWED = {"Layer"}
+        MULTI_ALLOWED = {"Layer", "TileLayer", "CollisionLayer", "Path", "LayerAnimation", "Grid"}
         available = [t for t in COMPONENT_TYPES if t in MULTI_ALLOWED or t not in existing_types]
 
         self.list_widget = QListWidget()
@@ -223,160 +225,6 @@ class AddComponentDialog(QDialog):
 # ─────────────────────────────────────────────────────────────
 #  COMPONENT CONFIG PANELS  (one per component type)
 # ─────────────────────────────────────────────────────────────
-
-class BackgroundConfigPanel(QWidget):
-    changed = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._component: SceneComponent | None = None
-        self._project: Project | None = None
-        self._suppress = False
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        layout.addWidget(_section("IMAGE"))
-        self.image_combo = QComboBox()
-        self.image_combo.setStyleSheet(_field_style())
-        self.image_combo.currentIndexChanged.connect(self._on_image_changed)
-        layout.addWidget(self.image_combo)
-
-        # Scrolling
-        self._scroll_group = QWidget()
-        sg = QVBoxLayout(self._scroll_group)
-        sg.setContentsMargins(0, 0, 0, 0)
-        sg.setSpacing(4)
-
-        self.scroll_check = QCheckBox("Enable scrolling background")
-        self.scroll_check.setStyleSheet(_field_style())
-        self.scroll_check.stateChanged.connect(self._on_scroll_toggle)
-        sg.addWidget(self.scroll_check)
-
-        self._scroll_params = QWidget()
-        sp = QHBoxLayout(self._scroll_params)
-        sp.setContentsMargins(0, 0, 0, 0)
-        sp.setSpacing(8)
-        sp.addWidget(_dim("Speed (px/frame):"))
-        self.scroll_speed = QSpinBox()
-        self.scroll_speed.setRange(1, 60)
-        self.scroll_speed.setValue(1)
-        self.scroll_speed.setFixedWidth(70)
-        self.scroll_speed.setStyleSheet(_field_style())
-        self.scroll_speed.valueChanged.connect(self._emit)
-        sp.addWidget(self.scroll_speed)
-        sp.addWidget(_dim("Direction:"))
-        self.scroll_dir = QComboBox()
-        self.scroll_dir.addItems(["horizontal", "vertical"])
-        self.scroll_dir.setStyleSheet(_field_style())
-        self.scroll_dir.currentIndexChanged.connect(self._emit)
-        sp.addWidget(self.scroll_dir)
-        sp.addStretch()
-        self._scroll_params.setVisible(False)
-        sg.addWidget(self._scroll_params)
-
-        self._scroll_group.setVisible(False)
-        layout.addWidget(self._scroll_group)
-        layout.addStretch()
-
-    def _on_image_changed(self):
-        has_img = self.image_combo.currentData() is not None
-        self._scroll_group.setVisible(has_img)
-        self._emit()
-
-    def _on_scroll_toggle(self, state):
-        self._scroll_params.setVisible(bool(state))
-        self._emit()
-
-    def _emit(self):
-        if self._suppress or self._component is None:
-            return
-        self._component.config["image_id"] = self.image_combo.currentData()
-        self._component.config["scroll"] = self.scroll_check.isChecked()
-        self._component.config["scroll_speed"] = self.scroll_speed.value()
-        self._component.config["scroll_direction"] = self.scroll_dir.currentText()
-        self.changed.emit()
-
-    def load(self, component: SceneComponent, project: Project):
-        self._component = component
-        self._project = project
-        self._suppress = True
-        cfg = component.config
-
-        self.image_combo.blockSignals(True)
-        self.image_combo.clear()
-        self.image_combo.addItem("-- none --", None)
-        for img in project.images:
-            if img.category == "background":
-                self.image_combo.addItem(img.name, img.id)
-        if cfg.get("image_id"):
-            for i in range(self.image_combo.count()):
-                if self.image_combo.itemData(i) == cfg["image_id"]:
-                    self.image_combo.setCurrentIndex(i)
-                    break
-        self.image_combo.blockSignals(False)
-
-        has_img = cfg.get("image_id") is not None
-        self._scroll_group.setVisible(has_img)
-        self.scroll_check.setChecked(cfg.get("scroll", False))
-        self.scroll_speed.setValue(cfg.get("scroll_speed", 1))
-        idx = self.scroll_dir.findText(cfg.get("scroll_direction", "horizontal"))
-        if idx >= 0:
-            self.scroll_dir.setCurrentIndex(idx)
-        self._scroll_params.setVisible(cfg.get("scroll", False))
-        self._suppress = False
-
-
-class ForegroundConfigPanel(QWidget):
-    changed = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._component: SceneComponent | None = None
-        self._project: Project | None = None
-        self._suppress = False
-        self._build_ui()
-
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(_section("IMAGE"))
-        self.image_combo = QComboBox()
-        self.image_combo.setStyleSheet(_field_style())
-        self.image_combo.currentIndexChanged.connect(self._emit)
-        layout.addWidget(self.image_combo)
-        layout.addStretch()
-
-    def _emit(self):
-        if self._suppress or self._component is None:
-            return
-        self._component.config["image_id"] = self.image_combo.currentData()
-        self.changed.emit()
-
-    def load(self, component: SceneComponent, project: Project):
-        self._component = component
-        self._project = project
-        self._suppress = True
-        cfg = component.config
-
-        self.image_combo.blockSignals(True)
-        self.image_combo.clear()
-        self.image_combo.addItem("-- none --", None)
-        for img in project.images:
-            if img.category == "foreground":
-                self.image_combo.addItem(img.name, img.id)
-        if cfg.get("image_id"):
-            for i in range(self.image_combo.count()):
-                if self.image_combo.itemData(i) == cfg["image_id"]:
-                    self.image_combo.setCurrentIndex(i)
-                    break
-        self.image_combo.blockSignals(False)
-        self._suppress = False
-
 
 class LayerConfigPanel(QWidget):
     """Config panel for the multi-instance Layer component."""
@@ -668,6 +516,131 @@ class MusicConfigPanel(QWidget):
         self._suppress = False
 
 
+class _DialogPageCard(QFrame):
+    """One card in the dialog page list: character name, 4 lines, advance toggle, delete."""
+    changed = Signal()
+    delete_requested = Signal(object)   # emits self
+
+    def __init__(self, page_index: int = 0, parent=None):
+        super().__init__(parent)
+        self.page_index = page_index
+        self.setStyleSheet(f"""
+            _DialogPageCard {{
+                background: {SURFACE};
+                border: 1px solid {BORDER};
+                border-radius: 6px;
+            }}
+        """)
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(4)
+
+        # ── Header row: page label + delete button ───────────
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        self._page_label = QLabel(f"Page {self.page_index + 1}")
+        self._page_label.setStyleSheet(f"color: {ACCENT}; font-size: 12px; font-weight: 700; background: transparent; border: none;")
+        header.addWidget(self._page_label)
+        header.addStretch()
+        del_btn = QPushButton("×")
+        del_btn.setFixedSize(22, 22)
+        del_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {DIM}; border: none;
+                font-size: 16px; font-weight: 700;
+            }}
+            QPushButton:hover {{ color: {DANGER}; }}
+        """)
+        del_btn.clicked.connect(lambda: self.delete_requested.emit(self))
+        header.addWidget(del_btn)
+        layout.addLayout(header)
+
+        # ── Character name ───────────────────────────────────
+        self.character_edit = QLineEdit()
+        self.character_edit.setPlaceholderText("Character name (optional)…")
+        self.character_edit.setStyleSheet(_field_style())
+        self.character_edit.textChanged.connect(self.changed.emit)
+        layout.addWidget(self.character_edit)
+
+        # ── 4 dialogue lines ────────────────────────────────
+        self.line_edits: list[QLineEdit] = []
+        for i in range(4):
+            edit = QLineEdit()
+            edit.setPlaceholderText(f"Line {i + 1}…")
+            edit.setStyleSheet(_field_style())
+            edit.textChanged.connect(self.changed.emit)
+            layout.addWidget(edit)
+            self.line_edits.append(edit)
+
+        # ── Advance to next scene toggle ─────────────────────
+        self.advance_check = QCheckBox("Advance to next scene after this page")
+        self.advance_check.setStyleSheet(_field_style())
+        self.advance_check.stateChanged.connect(self.changed.emit)
+        layout.addWidget(self.advance_check)
+
+        # ── Typewriter effect ────────────────────────────────
+        tw_row = QHBoxLayout()
+        tw_row.setSpacing(6)
+        self.typewriter_check = QCheckBox("Typewriter effect")
+        self.typewriter_check.setStyleSheet(_field_style())
+        self.typewriter_check.stateChanged.connect(self._on_tw_toggled)
+        tw_row.addWidget(self.typewriter_check)
+        tw_speed_lbl = QLabel("chars/sec:")
+        tw_speed_lbl.setStyleSheet(f"color: {DIM}; font-size: 11px; background: transparent; border: none;")
+        tw_row.addWidget(tw_speed_lbl)
+        self.typewriter_speed_spin = QSpinBox()
+        self.typewriter_speed_spin.setRange(5, 120)
+        self.typewriter_speed_spin.setValue(30)
+        self.typewriter_speed_spin.setFixedWidth(60)
+        self.typewriter_speed_spin.setStyleSheet(_field_style())
+        self.typewriter_speed_spin.setEnabled(False)
+        self.typewriter_speed_spin.valueChanged.connect(self.changed.emit)
+        tw_row.addWidget(self.typewriter_speed_spin)
+        tw_row.addStretch()
+        layout.addLayout(tw_row)
+
+    def _on_tw_toggled(self):
+        self.typewriter_speed_spin.setEnabled(self.typewriter_check.isChecked())
+        self.changed.emit()
+
+    def set_page_index(self, idx: int):
+        self.page_index = idx
+        self._page_label.setText(f"Page {idx + 1}")
+
+    def get_data(self) -> dict:
+        return {
+            "character": self.character_edit.text(),
+            "lines": [e.text() for e in self.line_edits],
+            "advance_to_next": self.advance_check.isChecked(),
+            "typewriter": self.typewriter_check.isChecked(),
+            "typewriter_speed": self.typewriter_speed_spin.value(),
+        }
+
+    def set_data(self, d: dict):
+        self.character_edit.blockSignals(True)
+        self.character_edit.setText(d.get("character", ""))
+        self.character_edit.blockSignals(False)
+        lines = d.get("lines", ["", "", "", ""])
+        lines = (lines + ["", "", "", ""])[:4]
+        for i, edit in enumerate(self.line_edits):
+            edit.blockSignals(True)
+            edit.setText(lines[i])
+            edit.blockSignals(False)
+        self.advance_check.blockSignals(True)
+        self.advance_check.setChecked(d.get("advance_to_next", False))
+        self.advance_check.blockSignals(False)
+        self.typewriter_check.blockSignals(True)
+        self.typewriter_check.setChecked(d.get("typewriter", False))
+        self.typewriter_check.blockSignals(False)
+        self.typewriter_speed_spin.blockSignals(True)
+        self.typewriter_speed_spin.setValue(d.get("typewriter_speed", 30))
+        self.typewriter_speed_spin.blockSignals(False)
+        self.typewriter_speed_spin.setEnabled(self.typewriter_check.isChecked())
+
+
 class VNDialogBoxConfigPanel(QWidget):
     changed = Signal()
 
@@ -683,6 +656,7 @@ class VNDialogBoxConfigPanel(QWidget):
         self._border_color = "#ffffff"
         self._text_color = "#ffffff"
         self._nametag_color = "#333333"
+        self._page_cards: list[_DialogPageCard] = []
         self._build_ui()
 
     def _color_btn(self, color: str) -> QPushButton:
@@ -708,24 +682,54 @@ class VNDialogBoxConfigPanel(QWidget):
         layout.setContentsMargins(0, 4, 0, 16)
         layout.setSpacing(6)
 
-        # ── Content ──────────────────────────────────────────
-        layout.addWidget(_section("SPEAKER"))
-        self.speaker_edit = QLineEdit()
-        self.speaker_edit.setPlaceholderText("Character name shown above dialogue…")
-        self.speaker_edit.setStyleSheet(_field_style())
-        self.speaker_edit.textChanged.connect(self._emit)
-        layout.addWidget(self.speaker_edit)
+        # ── Dialog Pages ─────────────────────────────────────
+        layout.addWidget(_section("DIALOG PAGES"))
+        layout.addWidget(_divider())
 
-        layout.addWidget(_section("DIALOGUE LINES"))
-        self._line_edits: list[QLineEdit] = []
-        for i in range(4):
-            layout.addWidget(_dim(f"Line {i + 1}:"))
-            edit = QLineEdit()
-            edit.setPlaceholderText(f"Dialogue line {i + 1}…")
-            edit.setStyleSheet(_field_style())
-            edit.textChanged.connect(self._emit)
-            layout.addWidget(edit)
-            self._line_edits.append(edit)
+        info = QLabel("Each page shows 4 lines on the Vita. The player presses a button to advance through pages.")
+        info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self._pages_container = QVBoxLayout()
+        self._pages_container.setSpacing(8)
+        layout.addLayout(self._pages_container)
+
+        add_page_btn = _btn("＋  Add Page", accent=True)
+        add_page_btn.clicked.connect(self._add_page)
+        layout.addWidget(add_page_btn)
+
+        # ── Advance Button ───────────────────────────────────
+        layout.addWidget(_section("ADVANCE BUTTON"))
+        layout.addWidget(_divider())
+
+        layout.addWidget(_dim("Button to advance pages / scene:"))
+        self.advance_btn_combo = QComboBox()
+        self.advance_btn_combo.addItems(BUTTON_CHOICES)
+        self.advance_btn_combo.setStyleSheet(_field_style())
+        self.advance_btn_combo.currentIndexChanged.connect(self._emit)
+        layout.addWidget(self.advance_btn_combo)
+
+        self.auto_advance_check = QCheckBox("Auto-advance after delay")
+        self.auto_advance_check.setStyleSheet(_field_style())
+        self.auto_advance_check.stateChanged.connect(self._on_auto_advance_toggled)
+        layout.addWidget(self.auto_advance_check)
+
+        self._auto_advance_options = QWidget()
+        aa = QHBoxLayout(self._auto_advance_options)
+        aa.setContentsMargins(0, 0, 0, 0)
+        aa.addWidget(_dim("Seconds:"))
+        self.auto_advance_spin = QDoubleSpinBox()
+        self.auto_advance_spin.setRange(0.5, 30.0)
+        self.auto_advance_spin.setSingleStep(0.5)
+        self.auto_advance_spin.setValue(3.0)
+        self.auto_advance_spin.setFixedWidth(70)
+        self.auto_advance_spin.setStyleSheet(_field_style())
+        self.auto_advance_spin.valueChanged.connect(self._emit)
+        aa.addWidget(self.auto_advance_spin)
+        aa.addStretch()
+        self._auto_advance_options.setVisible(False)
+        layout.addWidget(self._auto_advance_options)
 
         # ── Background ───────────────────────────────────────
         layout.addWidget(_section("BOX BACKGROUND"))
@@ -840,6 +844,39 @@ class VNDialogBoxConfigPanel(QWidget):
         self.font_combo.currentIndexChanged.connect(self._emit)
         layout.addWidget(self.font_combo)
 
+        # Font size
+        fs_row = QHBoxLayout()
+        fs_row.setSpacing(8)
+        fs_row.addWidget(_dim("Font size (px):"))
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 48)
+        self.font_size_spin.setValue(16)
+        self.font_size_spin.setFixedWidth(70)
+        self.font_size_spin.setStyleSheet(_field_style())
+        self.font_size_spin.valueChanged.connect(self._emit)
+        fs_row.addWidget(self.font_size_spin)
+        fs_row.addStretch()
+        layout.addLayout(fs_row)
+
+        fs_hint = QLabel("Maps to Font.setPixelSizes on Vita. Default font looks good at 16.")
+        fs_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        fs_hint.setWordWrap(True)
+        layout.addWidget(fs_hint)
+
+        # Line spacing
+        ls_row = QHBoxLayout()
+        ls_row.setSpacing(8)
+        ls_row.addWidget(_dim("Line spacing (px):"))
+        self.line_spacing_spin = QSpinBox()
+        self.line_spacing_spin.setRange(16, 80)
+        self.line_spacing_spin.setValue(35)
+        self.line_spacing_spin.setFixedWidth(70)
+        self.line_spacing_spin.setStyleSheet(_field_style())
+        self.line_spacing_spin.valueChanged.connect(self._emit)
+        ls_row.addWidget(self.line_spacing_spin)
+        ls_row.addStretch()
+        layout.addLayout(ls_row)
+
         # ── Speaker name tag ─────────────────────────────────
         layout.addWidget(_section("SPEAKER NAME TAG"))
         layout.addWidget(_divider())
@@ -864,51 +901,6 @@ class VNDialogBoxConfigPanel(QWidget):
         self.nametag_pos_combo.currentIndexChanged.connect(self._emit)
         layout.addWidget(self.nametag_pos_combo)
 
-        # ── Behavior ─────────────────────────────────────────
-        layout.addWidget(_section("BEHAVIOR"))
-        layout.addWidget(_divider())
-
-        self.advance_check = QCheckBox("Cross button advances to next scene")
-        self.advance_check.setChecked(True)
-        self.advance_check.setStyleSheet(_field_style())
-        self.advance_check.stateChanged.connect(self._on_advance_toggled)
-        layout.addWidget(self.advance_check)
-
-        self._advance_options = QWidget()
-        ao = QVBoxLayout(self._advance_options)
-        ao.setContentsMargins(0, 0, 0, 0)
-        ao.setSpacing(4)
-
-        ao.addWidget(_dim("Advance button:"))
-        self.advance_btn_combo = QComboBox()
-        self.advance_btn_combo.addItems(BUTTON_CHOICES)
-        self.advance_btn_combo.setStyleSheet(_field_style())
-        self.advance_btn_combo.currentIndexChanged.connect(self._emit)
-        ao.addWidget(self.advance_btn_combo)
-
-        layout.addWidget(self._advance_options)
-
-        self.auto_advance_check = QCheckBox("Auto-advance after delay")
-        self.auto_advance_check.setStyleSheet(_field_style())
-        self.auto_advance_check.stateChanged.connect(self._on_auto_advance_toggled)
-        layout.addWidget(self.auto_advance_check)
-
-        self._auto_advance_options = QWidget()
-        aa = QHBoxLayout(self._auto_advance_options)
-        aa.setContentsMargins(0, 0, 0, 0)
-        aa.addWidget(_dim("Seconds:"))
-        self.auto_advance_spin = QDoubleSpinBox()
-        self.auto_advance_spin.setRange(0.5, 30.0)
-        self.auto_advance_spin.setSingleStep(0.5)
-        self.auto_advance_spin.setValue(3.0)
-        self.auto_advance_spin.setFixedWidth(70)
-        self.auto_advance_spin.setStyleSheet(_field_style())
-        self.auto_advance_spin.valueChanged.connect(self._emit)
-        aa.addWidget(self.auto_advance_spin)
-        aa.addStretch()
-        self._auto_advance_options.setVisible(False)
-        layout.addWidget(self._auto_advance_options)
-
         layout.addStretch()
         scroll.setWidget(body)
 
@@ -916,12 +908,45 @@ class VNDialogBoxConfigPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-    def _on_border_toggled(self):
-        self._border_options.setVisible(self.border_check.isChecked())
+    # ── Page management ──────────────────────────────────────
+
+    def _add_page(self):
+        page_data = {"character": "", "lines": ["", "", "", ""], "advance_to_next": False}
+        card = self._create_page_card(len(self._page_cards), page_data)
+        self._page_cards.append(card)
+        self._pages_container.addWidget(card)
         self._emit()
 
-    def _on_advance_toggled(self):
-        self._advance_options.setVisible(self.advance_check.isChecked())
+    def _create_page_card(self, index: int, data: dict) -> _DialogPageCard:
+        card = _DialogPageCard(page_index=index)
+        card.set_data(data)
+        card.changed.connect(self._emit)
+        card.delete_requested.connect(self._delete_page)
+        return card
+
+    def _delete_page(self, card: _DialogPageCard):
+        if len(self._page_cards) <= 1:
+            return  # always keep at least one page
+        self._page_cards.remove(card)
+        self._pages_container.removeWidget(card)
+        card.setParent(None)
+        card.deleteLater()
+        # Re-number remaining pages
+        for i, c in enumerate(self._page_cards):
+            c.set_page_index(i)
+        self._emit()
+
+    def _clear_page_cards(self):
+        for card in self._page_cards:
+            self._pages_container.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+        self._page_cards.clear()
+
+    # ── Signals ──────────────────────────────────────────────
+
+    def _on_border_toggled(self):
+        self._border_options.setVisible(self.border_check.isChecked())
         self._emit()
 
     def _on_auto_advance_toggled(self):
@@ -932,8 +957,13 @@ class VNDialogBoxConfigPanel(QWidget):
         if self._suppress or self._component is None:
             return
         cfg = self._component.config
-        cfg["speaker_name"]       = self.speaker_edit.text()
-        cfg["lines"]              = [e.text() for e in self._line_edits]
+        # Dialog pages
+        cfg["dialog_pages"]       = [c.get_data() for c in self._page_cards]
+        # Advance settings
+        cfg["advance_button"]     = self.advance_btn_combo.currentText()
+        cfg["auto_advance"]       = self.auto_advance_check.isChecked()
+        cfg["auto_advance_secs"]  = self.auto_advance_spin.value()
+        # Appearance
         cfg["fill_color"]         = self._fill_color
         cfg["opacity"]            = self.opacity_spin.value()
         cfg["texture_image_id"]   = self.texture_combo.currentData()
@@ -943,12 +973,10 @@ class VNDialogBoxConfigPanel(QWidget):
         cfg["text_color"]         = self._text_color
         cfg["shadow"]             = self.shadow_check.isChecked()
         cfg["font_id"]            = self.font_combo.currentData()
+        cfg["font_size"]          = self.font_size_spin.value()
+        cfg["line_spacing"]       = self.line_spacing_spin.value()
         cfg["nametag_color"]      = self._nametag_color
         cfg["nametag_position"]   = self.nametag_pos_combo.currentText()
-        cfg["advance"]            = self.advance_check.isChecked()
-        cfg["advance_button"]     = self.advance_btn_combo.currentText()
-        cfg["auto_advance"]       = self.auto_advance_check.isChecked()
-        cfg["auto_advance_secs"]  = self.auto_advance_spin.value()
         self.changed.emit()
 
     def load(self, component: SceneComponent, project: Project):
@@ -973,14 +1001,24 @@ class VNDialogBoxConfigPanel(QWidget):
             self.texture_combo.addItem(img.name, img.id)
         self.texture_combo.blockSignals(False)
 
-        # Restore content
-        self.speaker_edit.setText(cfg.get("speaker_name", ""))
-        lines = cfg.get("lines", ["", "", "", ""])
-        lines = (lines + ["", "", "", ""])[:4]
-        for i, edit in enumerate(self._line_edits):
-            edit.setText(lines[i])
+        # ── Load dialog pages ────────────────────────────────
+        self._clear_page_cards()
+        pages = cfg.get("dialog_pages", [{"character": "", "lines": ["", "", "", ""], "advance_to_next": False}])
+        for i, page_data in enumerate(pages):
+            card = self._create_page_card(i, page_data)
+            self._page_cards.append(card)
+            self._pages_container.addWidget(card)
 
-        # Restore appearance
+        # ── Advance settings ─────────────────────────────────
+        adv_btn_idx = self.advance_btn_combo.findText(cfg.get("advance_button", "cross"))
+        if adv_btn_idx >= 0:
+            self.advance_btn_combo.setCurrentIndex(adv_btn_idx)
+
+        self.auto_advance_check.setChecked(cfg.get("auto_advance", False))
+        self.auto_advance_spin.setValue(cfg.get("auto_advance_secs", 3.0))
+        self._auto_advance_options.setVisible(cfg.get("auto_advance", False))
+
+        # ── Restore appearance ───────────────────────────────
         self._fill_color = cfg.get("fill_color", "#000000")
         self._update_color_btn(self._fill_btn, self._fill_color)
         self.opacity_spin.setValue(cfg.get("opacity", 150))
@@ -1007,21 +1045,14 @@ class VNDialogBoxConfigPanel(QWidget):
                 self.font_combo.setCurrentIndex(i)
                 break
 
+        self.font_size_spin.setValue(cfg.get("font_size", 16))
+        self.line_spacing_spin.setValue(cfg.get("line_spacing", 35))
+
         self._nametag_color = cfg.get("nametag_color", "#333333")
         self._update_color_btn(self._nametag_color_btn, self._nametag_color)
         pos_idx = self.nametag_pos_combo.findText(cfg.get("nametag_position", "inside box top"))
         if pos_idx >= 0:
             self.nametag_pos_combo.setCurrentIndex(pos_idx)
-
-        self.advance_check.setChecked(cfg.get("advance", True))
-        adv_btn_idx = self.advance_btn_combo.findText(cfg.get("advance_button", "cross"))
-        if adv_btn_idx >= 0:
-            self.advance_btn_combo.setCurrentIndex(adv_btn_idx)
-        self._advance_options.setVisible(cfg.get("advance", True))
-
-        self.auto_advance_check.setChecked(cfg.get("auto_advance", False))
-        self.auto_advance_spin.setValue(cfg.get("auto_advance_secs", 3.0))
-        self._auto_advance_options.setVisible(cfg.get("auto_advance", False))
 
         self._suppress = False
 
@@ -1245,8 +1276,320 @@ class TransitionConfigPanel(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────
-#  EMPTY STATE PANEL
+#  GRAVITY CONFIG PANEL
 # ─────────────────────────────────────────────────────────────
+
+class GravityConfigPanel(QWidget):
+    """Config panel for the Gravity scene component."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._component: SceneComponent | None = None
+        self._project: Project | None = None
+        self._suppress = False
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # ── Strength ──────────────────────────────────────────
+        layout.addWidget(_section("GRAVITY STRENGTH"))
+        hint = QLabel("Acceleration in pixels per frame². Higher = heavier gravity.")
+        hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.strength_spin = QDoubleSpinBox()
+        self.strength_spin.setRange(0.01, 10.0)
+        self.strength_spin.setSingleStep(0.1)
+        self.strength_spin.setDecimals(2)
+        self.strength_spin.setValue(0.5)
+        self.strength_spin.setFixedWidth(100)
+        self.strength_spin.setStyleSheet(_field_style())
+        self.strength_spin.valueChanged.connect(self._emit)
+        layout.addWidget(self.strength_spin)
+
+        # ── Direction ─────────────────────────────────────────
+        layout.addWidget(_section("DIRECTION"))
+        self.dir_combo = QComboBox()
+        self.dir_combo.addItems(["down", "up", "left", "right"])
+        self.dir_combo.setStyleSheet(_field_style())
+        self.dir_combo.currentIndexChanged.connect(self._emit)
+        layout.addWidget(self.dir_combo)
+
+        # ── Terminal velocity ─────────────────────────────────
+        layout.addWidget(_section("TERMINAL VELOCITY"))
+        tv_hint = QLabel("Maximum fall speed in pixels per frame. Prevents infinite acceleration.")
+        tv_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        tv_hint.setWordWrap(True)
+        layout.addWidget(tv_hint)
+        self.terminal_spin = QSpinBox()
+        self.terminal_spin.setRange(1, 100)
+        self.terminal_spin.setValue(10)
+        self.terminal_spin.setFixedWidth(100)
+        self.terminal_spin.setStyleSheet(_field_style())
+        self.terminal_spin.valueChanged.connect(self._emit)
+        layout.addWidget(self.terminal_spin)
+
+        layout.addStretch()
+
+    def _emit(self):
+        if self._suppress or self._component is None:
+            return
+        cfg = self._component.config
+        cfg["gravity_strength"]   = self.strength_spin.value()
+        cfg["gravity_direction"]  = self.dir_combo.currentText()
+        cfg["terminal_velocity"]  = self.terminal_spin.value()
+        self.changed.emit()
+
+    def load(self, component: SceneComponent, project: Project):
+        self._component = component
+        self._project = project
+        self._suppress = True
+        cfg = component.config
+        self.strength_spin.setValue(cfg.get("gravity_strength", 0.5))
+        idx = self.dir_combo.findText(cfg.get("gravity_direction", "down"))
+        self.dir_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.terminal_spin.setValue(cfg.get("terminal_velocity", 10))
+        self._suppress = False
+
+
+class LayerAnimationConfigPanel(QWidget):
+    """Config panel for the LayerAnimation scene component.
+    Only parameter: which PaperDollAsset (Layer Animation) to use."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._component: SceneComponent | None = None
+        self._project: Project | None = None
+        self._suppress = False
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        layout.addWidget(_section("LAYER ANIMATION ASSET"))
+        hint = QLabel("Select which Layer Animation to use in this scene.\n"
+                       "Create and edit Layer Animations in the Layer Animation tab.")
+        hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.anim_combo = QComboBox()
+        self.anim_combo.setStyleSheet(_field_style())
+        self.anim_combo.currentIndexChanged.connect(self._emit)
+        layout.addWidget(self.anim_combo)
+
+        layout.addStretch()
+
+    def _emit(self):
+        if self._suppress or self._component is None:
+            return
+        self._component.config["layer_anim_id"] = self.anim_combo.currentData() or ""
+        self.changed.emit()
+
+    def load(self, component: SceneComponent, project: Project):
+        self._component = component
+        self._project = project
+        self._suppress = True
+
+        self.anim_combo.blockSignals(True)
+        self.anim_combo.clear()
+        self.anim_combo.addItem("-- none --", "")
+        for doll in project.paper_dolls:
+            self.anim_combo.addItem(doll.name, doll.id)
+        current_id = component.config.get("layer_anim_id", "")
+        if current_id:
+            for i in range(self.anim_combo.count()):
+                if self.anim_combo.itemData(i) == current_id:
+                    self.anim_combo.setCurrentIndex(i)
+                    break
+        self.anim_combo.blockSignals(False)
+
+        self._suppress = False
+
+
+# ─────────────────────────────────────────────────────────────
+#  GRID CONFIG PANEL
+# ─────────────────────────────────────────────────────────────
+
+class GridConfigPanel(QWidget):
+    """Config panel for the Grid scene component."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._component: SceneComponent | None = None
+        self._project: Project | None = None
+        self._suppress = False
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # ── Name ──────────────────────────────────────────────
+        layout.addWidget(_section("GRID NAME"))
+        hint = QLabel("Unique name used by grid behavior actions to target this grid.")
+        hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("e.g. board, inventory, puzzle…")
+        self.name_edit.setStyleSheet(_field_style())
+        self.name_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.name_edit)
+
+        # ── Dimensions ────────────────────────────────────────
+        layout.addWidget(_section("GRID SIZE"))
+        dim_hint = QLabel("Number of columns and rows in the grid.")
+        dim_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        dim_hint.setWordWrap(True)
+        layout.addWidget(dim_hint)
+
+        dim_row = QHBoxLayout()
+        dim_row.setSpacing(8)
+        dim_row.addWidget(_dim("Columns:"))
+        self.cols_spin = QSpinBox()
+        self.cols_spin.setRange(1, 100)
+        self.cols_spin.setValue(8)
+        self.cols_spin.setFixedWidth(70)
+        self.cols_spin.setStyleSheet(_field_style())
+        self.cols_spin.valueChanged.connect(self._emit)
+        dim_row.addWidget(self.cols_spin)
+        dim_row.addSpacing(12)
+        dim_row.addWidget(_dim("Rows:"))
+        self.rows_spin = QSpinBox()
+        self.rows_spin.setRange(1, 100)
+        self.rows_spin.setValue(8)
+        self.rows_spin.setFixedWidth(70)
+        self.rows_spin.setStyleSheet(_field_style())
+        self.rows_spin.valueChanged.connect(self._emit)
+        dim_row.addWidget(self.rows_spin)
+        dim_row.addStretch()
+        layout.addLayout(dim_row)
+
+        # ── Cell size ─────────────────────────────────────────
+        layout.addWidget(_section("CELL SIZE"))
+        cell_hint = QLabel("Pixel dimensions of each grid cell.")
+        cell_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        cell_hint.setWordWrap(True)
+        layout.addWidget(cell_hint)
+
+        cell_row = QHBoxLayout()
+        cell_row.setSpacing(8)
+        cell_row.addWidget(_dim("Width:"))
+        self.cw_spin = QSpinBox()
+        self.cw_spin.setRange(1, 512)
+        self.cw_spin.setValue(32)
+        self.cw_spin.setFixedWidth(70)
+        self.cw_spin.setStyleSheet(_field_style())
+        self.cw_spin.valueChanged.connect(self._emit)
+        cell_row.addWidget(self.cw_spin)
+        cell_row.addSpacing(12)
+        cell_row.addWidget(_dim("Height:"))
+        self.ch_spin = QSpinBox()
+        self.ch_spin.setRange(1, 512)
+        self.ch_spin.setValue(32)
+        self.ch_spin.setFixedWidth(70)
+        self.ch_spin.setStyleSheet(_field_style())
+        self.ch_spin.valueChanged.connect(self._emit)
+        cell_row.addWidget(self.ch_spin)
+        cell_row.addStretch()
+        layout.addLayout(cell_row)
+
+        # ── Origin ────────────────────────────────────────────
+        layout.addWidget(_section("ORIGIN OFFSET"))
+        orig_hint = QLabel("Pixel position of the grid's top-left corner in the scene.")
+        orig_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        orig_hint.setWordWrap(True)
+        layout.addWidget(orig_hint)
+
+        orig_row = QHBoxLayout()
+        orig_row.setSpacing(8)
+        orig_row.addWidget(_dim("X:"))
+        self.ox_spin = QSpinBox()
+        self.ox_spin.setRange(-9999, 9999)
+        self.ox_spin.setValue(0)
+        self.ox_spin.setFixedWidth(80)
+        self.ox_spin.setStyleSheet(_field_style())
+        self.ox_spin.valueChanged.connect(self._emit)
+        orig_row.addWidget(self.ox_spin)
+        orig_row.addSpacing(12)
+        orig_row.addWidget(_dim("Y:"))
+        self.oy_spin = QSpinBox()
+        self.oy_spin.setRange(-9999, 9999)
+        self.oy_spin.setValue(0)
+        self.oy_spin.setFixedWidth(80)
+        self.oy_spin.setStyleSheet(_field_style())
+        self.oy_spin.valueChanged.connect(self._emit)
+        orig_row.addWidget(self.oy_spin)
+        orig_row.addStretch()
+        layout.addLayout(orig_row)
+
+        # ── Info ──────────────────────────────────────────────
+        layout.addWidget(_divider())
+        info = QLabel(
+            "The grid is a logical structure — it does not draw anything.\n"
+            "Use grid_place_at, grid_snap_to, grid_move, etc. in behavior\n"
+            "actions to position objects on the grid at runtime."
+        )
+        info.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        # ── Total size readout ────────────────────────────────
+        self._size_label = QLabel()
+        self._size_label.setStyleSheet(f"color: {DIM}; font-size: 11px;")
+        layout.addWidget(self._size_label)
+        self._update_size_label()
+
+        layout.addStretch()
+
+    def _update_size_label(self):
+        cols = self.cols_spin.value()
+        rows = self.rows_spin.value()
+        cw = self.cw_spin.value()
+        ch = self.ch_spin.value()
+        self._size_label.setText(
+            f"Total grid area: {cols * cw} × {rows * ch} px  "
+            f"({cols}×{rows} cells at {cw}×{ch})"
+        )
+
+    def _emit(self):
+        if self._suppress or self._component is None:
+            return
+        cfg = self._component.config
+        cfg["grid_name"]   = self.name_edit.text()
+        cfg["columns"]     = self.cols_spin.value()
+        cfg["rows"]        = self.rows_spin.value()
+        cfg["cell_width"]  = self.cw_spin.value()
+        cfg["cell_height"] = self.ch_spin.value()
+        cfg["origin_x"]    = self.ox_spin.value()
+        cfg["origin_y"]    = self.oy_spin.value()
+        self._update_size_label()
+        self.changed.emit()
+
+    def load(self, component: SceneComponent, project: Project):
+        self._component = component
+        self._project = project
+        self._suppress = True
+        cfg = component.config
+        self.name_edit.setText(cfg.get("grid_name", "grid1"))
+        self.cols_spin.setValue(cfg.get("columns", 8))
+        self.rows_spin.setValue(cfg.get("rows", 8))
+        self.cw_spin.setValue(cfg.get("cell_width", 32))
+        self.ch_spin.setValue(cfg.get("cell_height", 32))
+        self.ox_spin.setValue(cfg.get("origin_x", 0))
+        self.oy_spin.setValue(cfg.get("origin_y", 0))
+        self._update_size_label()
+        self._suppress = False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1435,15 +1778,16 @@ class SceneOptionsTab(QWidget):
 
         # Config panels (order matches COMPONENT_TYPES)
         self._panels: dict[str, QWidget] = {
-            "Background":  BackgroundConfigPanel(),
-            "Foreground":  ForegroundConfigPanel(),
-            "Layer":       LayerConfigPanel(),
-            "Music":       MusicConfigPanel(),
-            "VNDialogBox": VNDialogBoxConfigPanel(),
-            "ChoiceMenu":  ChoiceMenuConfigPanel(),
-            "HUD":         HUDConfigPanel(),
-            "Video":       VideoConfigPanel(),
-            "Transition":  TransitionConfigPanel(),
+            "Layer":          LayerConfigPanel(),
+            "Music":          MusicConfigPanel(),
+            "VNDialogBox":    VNDialogBoxConfigPanel(),
+            "ChoiceMenu":     ChoiceMenuConfigPanel(),
+            "HUD":            HUDConfigPanel(),
+            "Video":          VideoConfigPanel(),
+            "Transition":     TransitionConfigPanel(),
+            "Gravity":        GravityConfigPanel(),
+            "LayerAnimation": LayerAnimationConfigPanel(),
+            "Grid":           GridConfigPanel(),
         }
         for panel in self._panels.values():
             panel.setStyleSheet("background: transparent;")
@@ -1466,9 +1810,20 @@ class SceneOptionsTab(QWidget):
         self.comp_list.blockSignals(True)
         self.comp_list.clear()
         for c in self._scene.components:
-            if c.component_type == "Layer":
+            if c.component_type in ("Layer", "TileLayer", "CollisionLayer"):
                 label = c.config.get("layer_name", "").strip()
-                display = f"Layer: {label}" if label else "Layer"
+                display = f"{c.component_type}: {label}" if label else c.component_type
+            elif c.component_type == "LayerAnimation":
+                anim_id = c.config.get("layer_anim_id", "")
+                anim_name = ""
+                if anim_id and self._project:
+                    doll = self._project.get_paper_doll(anim_id)
+                    if doll:
+                        anim_name = doll.name
+                display = f"LayerAnimation: {anim_name}" if anim_name else "LayerAnimation"
+            elif c.component_type == "Grid":
+                gname = c.config.get("grid_name", "").strip()
+                display = f"Grid: {gname}" if gname else "Grid"
             else:
                 display = c.component_type
             item = QListWidgetItem(display)

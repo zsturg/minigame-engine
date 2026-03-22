@@ -156,11 +156,6 @@ class TransitionExport:
 #  OBJECT SYSTEM
 # ─────────────────────────────────────────────────────────────
 
-
-# ─────────────────────────────────────────────────────────────
-#  OBJECT SYSTEM
-# ─────────────────────────────────────────────────────────────
-
 @dataclass
 class SpriteFrame:
     image_id: Optional[str] = None
@@ -183,6 +178,7 @@ class BehaviorAction:
 
     # ── Timing ───────────────────────────────────────────────
     duration: float = 1.0              # wait seconds, fade duration, slide duration, etc.
+    wait_max: float = 1.0              # wait_random: max seconds (duration = min)
 
     # ── Screen effects ───────────────────────────────────────
     color: str = "#000000"             # fade_to_color, flash color
@@ -197,9 +193,18 @@ class BehaviorAction:
     bool_value: bool = True            # set_flag value
     bool_expected: bool = True         # if_flag expected state
 
+    # ── Variable-to-variable / expression actions ────────────
+    var_source: str = ""               # set_variable_from_variable, change_variable_by_variable: source variable name
+    expression: str = ""              # evaluate_expression: freeform math string (e.g. "gold + click_power * mult")
+    clamp_min: str = ""               # clamp_variable: min bound (number string, or "" = no min)
+    clamp_max: str = ""               # clamp_variable: max bound (number string, or "" = no max)
+    loop_count: int = 0               # loop: number of iterations (0 = infinite)
+
     # ── Object targeting ─────────────────────────────────────
     object_def_id: str = ""            # which object definition
     instance_id: str = ""             # specific placed instance (empty = all of type)
+    group_name: str = ""              # target group name for group actions
+    group_action_type: str = ""       # action type to broadcast to each group member
 
     # ── Transform ────────────────────────────────────────────
     target_x: int = 0
@@ -282,6 +287,46 @@ class BehaviorAction:
     # ── Layer actions ────────────────────────────────────────
     layer_name: str = ""                     # target layer by name (layer_show, layer_hide, layer_set_image)
 
+    # ── Path actions ─────────────────────────────────────────
+    path_name: str = ""                      # follow_path, set_path_speed: path name
+    path_speed: float = 1.0                  # follow_path, set_path_speed: px per frame
+    path_loop: bool = False                  # follow_path: loop at end
+
+    # ── Spawn / create_object ────────────────────────────────
+    spawn_at_self: bool = False              # True = use spawning object's position as base
+    spawn_offset_x: int = 0                  # pixel offset added to spawn X
+    spawn_offset_y: int = 0                  # pixel offset added to spawn Y
+
+    # ── Layer Animation actions ──────────────────────────────
+    # action_types: layer_anim_play_macro, layer_anim_stop_macro,
+    #               layer_anim_set_blink, layer_anim_set_idle,
+    #               layer_anim_set_talk, layer_anim_talk_for
+    layer_anim_id: str = ""                  # which PaperDollAsset (by id)
+    layer_anim_macro_name: str = ""          # macro name to play/stop
+    layer_anim_macro_loop: bool = False      # loop the macro
+    layer_anim_behavior: str = ""            # "blink" | "idle" | "talk"
+    layer_anim_enabled: bool = True          # enable or disable the behavior
+    layer_anim_talk_duration: float = 2.0    # seconds for talk_for
+
+    # ── Grid actions ─────────────────────────────────────────
+    # action_types: grid_place_at, grid_snap_to, grid_get_cell,
+    #               grid_get_at, grid_is_empty, grid_get_neighbors,
+    #               grid_for_each, grid_clear_cell, grid_clear_all,
+    #               grid_move, grid_swap
+    grid_name: str = ""                      # which Grid component to target (by grid_name)
+    grid_col: int = 0                        # target column (literal)
+    grid_row: int = 0                        # target row (literal)
+    grid_col_var: str = ""                   # read col from variable instead of literal (if non-empty)
+    grid_row_var: str = ""                   # read row from variable instead of literal (if non-empty)
+    grid_direction: str = "right"            # for grid_move: up | down | left | right
+    grid_distance: int = 1                   # for grid_move: how many cells to shift
+    grid_neighbor_mode: str = "4"            # 4 = cardinal only, 8 = include diagonals
+    grid_result_var: str = ""                # store result into variable (instance_id, col, row)
+    grid_col2: int = 0                       # second cell column (grid_swap)
+    grid_row2: int = 0                       # second cell row (grid_swap)
+    grid_col2_var: str = ""                  # read second col from variable (grid_swap)
+    grid_row2_var: str = ""                  # read second row from variable (grid_swap)
+
     def to_dict(self):
         d = self.__dict__.copy()
         # Serialize all nested action lists recursively
@@ -306,49 +351,90 @@ class BehaviorAction:
 
 @dataclass
 class Behavior:
-    trigger: str = "on_interact"
+    trigger: str = "on_scene_start"
     # Valid triggers:
-    #   on_interact      — player presses interact button near this object
-    #   on_input         — any mapped input action fires (uses input_action_name)
-    #   on_frame         — runs every frame (uses frame_count for interval)
-    #   on_button_pressed  — fires once when button is first pressed (uses button)
-    #   on_button_held     — fires every frame while button is held (uses button)
-    #   on_button_released — fires once when button is released (uses button)
-    #   on_scene_start   — fires once when the scene loads
-    #   on_scene_end     — fires once when the scene ends
-    #   on_timer         — fires on a repeating frame interval (uses frame_count)
-    #   on_create        — fires once when the object is created/spawned
-    #   on_destroy       — fires once when the object is destroyed
-    #   on_enter         — fires once when a zone target first overlaps this zone
-    #   on_exit          — fires once when a zone target stops overlapping this zone
-    #   on_overlap       — fires every frame while a zone target overlaps this zone
-    #   on_interact_zone — player presses interact button while inside this zone
+    #   on_input              — any mapped input action fires (uses input_action_name)
+    #   on_frame              — runs every frame (uses frame_count for interval)
+    #   on_button_pressed     — fires once when button is first pressed (uses button)
+    #   on_button_held        — fires every frame while button is held (uses button)
+    #   on_button_released    — fires once when button is released (uses button)
+    #   on_scene_start        — fires once when the scene loads
+    #   on_scene_end          — fires once when the scene ends
+    #   on_timer              — fires on a repeating frame interval (uses frame_count)
+    #   on_timer_variable     — repeating timer where interval is read from a variable (uses timer_var)
+    #   on_create             — fires once when the object is created/spawned
+    #   on_destroy            — fires once when the object is destroyed
+    #   on_enter              — fires once when a zone target first overlaps this zone
+    #   on_exit               — fires once when a zone target stops overlapping this zone
+    #   on_overlap            — fires every frame while a zone target overlaps this zone
+    #   on_interact_zone      — player presses interact button while inside this zone
+    #   on_variable_threshold — fires when a variable crosses a comparison threshold
+    #                           (uses threshold_var, threshold_value, threshold_compare, threshold_repeat)
+    #   on_touch_tap          — fires when the front touchscreen is tapped inside this object's bounding box
+    #   on_path_complete      — fires when an object finishes following a named path (uses path_name)
     frame_count: int = 60
     bool_var: str = ""
     input_action_name: str = ""
     button: str = ""               # used by on_button_pressed / held / released
+    timer_var: str = ""            # on_timer_variable: name of variable holding the frame interval
+    threshold_var: str = ""        # on_variable_threshold: which variable to watch
+    threshold_value: str = ""      # on_variable_threshold: value to compare against
+    threshold_compare: str = ">="  # on_variable_threshold: == | != | > | < | >= | <=
+    threshold_repeat: bool = False # on_variable_threshold: re-arm and fire again each time condition is met
+    path_name: str = ""            # on_path_complete: name of the path to watch
     actions: list[BehaviorAction] = field(default_factory=list)
 
     def to_dict(self):
         return {
-            "trigger": self.trigger,
-            "frame_count": self.frame_count,
-            "bool_var": self.bool_var,
-            "input_action_name": self.input_action_name,
-            "button": self.button,
-            "actions": [a.to_dict() for a in self.actions],
+            "trigger":            self.trigger,
+            "frame_count":        self.frame_count,
+            "bool_var":           self.bool_var,
+            "input_action_name":  self.input_action_name,
+            "button":             self.button,
+            "timer_var":          self.timer_var,
+            "threshold_var":      self.threshold_var,
+            "threshold_value":    self.threshold_value,
+            "threshold_compare":  self.threshold_compare,
+            "threshold_repeat":   self.threshold_repeat,
+            "path_name":          self.path_name,
+            "actions":            [a.to_dict() for a in self.actions],
         }
 
     @classmethod
     def from_dict(cls, d):
         b = cls()
-        b.trigger = d.get("trigger", "on_interact")
-        b.frame_count = d.get("frame_count", 60)
-        b.bool_var = d.get("bool_var", "")
+        b.trigger           = d.get("trigger",           "on_scene_start")
+        b.frame_count       = d.get("frame_count",       60)
+        b.bool_var          = d.get("bool_var",          "")
         b.input_action_name = d.get("input_action_name", "")
-        b.button = d.get("button", "")
-        b.actions = [BehaviorAction.from_dict(a) for a in d.get("actions", [])]
+        b.button            = d.get("button",            "")
+        b.timer_var         = d.get("timer_var",         "")
+        b.threshold_var     = d.get("threshold_var",     "")
+        b.threshold_value   = d.get("threshold_value",   "")
+        b.threshold_compare = d.get("threshold_compare", ">=")
+        b.threshold_repeat  = d.get("threshold_repeat",  False)
+        b.path_name         = d.get("path_name",         "")
+        b.actions           = [BehaviorAction.from_dict(a) for a in d.get("actions", [])]
         return b
+
+
+@dataclass
+class CollisionBox:
+    """Axis-aligned collision rectangle, in pixel coords relative to object origin."""
+    x: int = 0
+    y: int = 0
+    width: int = 32
+    height: int = 32
+
+    def to_dict(self):
+        return {"x": self.x, "y": self.y, "width": self.width, "height": self.height}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            x=d.get("x", 0), y=d.get("y", 0),
+            width=d.get("width", 32), height=d.get("height", 32),
+        )
 
 
 @dataclass
@@ -361,8 +447,9 @@ class ObjectDefinition:
     width: int = 64
     height: int = 64
     visible_default: bool = True
+    groups: list[str] = field(default_factory=list)  # design-time group membership tags
     # VNCharacter behavior config — only meaningful when behavior_type == "VNCharacter"
-    behavior_type: str = "default"      # default | VNCharacter | GUI_Label | GUI_Button | GUI_Panel | Camera
+    behavior_type: str = "default"      # default | VNCharacter | GUI_Label | GUI_Button | GUI_Panel | Camera | Animation | LayerAnimation
     vn_display_name: str = ""           # shown in the VN dialogue name box
     vn_name_color: str = "#FFFFFF"      # hex color for the name tag
     # GUI config — only meaningful when behavior_type starts with "GUI_"
@@ -392,9 +479,22 @@ class ObjectDefinition:
     ani_pause_frame: int = 0                 # frame to pause on if ani_start_paused
     ani_fps_override: int = 0                # 0 = use file default
 
+    # LayerAnimation config — only meaningful when behavior_type == "LayerAnimation"
+    layer_anim_id: str = ""                  # reference to PaperDollAsset.id
+    layer_anim_blink: bool = True            # blink behavior enabled at spawn
+    layer_anim_talk: bool = True             # talk behavior enabled at spawn
+    layer_anim_idle: bool = True             # idle breathing behavior enabled at spawn
+
     # Zone config — makes this object act as an Area2D-style trigger region
     is_zone: bool = False                    # True = this object is a trigger zone
     zone_target: str = "player"              # "player" = only player trips it | "any" = any object trips it
+
+    # Physics config
+    affected_by_gravity: bool = False        # True = scene gravity applies to this object
+
+    # Collision boxes — per-frame list of collision rectangles
+    # collision_boxes[frame_index] = list of CollisionBox for that frame
+    collision_boxes: list[list[CollisionBox]] = field(default_factory=list)
 
     def to_dict(self):
         return {
@@ -406,6 +506,7 @@ class ObjectDefinition:
             "width": self.width,
             "height": self.height,
             "visible_default": self.visible_default,
+            "groups": list(self.groups),
             "behavior_type": self.behavior_type,
             "vn_display_name": self.vn_display_name,
             "vn_name_color": self.vn_name_color,
@@ -431,8 +532,14 @@ class ObjectDefinition:
             "ani_start_paused": self.ani_start_paused,
             "ani_pause_frame": self.ani_pause_frame,
             "ani_fps_override": self.ani_fps_override,
+            "layer_anim_id": self.layer_anim_id,
+            "layer_anim_blink": self.layer_anim_blink,
+            "layer_anim_talk": self.layer_anim_talk,
+            "layer_anim_idle": self.layer_anim_idle,
             "is_zone": self.is_zone,
             "zone_target": self.zone_target,
+            "affected_by_gravity": self.affected_by_gravity,
+            "collision_boxes": [[cb.to_dict() for cb in frame_boxes] for frame_boxes in self.collision_boxes],
         }
 
     @classmethod
@@ -446,6 +553,7 @@ class ObjectDefinition:
         obj.width = d.get("width", 64)
         obj.height = d.get("height", 64)
         obj.visible_default = d.get("visible_default", True)
+        obj.groups = list(d.get("groups", []))
         obj.behavior_type = d.get("behavior_type", "default")
         obj.vn_display_name = d.get("vn_display_name", "")
         obj.vn_name_color = d.get("vn_name_color", "#FFFFFF")
@@ -471,9 +579,33 @@ class ObjectDefinition:
         obj.ani_start_paused = d.get("ani_start_paused", False)
         obj.ani_pause_frame = d.get("ani_pause_frame", 0)
         obj.ani_fps_override = d.get("ani_fps_override", 0)
+        obj.layer_anim_id = d.get("layer_anim_id", "")
+        obj.layer_anim_blink = d.get("layer_anim_blink", True)
+        obj.layer_anim_talk = d.get("layer_anim_talk", True)
+        obj.layer_anim_idle = d.get("layer_anim_idle", True)
         obj.is_zone = d.get("is_zone", False)
         obj.zone_target = d.get("zone_target", "player")
+        obj.affected_by_gravity = d.get("affected_by_gravity", False)
+        obj.collision_boxes = [
+            [CollisionBox.from_dict(cb) for cb in frame_boxes]
+            for frame_boxes in d.get("collision_boxes", [])
+        ]
+        obj.sync_collision_frames()
         return obj
+
+    def sync_collision_frames(self, frame_count_override: int = 0):
+        """Ensure collision_boxes has one entry per frame (at least 1 for static objects).
+        
+        frame_count_override: if > 0, use this instead of len(self.frames).
+                              Useful for Animation behavior_type where frame count
+                              comes from the AnimationExport, not self.frames.
+        """
+        target = frame_count_override if frame_count_override > 0 else max(len(self.frames), 1)
+        while len(self.collision_boxes) < target:
+            self.collision_boxes.append([])
+        # Trim extras if frames were removed (keep data for existing frames)
+        if len(self.collision_boxes) > target:
+            self.collision_boxes = self.collision_boxes[:target]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -494,6 +626,19 @@ class PlacedObject:
     draw_layer: int = 2                 # draw order when not assigned to a Layer component; 0=back, higher=front
     instance_behaviors: list[Behavior] = field(default_factory=list)
 
+    # ── 3D placement (only used when placed in a 3D scene) ──
+    is_3d: bool = False                # True = billboard sprite or HUD in a 3D scene
+    grid_x: int = 1                    # tile column
+    grid_y: int = 1                    # tile row
+    offset_x: float = 0.5             # sub-tile position 0.0–1.0 (0.5 = center)
+    offset_y: float = 0.5             # sub-tile position 0.0–1.0 (0.5 = center)
+    vertical_offset: float = 0.0       # shift sprite up/down in world
+    blocking: bool = False             # blocks player movement?
+    hud_mode: bool = False             # True = screen-space HUD image, not a billboard
+    hud_x: int = 10                    # screen pixel X (960×544)
+    hud_y: int = 10                    # screen pixel Y
+    hud_anchor: str = "top_left"       # top_left | top_right | bottom_left | bottom_right | center
+
     def to_dict(self):
         return {
             "instance_id": self.instance_id,
@@ -507,6 +652,17 @@ class PlacedObject:
             "layer_id": self.layer_id,
             "draw_layer": self.draw_layer,
             "instance_behaviors": [b.to_dict() for b in self.instance_behaviors],
+            "is_3d": self.is_3d,
+            "grid_x": self.grid_x,
+            "grid_y": self.grid_y,
+            "offset_x": self.offset_x,
+            "offset_y": self.offset_y,
+            "vertical_offset": self.vertical_offset,
+            "blocking": self.blocking,
+            "hud_mode": self.hud_mode,
+            "hud_x": self.hud_x,
+            "hud_y": self.hud_y,
+            "hud_anchor": self.hud_anchor,
         }
 
     @classmethod
@@ -523,7 +679,261 @@ class PlacedObject:
         obj.layer_id = d.get("layer_id", "")
         obj.draw_layer = d.get("draw_layer", 2)
         obj.instance_behaviors = [Behavior.from_dict(b) for b in d.get("instance_behaviors", [])]
+        obj.is_3d = d.get("is_3d", False)
+        obj.grid_x = d.get("grid_x", 1)
+        obj.grid_y = d.get("grid_y", 1)
+        obj.offset_x = float(d.get("offset_x", 0.5))
+        obj.offset_y = float(d.get("offset_y", 0.5))
+        obj.vertical_offset = float(d.get("vertical_offset", 0.0))
+        obj.blocking = d.get("blocking", False)
+        obj.hud_mode = d.get("hud_mode", False)
+        obj.hud_x = d.get("hud_x", 10)
+        obj.hud_y = d.get("hud_y", 10)
+        obj.hud_anchor = d.get("hud_anchor", "top_left")
         return obj
+
+
+# ─────────────────────────────────────────────────────────────
+#  PAPER DOLL SYSTEM
+# ─────────────────────────────────────────────────────────────
+
+@dataclass
+class PaperDollLayer:
+    """One node in a paper doll hierarchy. Children inherit parent transforms."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = "New Layer"
+    image_id: Optional[str] = None          # RegisteredImage.id
+    origin_x: float = 0.0                   # pivot point, pixels relative to image
+    origin_y: float = 0.0                   # pivot point, pixels relative to image
+    x: float = 0.0                          # offset from parent's origin
+    y: float = 0.0                          # offset from parent's origin
+    rotation: float = 0.0                   # degrees
+    scale: float = 1.0
+    children: list["PaperDollLayer"] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "image_id": self.image_id,
+            "origin_x": self.origin_x,
+            "origin_y": self.origin_y,
+            "x": self.x,
+            "y": self.y,
+            "rotation": self.rotation,
+            "scale": self.scale,
+            "children": [c.to_dict() for c in self.children],
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        obj = cls()
+        obj.id = d.get("id", obj.id)
+        obj.name = d.get("name", "New Layer")
+        obj.image_id = d.get("image_id")
+        obj.origin_x = float(d.get("origin_x", 0.0))
+        obj.origin_y = float(d.get("origin_y", 0.0))
+        obj.x = float(d.get("x", 0.0))
+        obj.y = float(d.get("y", 0.0))
+        obj.rotation = float(d.get("rotation", 0.0))
+        obj.scale = float(d.get("scale", 1.0))
+        obj.children = [PaperDollLayer.from_dict(c) for c in d.get("children", [])]
+        return obj
+
+
+@dataclass
+class BlinkConfig:
+    """Auto-blink: swaps a layer's image on a randomized interval."""
+    enabled: bool = False
+    layer_id: str = ""                      # which PaperDollLayer gets swapped
+    alt_image_id: Optional[str] = None      # RegisteredImage.id for closed-eye frame
+    interval_min: float = 2.0               # seconds between blinks (lower bound)
+    interval_max: float = 5.0               # seconds between blinks (upper bound)
+    blink_duration: float = 0.15            # seconds the alt image stays visible
+
+    def to_dict(self):
+        return {
+            "enabled": self.enabled,
+            "layer_id": self.layer_id,
+            "alt_image_id": self.alt_image_id,
+            "interval_min": self.interval_min,
+            "interval_max": self.interval_max,
+            "blink_duration": self.blink_duration,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            enabled=d.get("enabled", False),
+            layer_id=d.get("layer_id", ""),
+            alt_image_id=d.get("alt_image_id"),
+            interval_min=float(d.get("interval_min", 2.0)),
+            interval_max=float(d.get("interval_max", 5.0)),
+            blink_duration=float(d.get("blink_duration", 0.15)),
+        )
+
+
+@dataclass
+class MouthConfig:
+    """Auto-talk: swaps a layer's image while typewriter text is active."""
+    enabled: bool = False
+    layer_id: str = ""                      # which PaperDollLayer gets swapped
+    alt_image_id: Optional[str] = None      # RegisteredImage.id for open-mouth frame
+    cycle_speed: float = 0.12               # seconds per open/close cycle
+
+    def to_dict(self):
+        return {
+            "enabled": self.enabled,
+            "layer_id": self.layer_id,
+            "alt_image_id": self.alt_image_id,
+            "cycle_speed": self.cycle_speed,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            enabled=d.get("enabled", False),
+            layer_id=d.get("layer_id", ""),
+            alt_image_id=d.get("alt_image_id"),
+            cycle_speed=float(d.get("cycle_speed", 0.12)),
+        )
+
+
+@dataclass
+class IdleBreathingConfig:
+    """Idle breathing: periodic scale pulse on a chosen layer."""
+    enabled: bool = False
+    layer_id: str = ""                      # which PaperDollLayer to pulse (empty = root)
+    scale_amount: float = 0.02              # ±percentage (0.02 = ±2%)
+    speed: float = 3.0                      # full cycle duration in seconds
+    affect_children: bool = True            # if False, only the target layer scales
+
+    def to_dict(self):
+        return {
+            "enabled": self.enabled,
+            "layer_id": self.layer_id,
+            "scale_amount": self.scale_amount,
+            "speed": self.speed,
+            "affect_children": self.affect_children,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            enabled=d.get("enabled", False),
+            layer_id=d.get("layer_id", ""),
+            scale_amount=float(d.get("scale_amount", 0.02)),
+            speed=float(d.get("speed", 3.0)),
+            affect_children=d.get("affect_children", True),
+        )
+
+
+@dataclass
+class PaperDollKeyframe:
+    """One keyframe for one layer at a specific time in a macro."""
+    time: float = 0.0                       # seconds into the macro
+    layer_id: str = ""                      # which PaperDollLayer
+    x: float = 0.0
+    y: float = 0.0
+    rotation: float = 0.0
+    scale: float = 1.0
+
+    def to_dict(self):
+        return {
+            "time": self.time,
+            "layer_id": self.layer_id,
+            "x": self.x,
+            "y": self.y,
+            "rotation": self.rotation,
+            "scale": self.scale,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            time=float(d.get("time", 0.0)),
+            layer_id=d.get("layer_id", ""),
+            x=float(d.get("x", 0.0)),
+            y=float(d.get("y", 0.0)),
+            rotation=float(d.get("rotation", 0.0)),
+            scale=float(d.get("scale", 1.0)),
+        )
+
+
+@dataclass
+class PaperDollMacro:
+    """A named, keyframed animation sequence for a paper doll."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = "New Macro"
+    duration: float = 1.0                   # total length in seconds
+    loop: bool = False
+    keyframes: list[PaperDollKeyframe] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "duration": self.duration,
+            "loop": self.loop,
+            "keyframes": [k.to_dict() for k in self.keyframes],
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        obj = cls()
+        obj.id = d.get("id", obj.id)
+        obj.name = d.get("name", "New Macro")
+        obj.duration = float(d.get("duration", 1.0))
+        obj.loop = d.get("loop", False)
+        obj.keyframes = [PaperDollKeyframe.from_dict(k) for k in d.get("keyframes", [])]
+        return obj
+
+
+@dataclass
+class PaperDollAsset:
+    """A complete paper doll: layer hierarchy + auto-behaviors + macros."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = "New Paper Doll"
+    root_layers: list[PaperDollLayer] = field(default_factory=list)
+    blink: BlinkConfig = field(default_factory=BlinkConfig)
+    mouth: MouthConfig = field(default_factory=MouthConfig)
+    idle_breathing: IdleBreathingConfig = field(default_factory=IdleBreathingConfig)
+    macros: list[PaperDollMacro] = field(default_factory=list)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "root_layers": [l.to_dict() for l in self.root_layers],
+            "blink": self.blink.to_dict(),
+            "mouth": self.mouth.to_dict(),
+            "idle_breathing": self.idle_breathing.to_dict(),
+            "macros": [m.to_dict() for m in self.macros],
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        obj = cls()
+        obj.id = d.get("id", obj.id)
+        obj.name = d.get("name", "New Paper Doll")
+        obj.root_layers = [PaperDollLayer.from_dict(l) for l in d.get("root_layers", [])]
+        obj.blink = BlinkConfig.from_dict(d.get("blink", {}))
+        obj.mouth = MouthConfig.from_dict(d.get("mouth", {}))
+        obj.idle_breathing = IdleBreathingConfig.from_dict(d.get("idle_breathing", {}))
+        obj.macros = [PaperDollMacro.from_dict(m) for m in d.get("macros", [])]
+        return obj
+
+    def find_layer(self, layer_id: str) -> Optional[PaperDollLayer]:
+        """Recursively search the hierarchy for a layer by ID."""
+        def _search(layers):
+            for l in layers:
+                if l.id == layer_id:
+                    return l
+                found = _search(l.children)
+                if found:
+                    return found
+            return None
+        return _search(self.root_layers)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -532,8 +942,6 @@ class PlacedObject:
 
 # Available component types and their default configs
 COMPONENT_TYPES = [
-    "Background",
-    "Foreground",
     "Layer",
     "TileLayer",
     "CollisionLayer",
@@ -544,19 +952,13 @@ COMPONENT_TYPES = [
     "HUD",
     "Video",
     "Transition",
+    "Path",
+    "Gravity",
+    "LayerAnimation",
+    "Grid",
 ]
 
 COMPONENT_DEFAULTS: dict[str, dict] = {
-    "Background": {
-        "image_id": None,
-        "scroll": False,
-        "scroll_speed": 1,
-        "scroll_direction": "horizontal",
-        "parallax": 1.0,  # 0 = fixed, 1 = moves with camera, 0.5 = half speed
-    },
-    "Foreground": {
-        "image_id": None,
-    },
     "Layer": {
         "layer_name": "New Layer",
         "layer": 0,                 # 0 = furthest back, higher = closer to camera
@@ -595,8 +997,11 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
         "audio_id": None,
     },
     "VNDialogBox": {
-        "speaker_name": "",
-        "lines": ["", "", "", ""],
+        "dialog_pages": [
+            {"character": "", "lines": ["", "", "", ""], "advance_to_next": False, "typewriter": False, "typewriter_speed": 30},
+        ],
+        "font_size": 16,
+        "line_spacing": 35,
     },
     "ChoiceMenu": {
         "choices": [
@@ -619,6 +1024,28 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
         "trans_file_id": "",
         "trans_fps_override": 0,
     },
+    "Path": {
+        "path_name": "New Path",
+        "points": [],          # list of {x, y, cx1, cy1, cx2, cy2}
+        "closed": False,
+    },
+    "Gravity": {
+        "gravity_strength": 0.5,       # pixels per frame² (acceleration)
+        "gravity_direction": "down",   # down | up | left | right
+        "terminal_velocity": 10,       # max fall speed in pixels per frame
+    },
+    "LayerAnimation": {
+        "layer_anim_id": "",           # PaperDollAsset.id
+    },
+    "Grid": {
+        "grid_name": "grid1",          # lookup key for behavior actions
+        "columns": 8,                  # number of columns
+        "rows": 8,                     # number of rows
+        "cell_width": 32,              # pixel width of each cell
+        "cell_height": 32,             # pixel height of each cell
+        "origin_x": 0,                 # pixel X offset of grid top-left in scene
+        "origin_y": 0,                 # pixel Y offset of grid top-left in scene
+    },
 }
 
 
@@ -626,7 +1053,7 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
 @dataclass
 class SceneComponent:
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    component_type: str = "Background"
+    component_type: str = "Layer"
     config: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -648,8 +1075,18 @@ class SceneComponent:
     def from_dict(cls, d):
         obj = cls.__new__(cls)
         obj.id = d.get("id", str(uuid.uuid4())[:8])
-        obj.component_type = d.get("component_type", "Background")
+        obj.component_type = d.get("component_type", "Layer")
         obj.config = d.get("config", {})
+        # ── Migrate legacy VNDialogBox (speaker_name + lines → dialog_pages) ──
+        # Must run BEFORE defaults fill, which would add an empty dialog_pages.
+        if obj.component_type == "VNDialogBox" and "dialog_pages" not in obj.config and "lines" in obj.config:
+            legacy_name  = obj.config.pop("speaker_name", "")
+            legacy_lines = obj.config.pop("lines", ["", "", "", ""])
+            legacy_lines = (legacy_lines + ["", "", "", ""])[:4]
+            advance_flag = obj.config.get("advance", True)
+            obj.config["dialog_pages"] = [
+                {"character": legacy_name, "lines": legacy_lines, "advance_to_next": advance_flag, "typewriter": False, "typewriter_speed": 30},
+            ]
         # Fill any missing keys from defaults
         defaults = COMPONENT_DEFAULTS.get(obj.component_type, {})
         import copy
@@ -688,6 +1125,8 @@ class MapData:
     shading:      bool  = False
     floor_on:     bool  = False
     sky_on:       bool  = False
+    skybox_image_id: str = ""          # registered image ID for skybox background (empty = use fillRect)
+    accuracy:     int   = 3            # raycaster column stride (1=best quality, 7=fastest)
 
     def get(self, col: int, row: int) -> int:
         if 0 <= col < self.width and 0 <= row < self.height:
@@ -739,6 +1178,8 @@ class MapData:
             "shading":     self.shading,
             "floor_on":    self.floor_on,
             "sky_on":      self.sky_on,
+            "skybox_image_id": self.skybox_image_id,
+            "accuracy":    self.accuracy,
         }
 
     @classmethod
@@ -758,6 +1199,8 @@ class MapData:
         m.shading     = d.get("shading",     False)
         m.floor_on    = d.get("floor_on",    False)
         m.sky_on      = d.get("sky_on",      False)
+        m.skybox_image_id = d.get("skybox_image_id", "")
+        m.accuracy    = d.get("accuracy",    3)
         return m
 
 
@@ -772,25 +1215,21 @@ def _make_scene_components(template: str) -> list[SceneComponent]:
         return []
     elif template == "VN_SCENE":
         return [
-            make_component("Background"),
             make_component("Music"),
             make_component("VNDialogBox"),
         ]
     elif template == "CHOICE_SCENE":
         return [
-            make_component("Background"),
             make_component("Music"),
             make_component("VNDialogBox"),
             make_component("ChoiceMenu"),
         ]
     elif template == "START_SCREEN":
         return [
-            make_component("Background"),
             make_component("Music"),
         ]
     elif template == "END_SCENE":
         return [
-            make_component("Background"),
             make_component("Music"),
         ]
     elif template == "CUTSCENE":
@@ -991,6 +1430,7 @@ class GameData:
     inventory_max: int = 20
     save_enabled: bool = True
     volume_default: int = 100
+    fps_cap_enabled: bool = True
 
     def to_dict(self):
         return {
@@ -1002,6 +1442,7 @@ class GameData:
             "inventory_max": self.inventory_max,
             "save_enabled": self.save_enabled,
             "volume_default": self.volume_default,
+            "fps_cap_enabled": self.fps_cap_enabled,
         }
 
     @classmethod
@@ -1015,6 +1456,7 @@ class GameData:
         gd.inventory_max = d.get("inventory_max", 20)
         gd.save_enabled = d.get("save_enabled", True)
         gd.volume_default = d.get("volume_default", 100)
+        gd.fps_cap_enabled = d.get("fps_cap_enabled", True)
         return gd
 
 
@@ -1040,6 +1482,7 @@ class Project:
     game_data: GameData = field(default_factory=GameData)
     animation_exports: list[AnimationExport] = field(default_factory=list)
     transition_exports: list[TransitionExport] = field(default_factory=list)
+    paper_dolls: list[PaperDollAsset] = field(default_factory=list)
 
     # ── Lookup helpers ──────────────────────────────────────
 
@@ -1064,6 +1507,9 @@ class Project:
     def get_transition_export(self, trans_id: str) -> Optional[TransitionExport]:
         return next((t for t in self.transition_exports if t.id == trans_id), None)
 
+    def get_paper_doll(self, doll_id: str) -> Optional[PaperDollAsset]:
+        return next((d for d in self.paper_dolls if d.id == doll_id), None)
+
     # ── Serialization ───────────────────────────────────────
     def to_dict(self):
         return {
@@ -1082,10 +1528,12 @@ class Project:
             "game_data": self.game_data.to_dict(),
             "animation_exports": [a.to_dict() for a in self.animation_exports],
             "transition_exports": [t.to_dict() for t in self.transition_exports],
+            "paper_dolls": [d.to_dict() for d in self.paper_dolls],
         }
 
     def save(self, path: str | Path):
         path = Path(path)
+        self.project_folder = str(path.parent)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
 
@@ -1099,7 +1547,7 @@ class Project:
         p.title_id = d.get("title_id", "ADVG00001")
         p.author = d.get("author", "")
         p.version = d.get("version", "1.0")
-        p.project_folder = d.get("project_folder")
+        p.project_folder = str(path.parent)
         p.images = [RegisteredImage.from_dict(i) for i in d.get("images", [])]
         p.audio = [RegisteredAudio.from_dict(a) for a in d.get("audio", [])]
         p.fonts = [RegisteredFont.from_dict(f) for f in d.get("fonts", [])]
@@ -1111,14 +1559,13 @@ class Project:
         p.game_data = GameData.from_dict(d.get("game_data", {}))
         p.animation_exports = [AnimationExport.from_dict(a) for a in d.get("animation_exports", [])]
         p.transition_exports = [TransitionExport.from_dict(t) for t in d.get("transition_exports", [])]
+        p.paper_dolls = [PaperDollAsset.from_dict(pd) for pd in d.get("paper_dolls", [])]
         return p
 
     @classmethod
     def new(cls) -> "Project":
         p = cls()
         p.scenes = [
-            Scene.from_template("START_SCREEN", name="Start"),
-            Scene.from_template("VN_SCENE",     name="Scene 1"),
-            Scene.from_template("END_SCENE",     name="End"),
+            Scene.from_template("BLANK", name="Scene 1"),
         ]
         return p
