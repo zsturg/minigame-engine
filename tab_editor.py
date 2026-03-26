@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QMouseEvent, QPaintEvent, QTransform,
 )
 
-from models import Project, Scene, PlacedObject, Behavior, BehaviorAction, SceneComponent
+from models import Project, Scene, PlacedObject, Behavior, BehaviorAction, SceneComponent, ObjectDefinition
 from project_explorer import ProjectExplorer
 from tile_palette import TilePalette
 
@@ -1612,16 +1612,34 @@ class SceneComponentsPanel(QWidget):
                 info_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; background: transparent;")
                 self._root.addWidget(info_lbl)
 
-                # Paint button
-                paint_btn = QPushButton("Paint Collision ↓")
+                # Paint / Erase buttons row
+                btn_row = QHBoxLayout()
+                btn_row.setSpacing(6)
+                btn_row.setContentsMargins(0, 4, 0, 6)
+
+                paint_btn = QPushButton("✏ Paint")
                 paint_btn.setStyleSheet(f"""
                     QPushButton {{ background: #c0392b; color: white; border: none;
-                        border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 600; }}
+                        border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: 600; }}
                     QPushButton:hover {{ background: #e74c3c; }}
                 """)
+                paint_btn.setToolTip("LMB to paint solid cells — RMB also erases while in paint mode")
                 paint_btn.clicked.connect(
                     lambda _, c=comp: self.tile_layer_selected.emit("__collision__:" + c.id))
-                self._root.addWidget(paint_btn)
+
+                erase_btn = QPushButton("✕ Erase")
+                erase_btn.setStyleSheet(f"""
+                    QPushButton {{ background: {SURFACE2}; color: {TEXT}; border: 1px solid {BORDER};
+                        border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: 600; }}
+                    QPushButton:hover {{ background: {BORDER}; }}
+                """)
+                erase_btn.setToolTip("Enter erase mode — click cells to remove collision")
+                erase_btn.clicked.connect(
+                    lambda _, c=comp: self.tile_layer_selected.emit("__collision_erase__:" + c.id))
+
+                btn_row.addWidget(paint_btn)
+                btn_row.addWidget(erase_btn)
+                self._root.addLayout(btn_row)
 
             elif ct == "TileLayer":
                 # Tileset selector
@@ -2349,12 +2367,14 @@ class VitaCanvas(QWidget):
         self._grid_size = s
         self.update()
 
-    def set_tile_paint_mode(self, active: bool, tile_layer_comp, tileset, palette_ref, collision_mode: bool = False):
+    def set_tile_paint_mode(self, active: bool, tile_layer_comp, tileset, palette_ref, collision_mode: bool = False, erase_mode: bool = False):
         self._tile_paint_mode  = active
         self._tile_layer_comp  = tile_layer_comp
         self._tile_tileset     = tileset
         self._tile_palette_ref = palette_ref
         self._collision_mode   = collision_mode
+        if collision_mode:
+            self._collision_paint_value = 0 if erase_mode else 1
         if active:
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
@@ -2515,8 +2535,9 @@ class VitaCanvas(QWidget):
             path = self._img_path(od.frames[0].image_id)
             return self._load_pixmap(path) if path else None
         # ── Animation object: crop first frame from spritesheet ──
-        if od.behavior_type == "Animation" and od.ani_file_id:
-            ani = self._project.get_animation_export(od.ani_file_id)
+        _ani_fid = od.ani_slots[0].get("ani_file_id", "") if od.ani_slots else ""
+        if od.behavior_type == "Animation" and _ani_fid:
+            ani = self._project.get_animation_export(_ani_fid)
             if ani and ani.spritesheet_path and self._project.project_folder:
                 cache_key = f"__ani_frame0__{ani.id}"
                 if cache_key in self._pixmap_cache:
@@ -2552,7 +2573,8 @@ class VitaCanvas(QWidget):
                     return QRect(po.x, po.y, int(od.width * po.scale), int(od.height * po.scale))
             return QRect(po.x, po.y, 64, 64)
         od = self._project.get_object_def(po.object_def_id) if self._project else None
-        if od and od.behavior_type == "Animation" and od.ani_file_id:
+        _ani_fid = od.ani_slots[0].get("ani_file_id", "") if (od and od.ani_slots) else ""
+        if od and od.behavior_type == "Animation" and _ani_fid:
             return QRect(po.x, po.y, int(od.width * po.scale), int(od.height * po.scale))
         return QRect(po.x, po.y, int(px.width() * po.scale), int(px.height() * po.scale))
 
@@ -2742,7 +2764,8 @@ class VitaCanvas(QWidget):
                     # display size — the spritesheet frame may have been downscaled
                     # to fit within the 2048x2048 sheet limit.
                     od = self._project.get_object_def(po.object_def_id) if self._project else None
-                    if od and od.behavior_type == "Animation" and od.ani_file_id:
+                    _ani_fid = od.ani_slots[0].get("ani_file_id", "") if (od and od.ani_slots) else ""
+                    if od and od.behavior_type == "Animation" and _ani_fid:
                         w = int(od.width * po.scale)
                         h = int(od.height * po.scale)
                     else:
@@ -2979,9 +3002,9 @@ class VitaCanvas(QWidget):
             self.update()
             return
 
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
         if self._tile_paint_mode:
+            if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+                return
             self._tile_painting = True
             # RMB erases in collision mode, LMB paints solid
             if self._collision_mode:
@@ -2989,6 +3012,8 @@ class VitaCanvas(QWidget):
             world_x = pos.x() + self._cam_x
             world_y = pos.y() + self._cam_y
             self._paint_tile_at(world_x, world_y)
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
             return
         row = self._row_at(pos)
         if row >= 0:
@@ -3058,15 +3083,17 @@ class VitaCanvas(QWidget):
                 else Qt.CursorShape.ArrowCursor
             )
             return
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
         # ── Path draw release ───────────────────────────────────
         if self._path_draw_mode:
-            self._path_drag_idx    = -1
-            self._path_drag_handle = ""
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._path_drag_idx    = -1
+                self._path_drag_handle = ""
             return
         if self._tile_paint_mode:
-            self._tile_painting = False
+            if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+                self._tile_painting = False
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
             return
         if not self._dragging:
             return
@@ -3191,6 +3218,7 @@ class SceneListPanel(QWidget):
 
 class EditorTab(QWidget):
     instance_changed = Signal()
+    object_def_created = Signal()
 
     def __init__(self, main_window, parent=None):
         super().__init__(parent)
@@ -3416,7 +3444,7 @@ class EditorTab(QWidget):
         self._bottom_stack.setFixedHeight(150)
         self._bottom_stack.setCurrentIndex(0)
 
-    def _show_collision_painter(self, comp_id: str):
+    def _show_collision_painter(self, comp_id: str, erase: bool = False):
         """Activate collision paint mode for the CollisionLayer with the given component id."""
         if self._scene is None:
             return
@@ -3430,11 +3458,15 @@ class EditorTab(QWidget):
         self._bottom_stack.setFixedHeight(60)
         self._bottom_stack.setCurrentIndex(1)
         # Activate paint mode on canvas in collision mode
-        self.canvas.set_tile_paint_mode(True, comp, None, None, collision_mode=True)
+        self.canvas.set_tile_paint_mode(True, comp, None, None, collision_mode=True, erase_mode=erase)
 
     def _on_tile_layer_selected(self, tileset_id: str):
         """Called when a TileLayer or CollisionLayer palette/paint button is clicked."""
-        if tileset_id.startswith("__collision__:"):
+        if tileset_id.startswith("__collision_erase__:"):
+            comp_id = tileset_id[len("__collision_erase__:"):]
+            self._active_collision_comp_id = comp_id
+            self._show_collision_painter(comp_id, erase=True)
+        elif tileset_id.startswith("__collision__:"):
             comp_id = tileset_id[len("__collision__:"):]
             self._active_collision_comp_id = comp_id
             self._show_collision_painter(comp_id)
@@ -3530,7 +3562,7 @@ class EditorTab(QWidget):
     # ── Object list ops ───────────────────────────────────────
 
     def _place_object(self):
-        if self._project is None or self._scene is None or not self._project.object_defs:
+        if self._project is None or self._scene is None:
             return
         dlg = QDialog(self)
         dlg.setWindowTitle("Place Object")
@@ -3550,14 +3582,17 @@ class EditorTab(QWidget):
             QListWidget::item {{ padding: 7px 10px; }}
             QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
         """)
+        default_item = QListWidgetItem("＋ Default Object")
+        default_item.setData(Qt.ItemDataRole.UserRole, "__new__")
+        default_item.setForeground(QColor(ACCENT))
+        lst.addItem(default_item)
         for od in self._project.object_defs:
             item = QListWidgetItem(od.name)
             item.setData(Qt.ItemDataRole.UserRole, od.id)
             if od.behavior_type == "VNCharacter":
                 item.setForeground(QColor("#f59e0b"))
             lst.addItem(item)
-        if lst.count():
-            lst.setCurrentRow(0)
+        lst.setCurrentRow(0)
         lst.doubleClicked.connect(dlg.accept)
         dv.addWidget(lst)
         btns = QDialogButtonBox(
@@ -3571,13 +3606,55 @@ class EditorTab(QWidget):
         item = lst.currentItem()
         if not item:
             return
-        import copy, json
+        import copy, json, uuid
+        selected_id = item.data(Qt.ItemDataRole.UserRole)
+
+        if selected_id == "__new__":
+            # Second dialog: name + hidden checkbox
+            dlg2 = QDialog(self)
+            dlg2.setWindowTitle("New Default Object")
+            dlg2.setModal(True)
+            dlg2.setMinimumWidth(260)
+            dlg2.setStyleSheet(f"background: {PANEL}; color: {TEXT};")
+            dv2 = QVBoxLayout(dlg2)
+            dv2.setContentsMargins(12, 12, 12, 12)
+            dv2.setSpacing(8)
+            name_lbl = QLabel("Object name:")
+            name_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
+            dv2.addWidget(name_lbl)
+            name_edit = QLineEdit()
+            name_edit.setPlaceholderText("Object name…")
+            name_edit.setStyleSheet(f"background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER}; border-radius: 4px; padding: 4px 6px;")
+            dv2.addWidget(name_edit)
+            hidden_check = QCheckBox("Hidden by default")
+            hidden_check.setStyleSheet(f"color: {TEXT};")
+            hidden_check.setChecked(False)
+            dv2.addWidget(hidden_check)
+            btns2 = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            btns2.setStyleSheet(f"color: {TEXT};")
+            btns2.accepted.connect(dlg2.accept)
+            btns2.rejected.connect(dlg2.reject)
+            dv2.addWidget(btns2)
+            if dlg2.exec() != QDialog.DialogCode.Accepted:
+                return
+            obj_name = name_edit.text().strip() or "New Object"
+            new_od = ObjectDefinition()
+            new_od.id = str(uuid.uuid4())[:8]
+            new_od.name = obj_name
+            new_od.visible_default = not hidden_check.isChecked()
+            self._project.object_defs.append(new_od)
+            self.object_def_created.emit()
+            selected_id = new_od.id
+
         po = PlacedObject()
-        po.object_def_id = item.data(Qt.ItemDataRole.UserRole)
+        po.object_def_id = selected_id
         po.x, po.y = 400, 200
         od = self._project.get_object_def(po.object_def_id)
         if od and od.behaviors:
             po.instance_behaviors = [Behavior.from_dict(json.loads(json.dumps(b.to_dict()))) for b in od.behaviors]
+        if od and not od.visible_default:
+            po.visible = False
         self._scene.placed_objects.append(po)
         self._refresh_objs()
         row = len(self._scene.placed_objects) - 1

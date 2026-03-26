@@ -99,12 +99,15 @@ class AnimationExport:
     """An exported .ani animation file (spritesheet + metadata)."""
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     name: str = ""
-    spritesheet_path: str = ""
+    spritesheet_path: str = ""              # primary sheet (single-sheet compat)
+    spritesheet_paths: list = field(default_factory=list)  # all sheets for multi-sheet
     frame_count: int = 1
     frame_width: int = 64
     frame_height: int = 64
     sheet_width: int = 64
     sheet_height: int = 64
+    sheet_count: int = 1
+    frames_per_sheet: int = 1
     fps: int = 12
 
     def to_dict(self):
@@ -112,11 +115,14 @@ class AnimationExport:
             "id": self.id,
             "name": self.name,
             "spritesheet_path": self.spritesheet_path,
+            "spritesheet_paths": self.spritesheet_paths,
             "frame_count": self.frame_count,
             "frame_width": self.frame_width,
             "frame_height": self.frame_height,
             "sheet_width": self.sheet_width,
             "sheet_height": self.sheet_height,
+            "sheet_count": self.sheet_count,
+            "frames_per_sheet": self.frames_per_sheet,
             "fps": self.fps,
         }
 
@@ -259,6 +265,26 @@ class BehaviorAction:
     bullet_direction:   str = "right"       # right | left | up | down
     bullet_speed:       int = 6             # px per frame
     two_way_axis:       str = "horizontal"  # horizontal | vertical
+    rotation_mode:          str   = "instant"  # "instant" | "tween"  (8-way movement)
+    rotation_tween_duration: float = 0.3       # seconds, used when rotation_mode == "tween"
+
+    # ── Velocity / physics actions ────────────────────────────
+    velocity_vx: float = 0.0            # set_velocity / add_velocity: horizontal component
+    velocity_vy: float = 0.0            # set_velocity / add_velocity: vertical component
+    velocity_set_x: bool = True         # set_velocity: whether to apply the x component
+    velocity_set_y: bool = True         # set_velocity: whether to apply the y component
+
+    # ── Jump action ───────────────────────────────────────────
+    jump_strength: float = 12.0         # upward velocity kick (always positive; exporter negates)
+    jump_max_count: int = 1             # 1 = single jump, 2 = double jump, etc.
+    jump_variable_height: bool = False  # if True: cutting the button early reduces jump height
+    jump_variable_min_vy: float = 4.0   # minimum upward velocity when button released early
+    jump_float: bool = False            # if True: reduced gravity multiplier while rising + button held
+    jump_float_gravity_mult: float = 0.4  # gravity multiplier during float (0.0–1.0)
+    jump_collision_layer_id: str = ""   # collision layer to use for grounded detection
+    jump_player_width: int = 32         # player hitbox width for grounded check
+    jump_player_height: int = 48        # player hitbox height for grounded check
+    jump_button: str = "cross"          # which button triggers the jump (for variable height release)
 
     # ── Conditional input actions ────────────────────────────
     button: str = ""                   # cross, circle, square, triangle, dpad_up, etc.
@@ -283,6 +309,9 @@ class BehaviorAction:
     # ── Animation object actions ─────────────────────────────
     ani_target_frame: int = 0                # ani_set_frame target
     ani_fps: int = 12                        # ani_set_speed fps
+    ani_slot_name: str = ""                  # ani_switch_slot: slot name to switch to
+    ani_flip_h: bool = False                 # ani_set_flip: horizontal flip state
+    ani_flip_v: bool = False                 # ani_set_flip: vertical flip state
 
     # ── Layer actions ────────────────────────────────────────
     layer_name: str = ""                     # target layer by name (layer_show, layer_hide, layer_set_image)
@@ -296,6 +325,14 @@ class BehaviorAction:
     spawn_at_self: bool = False              # True = use spawning object's position as base
     spawn_offset_x: int = 0                  # pixel offset added to spawn X
     spawn_offset_y: int = 0                  # pixel offset added to spawn Y
+
+    # ── Parenting (attach_to, detach, create_object with parent) ─
+    parent_id: str = ""                      # instance_id or def_id of parent (attach_to, create_object)
+    inherit_position: bool = True
+    inherit_rotation: bool = False
+    inherit_scale: bool = False
+    destroy_with_parent: bool = False
+    rotation_offset: float = 0.0             # degrees added to parent rotation when inherit_rotation is True
 
     # ── Layer Animation actions ──────────────────────────────
     # action_types: layer_anim_play_macro, layer_anim_stop_macro,
@@ -372,6 +409,10 @@ class Behavior:
     #                           (uses threshold_var, threshold_value, threshold_compare, threshold_repeat)
     #   on_touch_tap          — fires when the front touchscreen is tapped inside this object's bounding box
     #   on_path_complete      — fires when an object finishes following a named path (uses path_name)
+    #   on_animation_finish   — fires once when a non-looping Animation object reaches its last frame
+    #                           (uses ani_trigger_object: object_def_id of the Animation object to watch)
+    #   on_animation_frame    — fires each time an Animation object reaches a specific frame index
+    #                           (uses ani_trigger_object and ani_trigger_frame)
     frame_count: int = 60
     bool_var: str = ""
     input_action_name: str = ""
@@ -382,6 +423,8 @@ class Behavior:
     threshold_compare: str = ">="  # on_variable_threshold: == | != | > | < | >= | <=
     threshold_repeat: bool = False # on_variable_threshold: re-arm and fire again each time condition is met
     path_name: str = ""            # on_path_complete: name of the path to watch
+    ani_trigger_object: str = ""  # on_animation_finish / on_animation_frame: object_def_id of Animation object
+    ani_trigger_frame: int = 0    # on_animation_frame: frame index to watch for
     actions: list[BehaviorAction] = field(default_factory=list)
 
     def to_dict(self):
@@ -397,6 +440,8 @@ class Behavior:
             "threshold_compare":  self.threshold_compare,
             "threshold_repeat":   self.threshold_repeat,
             "path_name":          self.path_name,
+            "ani_trigger_object": self.ani_trigger_object,
+            "ani_trigger_frame":  self.ani_trigger_frame,
             "actions":            [a.to_dict() for a in self.actions],
         }
 
@@ -414,6 +459,8 @@ class Behavior:
         b.threshold_compare = d.get("threshold_compare", ">=")
         b.threshold_repeat  = d.get("threshold_repeat",  False)
         b.path_name         = d.get("path_name",         "")
+        b.ani_trigger_object = d.get("ani_trigger_object", "")
+        b.ani_trigger_frame  = d.get("ani_trigger_frame",  0)
         b.actions           = [BehaviorAction.from_dict(a) for a in d.get("actions", [])]
         return b
 
@@ -448,10 +495,8 @@ class ObjectDefinition:
     height: int = 64
     visible_default: bool = True
     groups: list[str] = field(default_factory=list)  # design-time group membership tags
-    # VNCharacter behavior config — only meaningful when behavior_type == "VNCharacter"
-    behavior_type: str = "default"      # default | VNCharacter | GUI_Label | GUI_Button | GUI_Panel | Camera | Animation | LayerAnimation
+    behavior_type: str = "default"      # default | GUI_Label | GUI_Button | GUI_Panel | Camera | Animation | LayerAnimation
     vn_display_name: str = ""           # shown in the VN dialogue name box
-    vn_name_color: str = "#FFFFFF"      # hex color for the name tag
     # GUI config — only meaningful when behavior_type starts with "GUI_"
     gui_text: str = ""                  # display text for Label and Button
     gui_text_color: str = "#FFFFFF"     # text color
@@ -472,12 +517,15 @@ class ObjectDefinition:
     camera_zoom_default: float = 1.0         # starting zoom level for this camera (0.25 – 4.0)
 
     # Animation config — only meaningful when behavior_type == "Animation"
-    ani_file_id: str = ""                    # reference to AnimationExport.id
+    ani_file_id: str = ""                    # DEPRECATED — kept for migration only; use ani_slots[0]
+    ani_slots: list = field(default_factory=list)  # [{"name": str, "ani_file_id": str}, ...]
     ani_loop: bool = True                    # loop or play once
     ani_play_on_spawn: bool = True           # start playing when object spawns
     ani_start_paused: bool = False           # start paused at specific frame
     ani_pause_frame: int = 0                 # frame to pause on if ani_start_paused
     ani_fps_override: int = 0                # 0 = use file default
+    ani_flip_h: bool = False                 # default horizontal flip
+    ani_flip_v: bool = False                 # default vertical flip
 
     # LayerAnimation config — only meaningful when behavior_type == "LayerAnimation"
     layer_anim_id: str = ""                  # reference to PaperDollAsset.id
@@ -491,6 +539,7 @@ class ObjectDefinition:
 
     # Physics config
     affected_by_gravity: bool = False        # True = scene gravity applies to this object
+    is_mover: bool = True                    # participates in zone overlap checks
 
     # Collision boxes — per-frame list of collision rectangles
     # collision_boxes[frame_index] = list of CollisionBox for that frame
@@ -509,7 +558,6 @@ class ObjectDefinition:
             "groups": list(self.groups),
             "behavior_type": self.behavior_type,
             "vn_display_name": self.vn_display_name,
-            "vn_name_color": self.vn_name_color,
             "gui_text": self.gui_text,
             "gui_text_color": self.gui_text_color,
             "gui_font_id": self.gui_font_id,
@@ -526,12 +574,14 @@ class ObjectDefinition:
             "camera_bounds_height": self.camera_bounds_height,
             "camera_follow_lag": self.camera_follow_lag,
             "camera_zoom_default": self.camera_zoom_default,
-            "ani_file_id": self.ani_file_id,
+            "ani_slots": list(self.ani_slots),
             "ani_loop": self.ani_loop,
             "ani_play_on_spawn": self.ani_play_on_spawn,
             "ani_start_paused": self.ani_start_paused,
             "ani_pause_frame": self.ani_pause_frame,
             "ani_fps_override": self.ani_fps_override,
+            "ani_flip_h": self.ani_flip_h,
+            "ani_flip_v": self.ani_flip_v,
             "layer_anim_id": self.layer_anim_id,
             "layer_anim_blink": self.layer_anim_blink,
             "layer_anim_talk": self.layer_anim_talk,
@@ -539,6 +589,7 @@ class ObjectDefinition:
             "is_zone": self.is_zone,
             "zone_target": self.zone_target,
             "affected_by_gravity": self.affected_by_gravity,
+            "is_mover": self.is_mover,
             "collision_boxes": [[cb.to_dict() for cb in frame_boxes] for frame_boxes in self.collision_boxes],
         }
 
@@ -556,7 +607,6 @@ class ObjectDefinition:
         obj.groups = list(d.get("groups", []))
         obj.behavior_type = d.get("behavior_type", "default")
         obj.vn_display_name = d.get("vn_display_name", "")
-        obj.vn_name_color = d.get("vn_name_color", "#FFFFFF")
         obj.gui_text = d.get("gui_text", "")
         obj.gui_text_color = d.get("gui_text_color", "#FFFFFF")
         obj.gui_font_id = d.get("gui_font_id", "")
@@ -573,12 +623,22 @@ class ObjectDefinition:
         obj.camera_bounds_height = d.get("camera_bounds_height", 544)
         obj.camera_follow_lag = d.get("camera_follow_lag", 0.0)
         obj.camera_zoom_default = d.get("camera_zoom_default", 1.0)
-        obj.ani_file_id = d.get("ani_file_id", "")
+        obj.ani_file_id = d.get("ani_file_id", "")  # kept only for migration below
+        # Migrate: if saved with old single ani_file_id and no ani_slots, seed slot 0
+        raw_slots = d.get("ani_slots", None)
+        if raw_slots is not None:
+            obj.ani_slots = list(raw_slots)
+        elif obj.ani_file_id:
+            obj.ani_slots = [{"name": "0", "ani_file_id": obj.ani_file_id}]
+        else:
+            obj.ani_slots = []
         obj.ani_loop = d.get("ani_loop", True)
         obj.ani_play_on_spawn = d.get("ani_play_on_spawn", True)
         obj.ani_start_paused = d.get("ani_start_paused", False)
         obj.ani_pause_frame = d.get("ani_pause_frame", 0)
         obj.ani_fps_override = d.get("ani_fps_override", 0)
+        obj.ani_flip_h = d.get("ani_flip_h", False)
+        obj.ani_flip_v = d.get("ani_flip_v", False)
         obj.layer_anim_id = d.get("layer_anim_id", "")
         obj.layer_anim_blink = d.get("layer_anim_blink", True)
         obj.layer_anim_talk = d.get("layer_anim_talk", True)
@@ -586,25 +646,36 @@ class ObjectDefinition:
         obj.is_zone = d.get("is_zone", False)
         obj.zone_target = d.get("zone_target", "player")
         obj.affected_by_gravity = d.get("affected_by_gravity", False)
+        obj.is_mover = d.get("is_mover", True)
         obj.collision_boxes = [
             [CollisionBox.from_dict(cb) for cb in frame_boxes]
             for frame_boxes in d.get("collision_boxes", [])
         ]
-        obj.sync_collision_frames()
+        # Do NOT call sync_collision_frames() here — for Animation behavior_type objects
+        # the real frame count comes from the AnimationExport, which isn't available at
+        # load time. Calling it here would truncate saved collision frames down to 1.
+        # The UI (CollisionEditorPanel.load_object / _refresh) always calls
+        # sync_collision_frames(frame_count_override) with the correct count.
         return obj
 
     def sync_collision_frames(self, frame_count_override: int = 0):
         """Ensure collision_boxes has one entry per frame (at least 1 for static objects).
-        
+
         frame_count_override: if > 0, use this instead of len(self.frames).
                               Useful for Animation behavior_type where frame count
                               comes from the AnimationExport, not self.frames.
+
+        Trimming only happens when frame_count_override is explicitly provided.
+        Without an override (e.g. called from non-UI code that lacks project context),
+        we only grow the list — never shrink it — to avoid silently discarding
+        collision data for Animation objects whose frame count isn't knowable here.
         """
         target = frame_count_override if frame_count_override > 0 else max(len(self.frames), 1)
         while len(self.collision_boxes) < target:
             self.collision_boxes.append([])
-        # Trim extras if frames were removed (keep data for existing frames)
-        if len(self.collision_boxes) > target:
+        # Only trim when the caller explicitly provided the real frame count.
+        # Without an override we can't know the true count for Animation objects.
+        if frame_count_override > 0 and len(self.collision_boxes) > target:
             self.collision_boxes = self.collision_boxes[:target]
 
 
@@ -639,6 +710,14 @@ class PlacedObject:
     hud_y: int = 10                    # screen pixel Y
     hud_anchor: str = "top_left"       # top_left | top_right | bottom_left | bottom_right | center
 
+    # ── Parenting ────────────────────────────────────────────
+    parent_id: str = ""                # instance_id of parent PlacedObject ("" = no parent)
+    inherit_position: bool = True
+    inherit_rotation: bool = False
+    inherit_scale: bool = False
+    destroy_with_parent: bool = False
+    rotation_offset: float = 0.0       # degrees added to parent rotation when inherit_rotation is True
+
     def to_dict(self):
         return {
             "instance_id": self.instance_id,
@@ -663,6 +742,12 @@ class PlacedObject:
             "hud_x": self.hud_x,
             "hud_y": self.hud_y,
             "hud_anchor": self.hud_anchor,
+            "parent_id": self.parent_id,
+            "inherit_position": self.inherit_position,
+            "inherit_rotation": self.inherit_rotation,
+            "inherit_scale": self.inherit_scale,
+            "destroy_with_parent": self.destroy_with_parent,
+            "rotation_offset": self.rotation_offset,
         }
 
     @classmethod
@@ -690,6 +775,12 @@ class PlacedObject:
         obj.hud_x = d.get("hud_x", 10)
         obj.hud_y = d.get("hud_y", 10)
         obj.hud_anchor = d.get("hud_anchor", "top_left")
+        obj.parent_id = d.get("parent_id", "")
+        obj.inherit_position = d.get("inherit_position", True)
+        obj.inherit_rotation = d.get("inherit_rotation", False)
+        obj.inherit_scale = d.get("inherit_scale", False)
+        obj.destroy_with_parent = d.get("destroy_with_parent", False)
+        obj.rotation_offset = float(d.get("rotation_offset", 0.0))
         return obj
 
 
@@ -969,6 +1060,8 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
         "scroll_speed": 1,
         "scroll_direction": "horizontal",
         "parallax": 1.0,
+        "tile_x": False,            # repeat the image horizontally to fill screen width
+        "tile_y": False,            # repeat the image vertically to fill screen height
     },
     "TileLayer": {
         "layer_name": "New Tile Layer",

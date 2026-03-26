@@ -75,6 +75,8 @@ OBJECT_TRIGGERS = {
     "on_variable_threshold": "On Variable Threshold",
     "on_touch_tap":          "On Touch Tap",
     "on_path_complete":      "On Path Complete",
+    "on_animation_finish":   "On Animation Finish",
+    "on_animation_frame":    "On Animation Frame",
 }
 
 TRIGGER_CATEGORIES = {
@@ -87,6 +89,7 @@ TRIGGER_CATEGORIES = {
     "Signal":    ["on_signal"],
     "Variables": ["on_variable_threshold"],
     "Paths":     ["on_path_complete"],
+    "Animation": ["on_animation_finish", "on_animation_frame"],
 }
 
 BUTTON_OPTIONS = ["cross","circle","square","triangle",
@@ -108,13 +111,16 @@ TRIGGER_FIELDS = {
                               ("threshold_value",    "Value",             "text",  {}),
                               ("threshold_repeat",   "Repeat",            "check", {})],
     "on_path_complete":      [("path_name",          "Path Name",         "text",  {})],
+    "on_animation_finish":   [("ani_trigger_object", "Animation Object",  "object", {})],
+    "on_animation_frame":    [("ani_trigger_object", "Animation Object",  "object", {}),
+                              ("ani_trigger_frame",  "Frame Index",       "spin",   {"min": 0, "max": 9999})],
 }
 
 ACTION_PALETTE = {
     "Objects: Visibility":  [("show_object","Show Object"),("hide_object","Hide Object"),("set_opacity","Set Opacity"),("fade_in_object","Fade Object In"),("fade_out_object","Fade Object Out")],
     "Objects: Transform":   [("move_to","Move To Position"),("move_by","Move By Offset"),("slide_to","Slide To Position"),("slide_by","Slide By Offset"),("return_to_start","Return to Start"),("set_scale","Set Scale"),("scale_to","Scale To"),("set_rotation","Set Rotation"),("rotate_to","Rotate To"),("rotate_by","Rotate By"),("spin","Spin"),("stop_spin","Stop Spinning")],
     "Objects: Animation":   [("play_anim","Play Animation"),("stop_anim","Stop Animation"),("set_frame","Set Frame"),("set_anim_speed","Set Animation Speed")],
-    "Objects: Lifecycle":   [("create_object","Create Object"),("destroy_object","Destroy Object"),("destroy_all_type","Destroy All of Type"),("enable_interact","Enable Interaction"),("disable_interact","Disable Interaction")],
+    "Objects: Lifecycle":   [("create_object","Create Object"),("destroy_object","Destroy Object"),("destroy_all_type","Destroy All of Type"),("enable_interact","Enable Interaction"),("disable_interact","Disable Interaction"),("attach_to","Attach to Object"),("detach","Detach from Parent")],
     "Objects: Groups":      [("add_to_group","Add Object to Group"),("remove_from_group","Remove Object from Group"),("call_action_on_group","Call Action on Group"),("if_in_group","If Object in Group")],
     "Scene Flow":        [("go_to_scene","Go to Scene"),("go_to_next","Go to Next Scene"),("go_to_prev","Go to Previous Scene"),("go_to_random","Go to Random Scene"),("restart_scene","Restart Scene"),("quit_game","Quit Game")],
     "State Machine":     [("go_to_state","Go to State")],
@@ -122,7 +128,7 @@ ACTION_PALETTE = {
     "Timing":            [("wait","Wait"),("wait_random","Wait Random"),("wait_for_input","Wait for Input")],
     "Screen":            [("fade_in","Fade In"),("fade_out","Fade Out"),("fade_to_color","Fade to Color"),("flash_screen","Flash Screen"),("shake_screen","Shake Screen")],
     "Camera":            [("camera_move_to","Move Camera To"),("camera_offset","Offset Camera"),("camera_follow","Follow Object"),("camera_stop_follow","Stop Following"),("camera_reset","Reset Camera"),("camera_shake","Shake Camera"),("camera_set_zoom","Set Camera Zoom"),("camera_zoom_to","Zoom Camera To")],
-    "Animation":         [("ani_play","Play Animation"),("ani_pause","Pause Animation"),("ani_stop","Stop Animation"),("ani_set_frame","Set Frame"),("ani_set_speed","Set Speed")],
+    "Animation":         [("ani_play","Play Animation"),("ani_pause","Pause Animation"),("ani_stop","Stop Animation"),("ani_set_frame","Set Frame"),("ani_set_speed","Set Speed"),("ani_switch_slot","Switch Animation Slot"),("ani_set_flip","Set Flip")],
     "Background":        [("set_background","Set Background Image"),("scroll_bg","Scroll Background"),("stop_scroll_bg","Stop Background Scroll")],
     "Layers":            [("layer_show","Show Layer"),("layer_hide","Hide Layer"),("layer_set_image","Set Layer Image")],
     "Music & Sound":     [("play_music","Play Music"),("stop_music","Stop Music"),("pause_music","Pause Music"),("resume_music","Resume Music"),("set_music_volume","Set Music Volume"),("play_sfx","Play Sound Effect"),("stop_all_sounds","Stop All Sounds")],
@@ -145,8 +151,7 @@ ACTION_PALETTE = {
     "Inventory":         [("add_item","Add Item"),("remove_item","Remove Item"),("if_has_item","If Has Item"),("show_inventory","Show Inventory"),("hide_inventory","Hide Inventory")],
     "Save & Load":       [("save_game","Save Game"),("load_game","Load Game"),("delete_save","Delete Save"),("if_save_exists","If Save Exists")],
     "Signals":           [("emit_signal","Emit Signal")],
-    "Movement":          [("four_way_movement","4-Way Movement"),("four_way_movement_collide","4-Way Movement (Collide)"),("two_way_movement","2-Way Movement"),("two_way_movement_collide","2-Way Movement (Collide)"),("fire_bullet","Fire Bullet")],
-    "VN Character":      [("set_char_sprite","Set Character Sprite"),("set_display_name","Set Display Name"),("char_enter","Character Enter"),("char_exit","Character Exit"),("char_react","Character React")],
+    "Movement":          [("four_way_movement","4-Way Movement"),("four_way_movement_collide","4-Way Movement (Collide)"),("eight_way_movement","8-Way Movement"),("eight_way_movement_collide","8-Way Movement (Collide)"),("two_way_movement","2-Way Movement"),("two_way_movement_collide","2-Way Movement (Collide)"),("fire_bullet","Fire Bullet"),("set_velocity","Set Velocity"),("add_velocity","Add Velocity"),("jump","Jump")],
     "GUI":               [("set_label_text","Set Label Text"),("set_label_text_var","Set Label Text (Variable)"),("set_label_color","Set Label Color"),("set_label_size","Set Label Font Size")],
     "Debug":             [("log_message","Log Message"),("show_debug","Show Debug Overlay")],
     "Paths":             [("follow_path","Follow Path"),("stop_path","Stop Following Path"),("resume_path","Resume Following Path"),("set_path_speed","Set Path Speed")],
@@ -168,8 +173,6 @@ DEFERRED_ACTIONS = {
     "set_dialogue_line", "clear_dialogue", "wait_for_advance",
     # Choice Menu
     "show_choices", "hide_choices", "set_choice_text", "set_choice_dest",
-    # VN Character
-    "set_char_sprite", "set_display_name", "char_enter", "char_exit", "char_react",
     # Legacy Background (replaced by layer system)
     "set_background",
     # Layer image swap (use show/hide layers instead)
@@ -222,6 +225,11 @@ ACTION_FIELDS = {
                           ("ani_target_frame",    "Frame",            "spin",     {"min":0,"max":9999})],
     "ani_set_speed":     [("object_def_id",       "Object",           "object",   {}),
                           ("ani_fps",             "FPS",              "spin",     {"min":1,"max":120})],
+    "ani_switch_slot":   [("object_def_id",       "Object",           "object",   {}),
+                          ("ani_slot_name",       "Slot Name",        "text",     {})],
+    "ani_set_flip":      [("object_def_id",       "Object",           "object",   {}),
+                          ("ani_flip_h",          "Flip H",           "check",    {}),
+                          ("ani_flip_v",          "Flip V",           "check",    {})],
     "set_background":    [("image_id",            "Image",            "image",    {})],
     "scroll_bg":         [("layer_name",          "Layer Name",       "text",     {}),
                           ("scroll_direction",    "Direction",        "combo",    {"options":["horizontal","vertical"]}),
@@ -317,7 +325,8 @@ ACTION_FIELDS = {
     "spin":              [("object_def_id",       "Object",           "object",   {}),
                           ("spin_speed",          "Degrees/sec",      "dspin",    {"min":-3600.0,"max":3600.0,"step":10.0})],
     "stop_spin":         [("object_def_id",       "Object",           "object",   {})],
-    "play_anim":         [("object_def_id",       "Object",           "object",   {})],
+    "play_anim":         [("object_def_id",       "Object",           "object",   {}),
+                          ("ani_slot_name",       "Slot (blank=current)", "text", {})],
     "stop_anim":         [("object_def_id",       "Object",           "object",   {})],
     "set_frame":         [("object_def_id",       "Object",           "object",   {}),
                           ("frame_index",         "Frame",            "spin",     {"min":0,"max":999})],
@@ -328,7 +337,22 @@ ACTION_FIELDS = {
                           ("target_x",            "X",                "spin",     {"min":0,"max":9999}),
                           ("target_y",            "Y",                "spin",     {"min":0,"max":9999}),
                           ("spawn_offset_x",      "Offset X",         "spin",     {"min":-9999,"max":9999}),
-                          ("spawn_offset_y",      "Offset Y",         "spin",     {"min":-9999,"max":9999})],
+                          ("spawn_offset_y",      "Offset Y",         "spin",     {"min":-9999,"max":9999}),
+                          ("bullet_speed",        "Bullet Speed (0=static)", "spin", {"min":0,"max":100}),
+                          ("parent_id",           "Parent Object",    "object",   {}),
+                          ("inherit_position",    "Inherit Position", "check",    {}),
+                          ("inherit_rotation",    "Inherit Rotation", "check",    {}),
+                          ("inherit_scale",       "Inherit Scale",    "check",    {}),
+                          ("destroy_with_parent", "Destroy w/ Parent","check",    {})],
+    "attach_to":         [("parent_id",           "Parent Object",    "object",   {}),
+                          ("offset_x",            "Offset X",         "spin",     {"min":-9999,"max":9999}),
+                          ("offset_y",            "Offset Y",         "spin",     {"min":-9999,"max":9999}),
+                          ("inherit_position",    "Inherit Position", "check",    {}),
+                          ("inherit_rotation",    "Inherit Rotation", "check",    {}),
+                          ("rotation_offset",     "Rotation Offset",  "spin",     {"min":-360,"max":360}),
+                          ("inherit_scale",       "Inherit Scale",    "check",    {}),
+                          ("destroy_with_parent", "Destroy w/ Parent","check",    {})],
+    "detach":            [],
     "destroy_object":    [("object_def_id",       "Object",           "object",   {})],
     "destroy_all_type":  [("object_def_id",       "Object Type",      "object",   {})],
     "enable_interact":   [("object_def_id",       "Object",           "object",   {})],
@@ -354,18 +378,6 @@ ACTION_FIELDS = {
                           ("target_rotation",     "Degrees",          "dspin",    {"min":-360.0,"max":360.0,"step":1.0})],
     "if_in_group":       [("object_def_id",       "Object",           "object",   {}),
                           ("group_name",          "Group Name",       "text",     {})],
-    "set_char_sprite":   [("object_def_id",       "Character",        "object",   {}),
-                          ("image_id",            "Image",            "image",    {})],
-    "set_display_name":  [("object_def_id",       "Character",        "object",   {}),
-                          ("speaker_name",        "Name",             "text",     {})],
-    "char_enter":        [("object_def_id",       "Character",        "object",   {}),
-                          ("var_value",           "From Edge",        "combo",    {"options":["left","right","top","bottom"]}),
-                          ("duration",            "Seconds",          "dspin",    {"min":0.0,"max":5.0,"step":0.1})],
-    "char_exit":         [("object_def_id",       "Character",        "object",   {}),
-                          ("var_value",           "To Edge",          "combo",    {"options":["left","right","top","bottom"]}),
-                          ("duration",            "Seconds",          "dspin",    {"min":0.0,"max":5.0,"step":0.1})],
-    "char_react":        [("object_def_id",       "Character",        "object",   {}),
-                          ("var_value",           "Reaction",         "combo",    {"options":["shake","bounce","nod","spin_once"]})],
     "set_label_text":    [("object_def_id",       "Label Object",     "object",   {}),
                           ("dialogue_text",       "New Text",         "text",     {})],
     "set_label_text_var":[("object_def_id",       "Label Object",     "object",   {}),
@@ -383,6 +395,17 @@ ACTION_FIELDS = {
                           ("collision_layer_id",  "Collision Layer",  "collision_layer",{}),
                           ("player_width",        "Player W (px)",    "spin",     {"min":1,"max":512}),
                           ("player_height",       "Player H (px)",    "spin",     {"min":1,"max":512})],
+    "eight_way_movement": [
+                          ("movement_speed",          "Speed (px/f)",       "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
+                          ("rotation_mode",           "Rotation",           "combo",    {"options":["instant","tween"]}),
+                          ("rotation_tween_duration", "Tween Duration (s)", "dspin",    {"min":0.05,"max":5.0,"step":0.05})],
+    "eight_way_movement_collide": [
+                          ("movement_speed",          "Speed (px/f)",       "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
+                          ("rotation_mode",           "Rotation",           "combo",    {"options":["instant","tween"]}),
+                          ("rotation_tween_duration", "Tween Duration (s)", "dspin",    {"min":0.05,"max":5.0,"step":0.05}),
+                          ("collision_layer_id",      "Collision Layer",    "collision_layer",{}),
+                          ("player_width",            "Player W (px)",      "spin",     {"min":1,"max":512}),
+                          ("player_height",           "Player H (px)",      "spin",     {"min":1,"max":512})],
     "two_way_movement":  [("movement_speed",      "Speed (px/f)",     "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
                           ("two_way_axis",        "Axis",             "combo",    {"options":["horizontal","vertical"]}),
                           ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]})],
@@ -395,6 +418,33 @@ ACTION_FIELDS = {
                           ("player_height",       "Player H (px)",    "spin",     {"min":1,"max":512})],
     "fire_bullet":       [("bullet_direction",    "Direction",        "combo",    {"options":["right","left","up","down"]}),
                           ("bullet_speed",        "Speed (px/f)",     "spin",     {"min":1,"max":40})],
+    "set_velocity":  [
+        ("object_def_id",       "Object",                   "object",  {}),
+        ("velocity_vx",         "Velocity X (px/f)",        "dspin",   {"min":-50.0, "max":50.0, "step":0.5}),
+        ("velocity_set_x",      "Apply X",                  "check",   {}),
+        ("velocity_vy",         "Velocity Y (px/f)",        "dspin",   {"min":-50.0, "max":50.0, "step":0.5}),
+        ("velocity_set_y",      "Apply Y",                  "check",   {}),
+    ],
+    "add_velocity":  [
+        ("object_def_id",       "Object",                   "object",  {}),
+        ("velocity_vx",         "Add X (px/f)",             "dspin",   {"min":-50.0, "max":50.0, "step":0.5}),
+        ("velocity_set_x",      "Apply X",                  "check",   {}),
+        ("velocity_vy",         "Add Y (px/f)",             "dspin",   {"min":-50.0, "max":50.0, "step":0.5}),
+        ("velocity_set_y",      "Apply Y",                  "check",   {}),
+    ],
+    "jump":          [
+        ("object_def_id",           "Object",               "object",  {}),
+        ("jump_strength",           "Jump Strength (px/f)", "dspin",   {"min":1.0,  "max":40.0, "step":0.5}),
+        ("jump_max_count",          "Max Jumps (1=single, 2=double…)", "spin", {"min":1, "max":5}),
+        ("jump_variable_height",    "Variable Height",      "check",   {}),
+        ("jump_variable_min_vy",    "Min Height (if variable)", "dspin", {"min":0.5, "max":20.0, "step":0.5}),
+        ("jump_float",              "Float (hold to fall slower)", "check", {}),
+        ("jump_float_gravity_mult", "Float Gravity Mult",   "dspin",   {"min":0.0,  "max":1.0,  "step":0.05}),
+        ("jump_button",             "Jump Button",          "combo",   {"options": ["cross","circle","square","triangle","dpad_up","l","r"]}),
+        ("jump_collision_layer_id", "Collision Layer",      "collision_layer", {}),
+        ("jump_player_width",       "Player W (px)",        "spin",    {"min":1, "max":512}),
+        ("jump_player_height",      "Player H (px)",        "spin",    {"min":1, "max":512}),
+    ],
     "follow_path":       [("object_def_id",       "Object",           "object",   {}),
                           ("path_name",            "Path Name",        "text",     {}),
                           ("path_speed",           "Speed (px/f)",     "dspin",    {"min":0.1,"max":40.0,"step":0.1}),
@@ -544,6 +594,12 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
             return f"{v} {c} {val}{repeat}" if v else ""
         if code == "on_path_complete":
             pn = p.get("path_name",""); return f"🛤 {pn}" if pn else ""
+        if code == "on_animation_finish":
+            obj = p.get("ani_trigger_object",""); return f"🎞 {obj}" if obj else ""
+        if code == "on_animation_frame":
+            obj = p.get("ani_trigger_object","")
+            fr  = p.get("ani_trigger_frame", 0)
+            return f"🎞 {obj} @ frame {fr}" if obj else ""
         return ""
     summaries = {
         "go_to_scene":       lambda: f"→ scene {p.get('target_scene','')}",
@@ -599,11 +655,21 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "create_object":     lambda: (f"@ self +({p.get('spawn_offset_x',0)}, {p.get('spawn_offset_y',0)})" if p.get("spawn_at_self") else f"({p.get('target_x',0)}, {p.get('target_y',0)}) +({p.get('spawn_offset_x',0)}, {p.get('spawn_offset_y',0)})"),
         "four_way_movement": lambda: f"{p.get('movement_speed',4)} px/f  {p.get('movement_style','instant')}",
         "four_way_movement_collide": lambda: f"{p.get('movement_speed',4)} px/f  collide",
+        "eight_way_movement": lambda: f"{p.get('movement_speed',4)} px/f  rot:{p.get('rotation_mode','instant')}",
+        "eight_way_movement_collide": lambda: f"{p.get('movement_speed',4)} px/f  collide  rot:{p.get('rotation_mode','instant')}",
         "two_way_movement":  lambda: f"{p.get('two_way_axis','h')}  {p.get('movement_speed',4)} px/f",
         "fire_bullet":       lambda: f"→ {p.get('bullet_direction','right')}  {p.get('bullet_speed',6)} px/f",
-        "char_enter":        lambda: f"from {p.get('var_value','')}  {p.get('duration',0)}s",
-        "char_exit":         lambda: f"to {p.get('var_value','')}  {p.get('duration',0)}s",
-        "char_react":        lambda: p.get("var_value",""),
+        "set_velocity":  lambda: (
+            f"vx={p.get('velocity_vx',0)}" if p.get('velocity_set_x',True) and not p.get('velocity_set_y',True)
+            else f"vy={p.get('velocity_vy',0)}" if p.get('velocity_set_y',True) and not p.get('velocity_set_x',True)
+            else f"vx={p.get('velocity_vx',0)}  vy={p.get('velocity_vy',0)}"
+        ),
+        "add_velocity":  lambda: (
+            f"+vx={p.get('velocity_vx',0)}" if p.get('velocity_set_x',True) and not p.get('velocity_set_y',True)
+            else f"+vy={p.get('velocity_vy',0)}" if p.get('velocity_set_y',True) and not p.get('velocity_set_x',True)
+            else f"+vx={p.get('velocity_vx',0)}  +vy={p.get('velocity_vy',0)}"
+        ),
+        "jump":          lambda: f"↑{p.get('jump_strength',12)}  ×{p.get('jump_max_count',1)}{'  float' if p.get('jump_float') else ''}{'  var-h' if p.get('jump_variable_height') else ''}",
         "set_label_text":    lambda: str(p.get("dialogue_text",""))[:20],
         "log_message":       lambda: str(p.get("log_message",""))[:20],
         "follow_path":       lambda: f"🛤 {p.get('path_name','')}  {p.get('path_speed',1)} px/f{'  ↻' if p.get('path_loop') else ''}",
@@ -624,6 +690,11 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "if_distance":       lambda: f"{p.get('var_compare','<=')} {p.get('var_value','?')}px",
         "get_distance":      lambda: f"→ {p.get('var_name','dist')}",
         "cancel_all":        lambda: "⊘ cancel all",
+        "attach_to":         lambda: p.get("parent_id", "") or "?",
+        "detach":            lambda: "detach",
+        "ani_switch_slot":   lambda: f"→ slot \"{p.get('ani_slot_name','')}\"",
+        "ani_set_flip":      lambda: f"H:{p.get('ani_flip_h',False)}  V:{p.get('ani_flip_v',False)}",
+        "play_anim":         lambda: f"slot \"{p.get('ani_slot_name','')}\"" if p.get('ani_slot_name') else "",
     }
     fn = summaries.get(code)
     return fn() if fn else ""
@@ -2439,6 +2510,9 @@ def behaviors_to_graph(behaviors: list, canvas: NodeCanvas):
             tnode.params["threshold_repeat"]  = behavior.threshold_repeat
         if behavior.path_name:
             tnode.params["path_name"] = behavior.path_name
+        if behavior.ani_trigger_object:
+            tnode.params["ani_trigger_object"] = behavior.ani_trigger_object
+            tnode.params["ani_trigger_frame"]  = behavior.ani_trigger_frame
         tnode.update_summary()
         scene.addItem(tnode)
 
@@ -2514,6 +2588,9 @@ def graph_to_behaviors(canvas: NodeCanvas) -> list:
             b.threshold_repeat  = tnode.params.get("threshold_repeat", False)
         if "path_name" in tnode.params:
             b.path_name = tnode.params["path_name"]
+        if "ani_trigger_object" in tnode.params:
+            b.ani_trigger_object = tnode.params["ani_trigger_object"]
+            b.ani_trigger_frame  = tnode.params.get("ani_trigger_frame", 0)
 
         first = next_node(tnode.out_port)
         if first:

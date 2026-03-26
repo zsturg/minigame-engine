@@ -764,6 +764,7 @@ class MainWindow(QMainWindow):
         # Tab 1: Editor
         self.editor_tab = EditorTab(self)
         self.editor_tab.instance_changed.connect(self._mark_unsaved)
+        self.editor_tab.object_def_created.connect(self._on_object_def_created)
         self.editor_tab.set_explorer_visible(self._show_explorer)
         self.tabs.addTab(self.editor_tab, "  Editor")
 
@@ -879,6 +880,10 @@ class MainWindow(QMainWindow):
     def _mark_unsaved(self):
         self.unsaved = True
         self._refresh(skip_editor=True)
+
+    def _on_object_def_created(self):
+        self.obj_tab._refresh_def_list()
+        self._mark_unsaved()
 
     def _on_tab_switched(self, index: int):
         """Re-push current project data into the newly-visible tab so that

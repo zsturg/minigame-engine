@@ -475,6 +475,11 @@ def _emit_pdoll_layers(out: list, layers, project, indent: int):
 
 
 def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=None, obj_def=None) -> list[str]:
+    # Nested actions (true_actions, false_actions, sub_actions) may be stored as
+    # plain dicts when serialised via to_dict(); coerce back to BehaviorAction here
+    # so all attribute accesses below work regardless of how the caller got the data.
+    if isinstance(action, dict):
+        action = BehaviorAction.from_dict(action)
     t = action.action_type
     lines = []
     spd = action.movement_speed  # int, always present
@@ -545,6 +550,106 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
             lines.append(f"if controls_held(SCE_CTRL_DOWN)  then {obj_var}_y = {obj_var}_y + {spd} end")
             lines.append(f"if controls_held(SCE_CTRL_LEFT)  then {obj_var}_x = {obj_var}_x - {spd} end")
             lines.append(f"if controls_held(SCE_CTRL_RIGHT) then {obj_var}_x = {obj_var}_x + {spd} end")
+
+    elif t in ("eight_way_movement", "eight_way_movement_collide"):
+        rot_mode  = getattr(action, "rotation_mode", "instant")
+        rot_dur   = getattr(action, "rotation_tween_duration", 0.3)
+        rot_frames = max(1, round(rot_dur * 60))
+
+        # Diagonal angles: atan2(dy, dx) + 90 so sprite facing UP = 0°
+        # UP=0, UP-RIGHT=45, RIGHT=90, DOWN-RIGHT=135,
+        # DOWN=180, DOWN-LEFT=225(-135), LEFT=270(-90), UP-LEFT=315(-45)
+        # We use a lookup table keyed on (dx,dy) sign pairs for clarity.
+
+        def _rot_line(angle: float) -> str:
+            if rot_mode == "tween":
+                return f'tween_add("{obj_var}_rot8", _G, "{obj_var}_rotation", {angle}, {rot_frames}, "linear")'
+            else:
+                return f"{obj_var}_rotation = {angle}"
+
+        if t == "eight_way_movement":
+            # Simple no-collision version
+            lines.append(f"do")
+            lines.append(f"    local _dx8 = 0")
+            lines.append(f"    local _dy8 = 0")
+            lines.append(f"    if controls_held(SCE_CTRL_UP)    then _dy8 = _dy8 - 1 end")
+            lines.append(f"    if controls_held(SCE_CTRL_DOWN)  then _dy8 = _dy8 + 1 end")
+            lines.append(f"    if controls_held(SCE_CTRL_LEFT)  then _dx8 = _dx8 - 1 end")
+            lines.append(f"    if controls_held(SCE_CTRL_RIGHT) then _dx8 = _dx8 + 1 end")
+            lines.append(f"    if _dx8 ~= 0 or _dy8 ~= 0 then")
+            lines.append(f"        local _spd8 = {spd}")
+            lines.append(f"        if _dx8 ~= 0 and _dy8 ~= 0 then _spd8 = _spd8 * 0.7071 end")
+            lines.append(f"        {obj_var}_x = {obj_var}_x + _dx8 * _spd8")
+            lines.append(f"        {obj_var}_y = {obj_var}_y + _dy8 * _spd8")
+            lines.append(f"        if     _dx8 == 0  and _dy8 == -1 then {_rot_line(0)}")
+            lines.append(f"        elseif _dx8 == 1  and _dy8 == -1 then {_rot_line(45)}")
+            lines.append(f"        elseif _dx8 == 1  and _dy8 == 0  then {_rot_line(90)}")
+            lines.append(f"        elseif _dx8 == 1  and _dy8 == 1  then {_rot_line(135)}")
+            lines.append(f"        elseif _dx8 == 0  and _dy8 == 1  then {_rot_line(180)}")
+            lines.append(f"        elseif _dx8 == -1 and _dy8 == 1  then {_rot_line(225)}")
+            lines.append(f"        elseif _dx8 == -1 and _dy8 == 0  then {_rot_line(270)}")
+            lines.append(f"        elseif _dx8 == -1 and _dy8 == -1 then {_rot_line(315)}")
+            lines.append(f"        end")
+            lines.append(f"    end")
+            lines.append(f"end")
+
+        else:  # eight_way_movement_collide
+            grid_id = action.collision_layer_id or ""
+            pw      = action.player_width
+            ph      = action.player_height
+            if not grid_id and project:
+                for _scene in project.scenes:
+                    for _comp in _scene.components:
+                        if _comp.component_type == "CollisionLayer":
+                            grid_id = _comp.id
+                            break
+                    if grid_id:
+                        break
+            _has_cboxes = obj_def and any(boxes for boxes in obj_def.collision_boxes)
+
+            lines.append(f"do")
+            lines.append(f"    local _dx8 = 0")
+            lines.append(f"    local _dy8 = 0")
+            lines.append(f"    if controls_held(SCE_CTRL_UP)    then _dy8 = _dy8 - 1 end")
+            lines.append(f"    if controls_held(SCE_CTRL_DOWN)  then _dy8 = _dy8 + 1 end")
+            lines.append(f"    if controls_held(SCE_CTRL_LEFT)  then _dx8 = _dx8 - 1 end")
+            lines.append(f"    if controls_held(SCE_CTRL_RIGHT) then _dx8 = _dx8 + 1 end")
+            lines.append(f"    if _dx8 ~= 0 or _dy8 ~= 0 then")
+            lines.append(f"        local _spd8 = {spd}")
+            lines.append(f"        if _dx8 ~= 0 and _dy8 ~= 0 then _spd8 = _spd8 * 0.7071 end")
+            if grid_id:
+                lines.append(f"        local _grid = collision_grids[{_lua_str(grid_id)}]")
+                lines.append(f"        if _grid then")
+                if _has_cboxes:
+                    _cframe = f"{obj_var}_ani_frame" if obj_def.behavior_type == "Animation" else "0"
+                    _cid    = _lua_str(obj_def.id)
+                    lines.append(f"            local _nx8 = {obj_var}_x + _dx8 * _spd8")
+                    lines.append(f"            local _ny8 = {obj_var}_y + _dy8 * _spd8")
+                    lines.append(f"            if not check_obj_vs_grid(_grid, {_cid}, _nx8, {obj_var}_y, {_cframe}) then {obj_var}_x = _nx8 end")
+                    lines.append(f"            if not check_obj_vs_grid(_grid, {_cid}, {obj_var}_x, _ny8, {_cframe}) then {obj_var}_y = _ny8 end")
+                else:
+                    lines.append(f"            local _nx8 = {obj_var}_x + _dx8 * _spd8")
+                    lines.append(f"            local _ny8 = {obj_var}_y + _dy8 * _spd8")
+                    lines.append(f"            if not check_collision_rect(_grid, _nx8, {obj_var}_y, {pw}, {ph}) then {obj_var}_x = _nx8 end")
+                    lines.append(f"            if not check_collision_rect(_grid, {obj_var}_x, _ny8, {pw}, {ph}) then {obj_var}_y = _ny8 end")
+                lines.append(f"        else")
+                lines.append(f"            {obj_var}_x = {obj_var}_x + _dx8 * _spd8")
+                lines.append(f"            {obj_var}_y = {obj_var}_y + _dy8 * _spd8")
+                lines.append(f"        end")
+            else:
+                lines.append(f"        {obj_var}_x = {obj_var}_x + _dx8 * _spd8")
+                lines.append(f"        {obj_var}_y = {obj_var}_y + _dy8 * _spd8")
+            lines.append(f"        if     _dx8 == 0  and _dy8 == -1 then {_rot_line(0)}")
+            lines.append(f"        elseif _dx8 == 1  and _dy8 == -1 then {_rot_line(45)}")
+            lines.append(f"        elseif _dx8 == 1  and _dy8 == 0  then {_rot_line(90)}")
+            lines.append(f"        elseif _dx8 == 1  and _dy8 == 1  then {_rot_line(135)}")
+            lines.append(f"        elseif _dx8 == 0  and _dy8 == 1  then {_rot_line(180)}")
+            lines.append(f"        elseif _dx8 == -1 and _dy8 == 1  then {_rot_line(225)}")
+            lines.append(f"        elseif _dx8 == -1 and _dy8 == 0  then {_rot_line(270)}")
+            lines.append(f"        elseif _dx8 == -1 and _dy8 == -1 then {_rot_line(315)}")
+            lines.append(f"        end")
+            lines.append(f"    end")
+            lines.append(f"end")
 
     elif t == "two_way_movement":
         axis = action.two_way_axis
@@ -634,6 +739,34 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
             lines.append(f"{obj_var}_y = {obj_var}_y + {bspd}")
         elif bdir == "up":
             lines.append(f"{obj_var}_y = {obj_var}_y - {bspd}")
+
+    elif t == "set_velocity":
+        target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
+        if target:
+            if action.velocity_set_x:
+                lines.append(f"{target}_vx = {action.velocity_vx}")
+            if action.velocity_set_y:
+                lines.append(f"{target}_vy = {action.velocity_vy}")
+
+    elif t == "add_velocity":
+        target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
+        if target:
+            if action.velocity_set_x:
+                lines.append(f"{target}_vx = {target}_vx + {action.velocity_vx}")
+            if action.velocity_set_y:
+                lines.append(f"{target}_vy = {target}_vy + {action.velocity_vy}")
+
+    elif t == "jump":
+        target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
+        if not target:
+            return lines
+        strength      = action.jump_strength
+        max_jumps     = action.jump_max_count
+        lines.append(f"if {target}_jump_count < {max_jumps} then")
+        lines.append(f"    {target}_vy = -{strength}")
+        lines.append(f"    {target}_jump_count = {target}_jump_count + 1")
+        lines.append(f"    {target}_jump_button_held = true")
+        lines.append(f"end")
 
     elif t == "restart_scene":
         lines.append("advance = true  -- current_scene unchanged; main loop re-calls this scene")
@@ -954,6 +1087,27 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
         if target:
             lines.append(f"{target}_ani_fps = {fps}")
 
+    elif t == "ani_switch_slot":
+        target    = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
+        slot_name = action.ani_slot_name or ""
+        if target and slot_name:
+            lines.append(f"do")
+            lines.append(f"    local _new_id = {target}_ani_slots[{_lua_str(slot_name)}]")
+            lines.append(f"    if _new_id then")
+            lines.append(f"        {target}_ani_id      = _new_id")
+            lines.append(f"        {target}_ani_frame   = 0")
+            lines.append(f"        {target}_ani_timer   = 0")
+            lines.append(f"        {target}_ani_done    = false")
+            lines.append(f"        {target}_ani_playing = true")
+            lines.append(f"    end")
+            lines.append(f"end")
+
+    elif t == "ani_set_flip":
+        target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
+        if target:
+            lines.append(f"{target}_flip_h = {_lua_bool(action.ani_flip_h)}")
+            lines.append(f"{target}_flip_v = {_lua_bool(action.ani_flip_v)}")
+
     elif t == "set_anim_speed":
         target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
         fps    = action.anim_fps
@@ -962,9 +1116,17 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
 
     elif t == "play_anim":
         target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
+        slot   = action.ani_slot_name or ""
         if target:
+            if slot:
+                lines.append(f"do")
+                lines.append(f"    local _new_id = {target}_ani_slots[{_lua_str(slot)}]")
+                lines.append(f"    if _new_id then {target}_ani_id = _new_id end")
+                lines.append(f"end")
+            lines.append(f"{target}_ani_frame   = 0")
+            lines.append(f"{target}_ani_timer   = 0")
+            lines.append(f"{target}_ani_done    = false")
             lines.append(f"{target}_ani_playing = true")
-            lines.append(f"{target}_ani_done = false")
 
     elif t == "stop_anim":
         target = _resolve_target_name(action.object_def_id, project) if (project and action.object_def_id) else obj_var
@@ -1074,12 +1236,27 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
                     if img and img.path:
                         fname = _asset_filename(img.path)
                 if spawn_self and obj_var:
-                    x_expr = f"{obj_var}_x + {off_x}" if off_x else f"{obj_var}_x"
-                    y_expr = f"{obj_var}_y + {off_y}" if off_y else f"{obj_var}_y"
+                    # Use the spawning object's dimensions for the pivot (center of the ship),
+                    # not the bullet's dimensions. obj_def is the spawner, od is the bullet.
+                    spawner_w = obj_def.width  if obj_def else od.width
+                    spawner_h = obj_def.height if obj_def else od.height
+                    ppiv_x = spawner_w / 2.0
+                    ppiv_y = spawner_h / 2.0
+                    if off_x or off_y:
+                        lines.append(f"do")
+                        lines.append(f"    local _srad = ({obj_var}_rotation or 0) * math.pi / 180")
+                        lines.append(f"    local _sox  = {off_x} * math.cos(_srad) - {off_y} * math.sin(_srad)")
+                        lines.append(f"    local _soy  = {off_x} * math.sin(_srad) + {off_y} * math.cos(_srad)")
+                        x_expr = f"{obj_var}_x + {ppiv_x} + _sox"
+                        y_expr = f"{obj_var}_y + {ppiv_y} + _soy"
+                    else:
+                        lines.append(f"do")
+                        x_expr = f"{obj_var}_x + {ppiv_x}"
+                        y_expr = f"{obj_var}_y + {ppiv_y}"
                 else:
+                    lines.append(f"do")
                     x_expr = str(tx + off_x) if off_x else str(tx)
                     y_expr = str(ty + off_y) if off_y else str(ty)
-                lines.append(f"do")
                 lines.append(f'    local _iid = "{iid}_" .. tostring(os.clock()):gsub("%.", "")')
                 lines.append(f"    _live_objects[_iid] = {{")
                 lines.append(f"        def_id       = {_lua_str(def_id)},")
@@ -1092,7 +1269,31 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
                 lines.append(f"        spin_speed   = 0.0,")
                 lines.append(f"        interactable = true,")
                 lines.append(f"        image        = {_lua_str(fname)},")
+                bspd = getattr(action, "bullet_speed", 0) or 0
+                if bspd and obj_var:
+                    lines.append(f"        speed        = {bspd},")
+                    lines.append(f"        angle        = ({obj_var}_rotation or 0),")
+                else:
+                    lines.append(f"        speed        = 0,")
+                    lines.append(f"        angle        = 0,")
                 lines.append(f"    }}")
+                # Register in parent system if a parent was specified
+                parent_id = getattr(action, "parent_id", "")
+                if parent_id and project:
+                    parent_od = project.get_object_def(parent_id)
+                    if parent_od:
+                        pvar = _safe_name(parent_od.name)
+                        ipos = "true"  if getattr(action, "inherit_position",    True)  else "false"
+                        irot = "true"  if getattr(action, "inherit_rotation",    False) else "false"
+                        iscl = "true"  if getattr(action, "inherit_scale",       False) else "false"
+                        dwp  = "true"  if getattr(action, "destroy_with_parent", False) else "false"
+                        roff = getattr(action, "rotation_offset", 0.0)
+                        lines.append(
+                            f'    _parents[_iid] = {{parent_var="{pvar}", '
+                            f'offset_x={off_x}, offset_y={off_y}, rotation_offset={roff}, '
+                            f'inherit_position={ipos}, inherit_rotation={irot}, '
+                            f'inherit_scale={iscl}, destroy_with_parent={dwp}}}'
+                        )
                 lines.append(f"end")
             else:
                 lines.append(f"-- create_object: def {_lua_str(def_id)} not found")
@@ -1110,6 +1311,8 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
                 vname = _safe_name(od.name)
                 lines.append(f"{vname}_visible = false")
                 lines.append(f"{vname}_interactable = false")
+                lines.append(f'parents_destroy_children("{vname}")')
+                lines.append(f'_parents["{vname}"] = nil')
             else:
                 lines.append(f"-- destroy_object: def {_lua_str(def_id)} not found")
         else:
@@ -1133,6 +1336,41 @@ def _action_to_lua_inline(action: BehaviorAction, obj_var: str | None, project=N
 
     elif t == "disable_interact" and obj_var:
         lines.append(f"{obj_var}_interactable = false")
+
+    elif t == "attach_to":
+        parent_id = getattr(action, "parent_id", "")
+        if parent_id and project and obj_var:
+            parent_od = project.get_object_def(parent_id)
+            child_od  = project.get_object_def(obj_def.id) if obj_def else None
+            if parent_od:
+                pvar      = _safe_name(parent_od.name)
+                ox        = getattr(action, "offset_x", 0)
+                oy        = getattr(action, "offset_y", 0)
+                ipos      = "true"  if getattr(action, "inherit_position",    True)  else "false"
+                irot      = "true"  if getattr(action, "inherit_rotation",    False) else "false"
+                iscl      = "true"  if getattr(action, "inherit_scale",       False) else "false"
+                dwp       = "true"  if getattr(action, "destroy_with_parent", False) else "false"
+                roff      = getattr(action, "rotation_offset", 0.0)
+                ppiv_x    = parent_od.width  / 2.0
+                ppiv_y    = parent_od.height / 2.0
+                cpiv_x    = child_od.width   / 2.0 if child_od else 0.0
+                cpiv_y    = child_od.height  / 2.0 if child_od else 0.0
+                lines.append(
+                    f'_parents["{obj_var}"] = {{parent_var="{pvar}", '
+                    f'offset_x={ox}, offset_y={oy}, rotation_offset={roff}, '
+                    f'pivot_x={ppiv_x}, pivot_y={ppiv_y}, '
+                    f'child_pivot_x={cpiv_x}, child_pivot_y={cpiv_y}, '
+                    f'inherit_position={ipos}, inherit_rotation={irot}, '
+                    f'inherit_scale={iscl}, destroy_with_parent={dwp}}}'
+                )
+            else:
+                lines.append("-- attach_to: parent object not found")
+        else:
+            lines.append("-- attach_to: missing parent_id or context")
+
+    elif t == "detach":
+        if obj_var:
+            lines.append(f'_parents["{obj_var}"] = nil')
 
     elif t == "if_variable":
         vn  = _safe_name(action.var_name) if action.var_name else "unknown"
@@ -1903,21 +2141,26 @@ def _make_ani_lib() -> str:
         "trans_data   = {}",
         "trans_sheets = {}",
         "",
-        "local function ani_get_frame_rect(ani_id, frame)",
+        "function ani_get_sheet_and_rect(ani_id, frame)",
         "    local data = ani_data[ani_id]",
-        "    if not data then return 0, 0, 64, 64 end",
+        "    if not data then return nil, 0, 0, 64, 64 end",
+        "    local sheets = ani_sheets[ani_id]",
+        "    if not sheets then return nil, 0, 0, 64, 64 end",
+        "    local fpg = data.frames_per_sheet or data.frame_count",
+        "    local si  = math.floor(frame / fpg) + 1",
+        "    if si > #sheets then si = #sheets end",
+        "    local lf  = frame - (si - 1) * fpg",
         "    local cols = math.floor(data.sheet_width / data.frame_width)",
         "    if cols < 1 then cols = 1 end",
-        "    local col = frame % cols",
-        "    local row = math.floor(frame / cols)",
-        "    return col * data.frame_width, row * data.frame_height,",
+        "    local col = lf % cols",
+        "    local row = math.floor(lf / cols)",
+        "    return sheets[si], col * data.frame_width, row * data.frame_height,",
         "           data.frame_width, data.frame_height",
         "end",
         "",
         "function ani_draw(ani_id, frame, x, y)",
-        "    local sheet = ani_sheets[ani_id]",
+        "    local sheet, sx, sy, sw, sh = ani_get_sheet_and_rect(ani_id, frame)",
         "    if not sheet then return end",
-        "    local sx, sy, sw, sh = ani_get_frame_rect(ani_id, frame)",
         "    Graphics.drawPartialImage(x, y, sheet, sx, sy, sw, sh)",
         "end",
         "",
@@ -2291,16 +2534,27 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 out.append(f'    {vname}_text_g = {lg}')
                 out.append(f'    {vname}_text_b = {lb}')
                 out.append(f'    {vname}_font_size = {od.gui_font_size}')
-            if od.behavior_type == "Animation" and od.ani_file_id:
+            if od.behavior_type == "Animation" and od.ani_slots:
+                first_slot = od.ani_slots[0]
+                first_id   = first_slot.get("ani_file_id", "")
                 ani_playing = "true" if od.ani_play_on_spawn and not od.ani_start_paused else "false"
                 start_frame = od.ani_pause_frame if od.ani_start_paused else 0
-                out.append(f"    {vname}_ani_id      = {_lua_str(od.ani_file_id)}")
+                # Slot lookup table: slot name -> ani_file_id string
+                out.append(f"    {vname}_ani_slots = {{")
+                for slot in od.ani_slots:
+                    sname = slot.get("name", "")
+                    sfid  = slot.get("ani_file_id", "")
+                    out.append(f"        [{_lua_str(sname)}] = {_lua_str(sfid)},")
+                out.append(f"    }}")
+                out.append(f"    {vname}_ani_id      = {_lua_str(first_id)}")
                 out.append(f"    {vname}_ani_frame   = {start_frame}")
                 out.append(f"    {vname}_ani_playing = {ani_playing}")
                 out.append(f"    {vname}_ani_timer   = 0")
                 out.append(f"    {vname}_ani_loop    = {_lua_bool(od.ani_loop)}")
                 out.append(f"    {vname}_ani_fps     = {od.ani_fps_override}")
                 out.append(f"    {vname}_ani_done    = false")
+                out.append(f"    {vname}_flip_h      = {_lua_bool(od.ani_flip_h)}")
+                out.append(f"    {vname}_flip_v      = {_lua_bool(od.ani_flip_v)}")
 
             if od.behavior_type == "LayerAnimation" and od.layer_anim_id:
                 doll = project.get_paper_doll(od.layer_anim_id)
@@ -2322,6 +2576,21 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f"    {vname}_vy = 0")
                 else:
                     out.append(f"    {vname}_vx = 0")
+                _has_jump = any(
+                    act.action_type == "jump"
+                    for beh in od.behaviors
+                    for act in beh.actions
+                )
+                if _has_jump:
+                    _jump_act = next(
+                        act
+                        for beh in od.behaviors
+                        for act in beh.actions
+                        if act.action_type == "jump"
+                    )
+                    out.append(f"    {vname}_jump_count = 0")
+                    out.append(f"    {vname}_jump_max = {_jump_act.jump_max_count}")
+                    out.append(f"    {vname}_jump_button_held = false")
 
     # Initialise _groups from design-time group membership for objects placed in this scene.
     # Groups are rebuilt fresh each scene load — scene-scoped at runtime, global in the editor.
@@ -2374,6 +2643,37 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             out.append(f'        end')
             out.append(f'    end')
 
+    # Build parent registry from any placed objects that have a parent_id set
+    out.append("    _parents = {}")
+    _iid_to_po = {po.instance_id: po for po in scene.placed_objects}
+    for po in scene.placed_objects:
+        if po.parent_id and po.parent_id in _iid_to_po:
+            od = project.get_object_def(po.object_def_id)
+            parent_po = _iid_to_po[po.parent_id]
+            parent_od = project.get_object_def(parent_po.object_def_id)
+            if od and parent_od:
+                child_var  = _safe_name(od.name)
+                parent_var = _safe_name(parent_od.name)
+                ppiv_x = parent_od.width  / 2.0
+                ppiv_y = parent_od.height / 2.0
+                cpiv_x = od.width         / 2.0
+                cpiv_y = od.height        / 2.0
+                off_x  = (po.x + cpiv_x) - (parent_po.x + ppiv_x)
+                off_y  = (po.y + cpiv_y) - (parent_po.y + ppiv_y)
+                ipos   = "true"  if po.inherit_position    else "false"
+                irot   = "true"  if po.inherit_rotation     else "false"
+                iscl   = "true"  if po.inherit_scale        else "false"
+                dwp    = "true"  if po.destroy_with_parent  else "false"
+                roff   = getattr(po, "rotation_offset", 0.0)
+                out.append(
+                    f'    _parents["{child_var}"] = '
+                    f'{{parent_var="{parent_var}", offset_x={off_x}, offset_y={off_y}, rotation_offset={roff}, '
+                    f'pivot_x={ppiv_x}, pivot_y={ppiv_y}, '
+                    f'child_pivot_x={cpiv_x}, child_pivot_y={cpiv_y}, '
+                    f'inherit_position={ipos}, inherit_rotation={irot}, '
+                    f'inherit_scale={iscl}, destroy_with_parent={dwp}}}'
+                )
+
     # Initialise on_timer and on_timer_variable counters, and
     # on_variable_threshold state for all behaviors in the scene.
     for po in scene.placed_objects:
@@ -2420,6 +2720,9 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
         lname = _safe_name(lc.config.get("layer_name", "") or lc.id)
         visible_init = "true" if lc.config.get("visible", True) else "false"
         out.append(f"    layer_{lname}_visible = {visible_init}")
+        if lc.config.get("scroll", False):
+            out.append(f"    layer_{lname}_scroll_x = 0")
+            out.append(f"    layer_{lname}_scroll_y = 0")
 
     for comp in scene.components:
         if comp.component_type == "Music":
@@ -2716,9 +3019,36 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                                 out.append(f"                {line}")
                         out.append(f"            end")
 
+                elif beh.trigger == "on_animation_finish" and beh.ani_trigger_object:
+                    _tobj = project.get_object_def(beh.ani_trigger_object)
+                    tname = _safe_name(_tobj.name) if _tobj else None
+                    if tname:
+                        out.append(f"            if {tname}_ani_done then")
+                        out.append(f"                {tname}_ani_done = false  -- consume so it fires once")
+                        for action in beh.actions:
+                            for line in _action_to_lua_inline(action, vname, project, obj_def=od):
+                                out.append(f"                {line}")
+                        out.append(f"            end")
+
+                elif beh.trigger == "on_animation_frame" and beh.ani_trigger_object:
+                    _tobj = project.get_object_def(beh.ani_trigger_object)
+                    tname = _safe_name(_tobj.name) if _tobj else None
+                    fvar  = f"{vname}_aniframe_prev_{bi}"
+                    if tname:
+                        out.append(f"            do")
+                        out.append(f"                local _af = {tname}_ani_frame or 0")
+                        out.append(f"                if _af == {beh.ani_trigger_frame} and {fvar} ~= {beh.ani_trigger_frame} then")
+                        for action in beh.actions:
+                            for line in _action_to_lua_inline(action, vname, project, obj_def=od):
+                                out.append(f"                    {line}")
+                        out.append(f"                end")
+                        out.append(f"                {fvar} = _af")
+                        out.append(f"            end")
+
             out.append(f"        end  -- wait guard [{od.name}]")
 
         out.append("        camera_update_follow()")
+        out.append("        parents_update()")
 
         for po in scene.placed_objects:
             od = project.get_object_def(po.object_def_id)
@@ -2731,7 +3061,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
 
         for po in scene.placed_objects:
             od = project.get_object_def(po.object_def_id)
-            if od and od.behavior_type == "Animation" and od.ani_file_id:
+            if od and od.behavior_type == "Animation" and od.ani_slots:
                 vname = _safe_name(od.name)
                 out.append(f"        if {vname}_ani_playing and not {vname}_ani_done then")
                 out.append(f"            local _ani_d = ani_data[{vname}_ani_id]")
@@ -2772,6 +3102,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                 if _po.instance_id not in zone_instance_ids
                 and project.get_object_def(_po.object_def_id) is not None
                 and project.get_object_def(_po.object_def_id).behavior_type != "Camera"
+                and getattr(project.get_object_def(_po.object_def_id), 'is_mover', True)
             ]
             for zpo in zone_objects:
                 zod = project.get_object_def(zpo.object_def_id)
@@ -2900,7 +3231,7 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     _grav_ph = 48
                     for beh in od.behaviors:
                         for act in beh.actions:
-                            if act.action_type in ("four_way_movement_collide", "two_way_movement_collide"):
+                            if act.action_type in ("four_way_movement_collide", "two_way_movement_collide", "eight_way_movement_collide"):
                                 _grav_grid_id = act.collision_layer_id or ""
                                 _grav_pw = act.player_width
                                 _grav_ph = act.player_height
@@ -2947,6 +3278,79 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     else:
                         out.append(f"        {pos_var} = {pos_var} + {vel_var}")
 
+                    # --- jump state management ---
+                    _has_jump = any(
+                        act.action_type == "jump"
+                        for beh in od.behaviors
+                        for act in beh.actions
+                    )
+                    if _has_jump:
+                        _jump_act = next(
+                            act
+                            for beh in od.behaviors
+                            for act in beh.actions
+                            if act.action_type == "jump"
+                        )
+                        _btn        = _jump_act.jump_button
+                        _var_height = _jump_act.jump_variable_height
+                        _min_vy     = _jump_act.jump_variable_min_vy
+                        _do_float   = _jump_act.jump_float
+                        _float_mult = _jump_act.jump_float_gravity_mult
+                        _grid_id    = _jump_act.jump_collision_layer_id or _grav_grid_id
+                        _has_cboxes = od.collision_boxes and any(boxes for boxes in od.collision_boxes)
+
+                        # Grounded reset: vy was zeroed by collision this frame = landed
+                        out.append(f"        -- jump: grounded reset")
+                        out.append(f"        if {vel_var} == 0 and {vname}_jump_count > 0 then")
+                        if _grid_id:
+                            out.append(f"            do")
+                            out.append(f"                local _jgrid = collision_grids[{_lua_str(_grid_id)}]")
+                            out.append(f"                local _probe = {pos_var} + 1")
+                            if _has_cboxes:
+                                _cframe = f"{vname}_ani_frame" if od.behavior_type == "Animation" else "0"
+                                _cid    = _lua_str(od.id)
+                                out.append(f"                if _jgrid and check_obj_vs_grid(_jgrid, {_cid}, {other_pos}, _probe, {_cframe}) then")
+                            else:
+                                out.append(f"                if _jgrid and check_collision_rect(_jgrid, {other_pos}, _probe, {_jump_act.jump_player_width}, {_jump_act.jump_player_height}) then")
+                            out.append(f"                    {vname}_jump_count = 0")
+                            out.append(f"                end")
+                            out.append(f"            end")
+                        else:
+                            out.append(f"            {vname}_jump_count = 0")
+                        out.append(f"        end")
+
+                        # Variable height: if button released early, clamp rising velocity
+                        if _var_height:
+                            _lpp_btn = _button_constant(_btn)
+                            out.append(f"        -- jump: variable height")
+                            out.append(f"        if {vel_var} < 0 and not controls_held({_lpp_btn}) then")
+                            out.append(f"            {vname}_jump_button_held = false")
+                            out.append(f"            if {vel_var} < -{_min_vy} then")
+                            out.append(f"                {vel_var} = -{_min_vy}")
+                            out.append(f"            end")
+                            out.append(f"        end")
+
+                        # Float: while rising and button held, reduce gravity effect
+                        if _do_float:
+                            _lpp_btn = _button_constant(_btn)
+                            out.append(f"        -- jump: float")
+                            out.append(f"        if {vel_var} < 0 and controls_held({_lpp_btn}) then")
+                            _float_delta = round(sign * gstr * (1.0 - _float_mult), 4)
+                            out.append(f"            {vel_var} = {vel_var} - {_float_delta}")
+                            out.append(f"        end")
+
+        # ── Layer scroll position advance ────────────────────────────────────
+        for lc in scene_layers:
+            if not lc.config.get("scroll", False):
+                continue
+            lname = _safe_name(lc.config.get("layer_name", "") or lc.id)
+            speed = lc.config.get("scroll_speed", 1)
+            direction = lc.config.get("scroll_direction", "horizontal")
+            if direction == "horizontal":
+                out.append(f"        layer_{lname}_scroll_x = layer_{lname}_scroll_x + {speed}")
+            else:
+                out.append(f"        layer_{lname}_scroll_y = layer_{lname}_scroll_y + {speed}")
+
         out.append("        Graphics.initBlend()")
         out.append("        Screen.clear()")
 
@@ -2958,14 +3362,65 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             if not img or not img.path:
                 return
             fname = _asset_filename(img.path)
-            locked = lc.config.get("screen_space_locked", False)
+            locked   = lc.config.get("screen_space_locked", False)
             parallax = lc.config.get("parallax", 1.0)
+            tile_x   = lc.config.get("tile_x", False)
+            tile_y   = lc.config.get("tile_y", False)
+
             out.append(f"        if layer_{lname}_visible and images[{_lua_str(fname)}] then")
-            if locked:
-                out.append(f"            Graphics.drawImage((layer_{lname}_scroll_x or 0), (layer_{lname}_scroll_y or 0), images[{_lua_str(fname)}])")
+
+            if tile_x or tile_y:
+                # Compute base draw origin (same logic as non-tiled path)
+                if locked:
+                    out.append(f"            local _bx = (layer_{lname}_scroll_x or 0)")
+                    out.append(f"            local _by = (layer_{lname}_scroll_y or 0)")
+                else:
+                    out.append(f"            local _lox, _loy = camera_bg_offset({parallax})")
+                    out.append(f"            local _bx = _lox + (layer_{lname}_scroll_x or 0)" + (" + shake_offset_x" if not locked else ""))
+                    out.append(f"            local _by = _loy + (layer_{lname}_scroll_y or 0)" + (" + shake_offset_y" if not locked else ""))
+
+                out.append(f"            local _iw = Graphics.getImageWidth(images[{_lua_str(fname)}])")
+                out.append(f"            local _ih = Graphics.getImageHeight(images[{_lua_str(fname)}])")
+
+                if tile_x and tile_y:
+                    # Wrap both axes so the scroll offset stays within one tile period
+                    out.append(f"            local _ox = _bx % _iw")
+                    out.append(f"            local _oy = _by % _ih")
+                    out.append(f"            local _tx = -_iw + _ox")
+                    out.append(f"            if _tx > 0 then _tx = _tx - _iw end")
+                    out.append(f"            while _tx < 960 do")
+                    out.append(f"                local _ty = -_ih + _oy")
+                    out.append(f"                if _ty > 0 then _ty = _ty - _ih end")
+                    out.append(f"                while _ty < 544 do")
+                    out.append(f"                    Graphics.drawImage(_tx, _ty, images[{_lua_str(fname)}])")
+                    out.append(f"                    _ty = _ty + _ih")
+                    out.append(f"                end")
+                    out.append(f"                _tx = _tx + _iw")
+                    out.append(f"            end")
+                elif tile_x:
+                    out.append(f"            local _ox = _bx % _iw")
+                    out.append(f"            local _tx = -_iw + _ox")
+                    out.append(f"            if _tx > 0 then _tx = _tx - _iw end")
+                    out.append(f"            while _tx < 960 do")
+                    out.append(f"                Graphics.drawImage(_tx, _by, images[{_lua_str(fname)}])")
+                    out.append(f"                _tx = _tx + _iw")
+                    out.append(f"            end")
+                else:  # tile_y only
+                    out.append(f"            local _oy = _by % _ih")
+                    out.append(f"            local _ty = -_ih + _oy")
+                    out.append(f"            if _ty > 0 then _ty = _ty - _ih end")
+                    out.append(f"            while _ty < 544 do")
+                    out.append(f"                Graphics.drawImage(_bx, _ty, images[{_lua_str(fname)}])")
+                    out.append(f"                _ty = _ty + _ih")
+                    out.append(f"            end")
             else:
-                out.append(f"            local _lox, _loy = camera_bg_offset({parallax})")
-                out.append(f"            Graphics.drawImage(_lox + (layer_{lname}_scroll_x or 0) + shake_offset_x, _loy + (layer_{lname}_scroll_y or 0) + shake_offset_y, images[{_lua_str(fname)}])")
+                # Original non-tiled draw path
+                if locked:
+                    out.append(f"            Graphics.drawImage((layer_{lname}_scroll_x or 0), (layer_{lname}_scroll_y or 0), images[{_lua_str(fname)}])")
+                else:
+                    out.append(f"            local _lox, _loy = camera_bg_offset({parallax})")
+                    out.append(f"            Graphics.drawImage(_lox + (layer_{lname}_scroll_x or 0) + shake_offset_x, _loy + (layer_{lname}_scroll_y or 0) + shake_offset_y, images[{_lua_str(fname)}])")
+
             out.append("        end")
 
         def _emit_object_draw(po, locked=False):
@@ -3040,10 +3495,10 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f'            end')
                 out.append(f'        end')
             elif od.behavior_type == "Animation":
-                if od.ani_file_id:
-                    # Compute scale ratio: object size vs animation frame size
-                    # so the animation fills the object's intended dimensions
-                    ani_export = project.get_animation_export(od.ani_file_id)
+                if od.ani_slots:
+                    # Compute scale ratio using the first slot's AnimationExport
+                    first_fid  = od.ani_slots[0].get("ani_file_id", "")
+                    ani_export = project.get_animation_export(first_fid) if first_fid else None
                     if ani_export and ani_export.frame_width > 0 and ani_export.frame_height > 0:
                         ani_sx = od.width / ani_export.frame_width
                         ani_sy = od.height / ani_export.frame_height
@@ -3053,24 +3508,20 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
                     out.append(f'        if {vname}_visible then')
                     out.append(f'            {ws_call}')
                     out.append(f'            local _ani_d = ani_data[{vname}_ani_id]')
-                    out.append(f'            local _sheet = ani_sheets[{vname}_ani_id]')
-                    out.append(f'            if _ani_d and _sheet then')
-                    out.append(f'                local _cols = math.floor(_ani_d.sheet_width / _ani_d.frame_width)')
-                    out.append(f'                if _cols < 1 then _cols = 1 end')
-                    out.append(f'                local _fcol = {vname}_ani_frame % _cols')
-                    out.append(f'                local _frow = math.floor({vname}_ani_frame / _cols)')
-                    out.append(f'                local _fsx  = _fcol * _ani_d.frame_width')
-                    out.append(f'                local _fsy  = _frow * _ani_d.frame_height')
-                    # vita2d scale_rotate uses (x,y) as center; editor stores top-left
-                    # ani_sx/ani_sy map frame pixels → object pixels (e.g. 256→960)
+                    out.append(f'            if _ani_d then')
+                    out.append(f'                local _sheet, _fsx, _fsy, _fw2, _fh2 = ani_get_sheet_and_rect({vname}_ani_id, {vname}_ani_frame)')
+                    out.append(f'                if _sheet then')
                     out.append(f'                local _asx  = {ani_sx}')
                     out.append(f'                local _asy  = {ani_sy}')
-                    out.append(f'                local _fw   = _ani_d.frame_width * _asx * {vname}_scale * camera.zoom')
                     out.append(f'                local _fh   = _ani_d.frame_height * _asy * {vname}_scale * camera.zoom')
+                    out.append(f'                local _fsx2 = _asx * {vname}_scale * camera.zoom * ({vname}_flip_h and -1 or 1)')
+                    out.append(f'                local _fsy2 = _asy * {vname}_scale * camera.zoom * ({vname}_flip_v and -1 or 1)')
+                    out.append(f'                local _fw   = _ani_d.frame_width  * math.abs(_fsx2)')
                     out.append(f'                local _ox   = _sx + _fw * 0.5{shk_x}')
                     out.append(f'                local _oy   = _sy + _fh * 0.5{shk_y}')
                     out.append(f'                local _tc   = Color.new(255, 255, 255, {vname}_opacity)')
-                    out.append(f'                Graphics.drawImageExtended(_ox, _oy, _sheet, _fsx, _fsy, _ani_d.frame_width, _ani_d.frame_height, {vname}_rotation * (math.pi / 180), _asx * {vname}_scale * camera.zoom, _asy * {vname}_scale * camera.zoom, _tc)')
+                    out.append(f'                Graphics.drawImageExtended(_ox, _oy, _sheet, _fsx, _fsy, _ani_d.frame_width, _ani_d.frame_height, {vname}_rotation * (math.pi / 180), _fsx2, _fsy2, _tc)')
+                    out.append(f'                end')
                     out.append(f'            end')
                     out.append(f'        end')
             elif od.behavior_type == "LayerAnimation":
@@ -3258,21 +3709,30 @@ def _scene_to_lua(scene: Scene, scene_num: int, project: Project) -> str:
             out.append(f'            _ly = _ly + {vn_line_spacing}')
             out.append(f'        end')
 
-        out.append("        -- draw dynamically created objects")
+        out.append("        -- update and draw dynamically created objects")
         out.append("        for _liid, _lo in pairs(_live_objects) do")
-        out.append("            if _lo.visible then")
-        out.append("                local _lsx, _lsy = world_to_screen(_lo.x, _lo.y)")
+        out.append("            -- move bullet-type live objects forward along their spawn angle")
+        out.append("            if _lo.speed and _lo.speed > 0 then")
+        out.append("                local _brad = _lo.angle * math.pi / 180")
+        out.append("                _lo.x = _lo.x + math.sin(_brad) * _lo.speed")
+        out.append("                _lo.y = _lo.y - math.cos(_brad) * _lo.speed")
+        out.append("            end")
+        out.append("            -- cull if off screen (with margin)")
+        out.append("            local _lsx, _lsy = world_to_screen(_lo.x, _lo.y)")
+        out.append("            local _margin = 200")
+        out.append("            if _lsx < -_margin or _lsx > 960 + _margin or _lsy < -_margin or _lsy > 544 + _margin then")
+        out.append("                _live_objects[_liid] = nil")
+        out.append("            elseif _lo.visible then")
         out.append("                local _limg = _lo.image and images[_lo.image]")
         out.append("                if _limg then")
         out.append("                    local _liw = Graphics.getImageWidth(_limg)")
         out.append("                    local _lih = Graphics.getImageHeight(_limg)")
         out.append("                    local _ltc = Color.new(255, 255, 255, _lo.opacity)")
-        # vita2d scale_rotate uses (x,y) as center; editor stores top-left
         out.append("                    local _lsw = _liw * _lo.scale * camera.zoom")
         out.append("                    local _lsh = _lih * _lo.scale * camera.zoom")
         out.append("                    local _lox = _lsx + _lsw * 0.5 + shake_offset_x")
         out.append("                    local _loy = _lsy + _lsh * 0.5 + shake_offset_y")
-        out.append("                    Graphics.drawImageExtended(_lox, _loy, _limg, 0, 0, _liw, _lih, _lo.rotation * (math.pi / 180), _lo.scale * camera.zoom, _lo.scale * camera.zoom, _ltc)")
+        out.append("                    Graphics.drawImageExtended(_lox, _loy, _limg, 0, 0, _liw, _lih, _lo.angle * (math.pi / 180), _lo.scale * camera.zoom, _lo.scale * camera.zoom, _ltc)")
         out.append("                end")
         out.append("            end")
         out.append("        end")
@@ -3734,6 +4194,68 @@ def _make_path_lib() -> str:
     return "\n".join(lines)
 
 
+def _make_parent_lib() -> str:
+    lines = [
+        "-- lib/parents.lua",
+        "-- Runtime parent/child transform system.",
+        "-- _parents[child_var] = {parent_var, offset_x, offset_y, rotation_offset,",
+        "--   inherit_position, inherit_rotation, inherit_scale, destroy_with_parent}",
+        "_parents = {}",
+        "",
+        "function parents_update()",
+        "    for child_var, rel in pairs(_parents) do",
+        "        local px = _G[rel.parent_var .. \"_x\"]",
+        "        local py = _G[rel.parent_var .. \"_y\"]",
+        "        if px == nil or py == nil then",
+        "            -- parent no longer exists; detach child",
+        "            _parents[child_var] = nil",
+        "        else",
+        "            -- Read parent rotation (degrees). Used for both position and rotation inheritance.",
+        "            local pr = _G[rel.parent_var .. \"_rotation\"] or 0",
+        "            if rel.inherit_position then",
+        "                -- Positions are stored as top-left, but sprites rotate around their center.",
+        "                -- We must rotate the offset around the parent's visual center (top-left + pivot),",
+        "                -- otherwise the child orbits the wrong point and swings out like an arm.",
+        "                local _pcx  = px + rel.pivot_x",
+        "                local _pcy  = py + rel.pivot_y",
+        "                local _rad   = pr * math.pi / 180",
+        "                local _cos_r = math.cos(_rad)",
+        "                local _sin_r = math.sin(_rad)",
+        "                local _wox = rel.offset_x * _cos_r - rel.offset_y * _sin_r",
+        "                local _woy = rel.offset_x * _sin_r + rel.offset_y * _cos_r",
+        "                -- Place child top-left so it too rotates around its own center correctly.",
+        "                _G[child_var .. \"_x\"] = _pcx + _wox - rel.child_pivot_x",
+        "                _G[child_var .. \"_y\"] = _pcy + _woy - rel.child_pivot_y",
+        "            end",
+        "            if rel.inherit_rotation then",
+        "                _G[child_var .. \"_rotation\"] = pr + rel.rotation_offset",
+        "            end",
+        "            -- inherit_scale: stub",
+        "            -- requires multiplying offset distance by parent scale; implement when needed",
+        "        end",
+        "    end",
+        "end",
+        "",
+        "function parents_destroy_children(parent_var)",
+        "    for child_var, rel in pairs(_parents) do",
+        "        if rel.parent_var == parent_var then",
+        "            if rel.destroy_with_parent then",
+        "                _G[child_var .. \"_visible\"] = false",
+        "                _G[child_var .. \"_interactable\"] = false",
+        "                _parents[child_var] = nil",
+        "                -- recursive: destroy this child's children too",
+        "                parents_destroy_children(child_var)",
+        "            else",
+        "                -- detach but leave in place",
+        "                _parents[child_var] = nil",
+        "            end",
+        "        end",
+        "    end",
+        "end",
+    ]
+    return "\n".join(lines)
+
+
 def _bake_bezier_points(path_points: list[dict], closed: bool, interval: float = 2.0) -> list[dict]:
     """Sample a cubic bezier path into evenly-spaced {x, y} waypoints."""
     import math
@@ -3801,6 +4323,7 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
     files["lib/flash.lua"]    = _make_flash_lib()
     files["lib/groups.lua"]   = _make_group_lib()
     files["lib/paths.lua"]    = _make_path_lib()
+    files["lib/parents.lua"]  = _make_parent_lib()
     if project.game_data.save_enabled:
         files["lib/save.lua"] = _make_save_lib(tid)
 
@@ -3830,6 +4353,7 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
     idx.append("require('lib/controls')")
     idx.append("require('lib/groups')")
     idx.append("require('lib/paths')")
+    idx.append("require('lib/parents')")
     if project.game_data.save_enabled:
         idx.append("require('lib/save')")
     if has_3d:
@@ -3992,9 +4516,11 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
         idx.append("")
 
     ani_files = list(set(
-        od.ani_file_id
+        slot.get("ani_file_id", "")
         for od in project.object_defs
-        if od.behavior_type == "Animation" and od.ani_file_id
+        if od.behavior_type == "Animation"
+        for slot in od.ani_slots
+        if slot.get("ani_file_id", "")
     ))
     if ani_files:
         for ani_id in sorted(ani_files):
@@ -4006,10 +4532,16 @@ def export_lpp(project: Project, title_id: str | None = None) -> dict[str, str]:
                 idx.append(f'    frame_height = {ani_obj.frame_height},')
                 idx.append(f'    sheet_width  = {ani_obj.sheet_width},')
                 idx.append(f'    sheet_height = {ani_obj.sheet_height},')
+                idx.append(f'    frames_per_sheet = {ani_obj.frames_per_sheet},')
                 idx.append(f'    fps          = {ani_obj.fps},')
                 idx.append(f'}}')
-                sheet_name = _asset_filename(ani_obj.spritesheet_path)
-                idx.append(f'ani_sheets[{_lua_str(ani_id)}] = Graphics.loadImage("app0:/assets/animations/{sheet_name}")')
+                # Load sheets into a table (works for single or multi-sheet)
+                paths = ani_obj.spritesheet_paths if ani_obj.spritesheet_paths else [ani_obj.spritesheet_path]
+                idx.append(f'ani_sheets[{_lua_str(ani_id)}] = {{')
+                for sp in paths:
+                    sheet_name = _asset_filename(sp)
+                    idx.append(f'    Graphics.loadImage("app0:/assets/animations/{sheet_name}"),')
+                idx.append(f'}}')
         idx.append("")
 
     trans_files = list(set(
@@ -4209,16 +4741,27 @@ def get_asset_mapping(project: Project) -> dict[str, str]:
             mapping[fnt.path] = f"assets/fonts/{_asset_filename(fnt.path)}"
 
     for od in project.object_defs:
-        if od.behavior_type == "Animation" and od.ani_file_id:
-            ani_obj = project.get_animation_export(od.ani_file_id)
-            if ani_obj and ani_obj.spritesheet_path:
-                if project.project_folder:
-                    full_path = os.path.join(
-                        project.project_folder, "animations", ani_obj.spritesheet_path
+        if od.behavior_type == "Animation":
+            seen_ids = set()
+            for slot in od.ani_slots:
+                fid = slot.get("ani_file_id", "")
+                if not fid or fid in seen_ids:
+                    continue
+                seen_ids.add(fid)
+                ani_obj = project.get_animation_export(fid)
+                if ani_obj:
+                    paths = ani_obj.spritesheet_paths if ani_obj.spritesheet_paths else (
+                        [ani_obj.spritesheet_path] if ani_obj.spritesheet_path else []
                     )
-                else:
-                    full_path = ani_obj.spritesheet_path
-                mapping[full_path] = f"assets/animations/{ani_obj.spritesheet_path}"
+                    for sp in paths:
+                        if sp:
+                            if project.project_folder:
+                                full_path = os.path.join(
+                                    project.project_folder, "animations", sp
+                                )
+                            else:
+                                full_path = sp
+                            mapping[full_path] = f"assets/animations/{sp}"
 
     for trans in project.transition_exports:
         if trans.spritesheet_path:

@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 """
 Vita Adventure Creator -- Objects Tab
-Object definition editor (frames, behaviors, VNCharacter config) + per-scene placed instances.
+Object definition editor (frames, behaviors) + per-scene placed instances.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ TRIGGER_TYPES = [
     "on_create", "on_interact", "on_input", "on_frame", "on_true", "on_false", "on_destroy",
     "on_enter", "on_exit", "on_overlap", "on_interact_zone",
 ]
-BEHAVIOR_TYPES = ["default", "VNCharacter", "GUI_Label", "GUI_Button", "GUI_Panel", "Animation", "LayerAnimation", "Camera"]
+BEHAVIOR_TYPES = ["default", "GUI_Label", "GUI_Button", "GUI_Panel", "Animation", "LayerAnimation", "Camera"]
 
 
 # -- Helpers -------------------------------------------------------------------
@@ -215,38 +215,6 @@ class ObjectDefEditor(QWidget):
         self.behavior_type_combo.setStyleSheet(_field_style())
         self.behavior_type_combo.currentTextChanged.connect(self._on_behavior_type_changed)
         self._layout.addWidget(self.behavior_type_combo)
-
-        # ── VNCharacter config ──
-        self._vnchar_group = QWidget()
-        vg = QVBoxLayout(self._vnchar_group)
-        vg.setContentsMargins(0, 0, 0, 0)
-        vg.setSpacing(6)
-
-        vg.addWidget(_section("VN CHARACTER"))
-        vg.addWidget(_divider())
-
-        vg.addWidget(_make_dim_label("Display Name (shown in dialogue box):"))
-        self.vn_name_edit = QLineEdit()
-        self.vn_name_edit.setPlaceholderText("Character display name…")
-        self.vn_name_edit.setStyleSheet(_field_style())
-        self.vn_name_edit.textChanged.connect(self._emit)
-        vg.addWidget(self.vn_name_edit)
-
-        color_row = QHBoxLayout()
-        color_row.setSpacing(8)
-        color_row.addWidget(_make_dim_label("Name Tag Color:"))
-        self._vn_color_preview = QLabel()
-        self._vn_color_preview.setFixedSize(28, 28)
-        self._vn_color_preview.setStyleSheet("background: #FFFFFF; border: 1px solid #2e2e42; border-radius: 4px;")
-        color_row.addWidget(self._vn_color_preview)
-        pick_btn = _btn("Pick…", small=True)
-        pick_btn.clicked.connect(self._pick_vn_color)
-        color_row.addWidget(pick_btn)
-        color_row.addStretch()
-        vg.addLayout(color_row)
-
-        self._vnchar_group.setVisible(False)
-        self._layout.addWidget(self._vnchar_group)
 
         # ── GUI config ──
         self._gui_group = QWidget()
@@ -423,11 +391,31 @@ class ObjectDefEditor(QWidget):
         ag.addWidget(_section("ANIMATION"))
         ag.addWidget(_divider())
 
-        ag.addWidget(_make_dim_label("Animation File (.ani):"))
-        self.ani_file_combo = QComboBox()
-        self.ani_file_combo.setStyleSheet(_field_style())
-        self.ani_file_combo.currentIndexChanged.connect(self._emit)
-        ag.addWidget(self.ani_file_combo)
+        # Slot list header row
+        slot_hdr = QHBoxLayout()
+        slot_hdr.addWidget(_make_dim_label("Animation Slots:"))
+        slot_hdr.addStretch()
+        self._ani_add_slot_btn = QPushButton("+ Add Slot")
+        self._ani_add_slot_btn.setStyleSheet(
+            f"QPushButton {{ background: {SURF2}; color: {TEXT}; border: 1px solid {BORDER};"
+            f" border-radius: 4px; padding: 3px 8px; font-size: 11px; }}"
+            f"QPushButton:hover {{ background: {ACCENT}; border-color: {ACCENT}; }}"
+        )
+        self._ani_add_slot_btn.clicked.connect(self._ani_add_slot)
+        slot_hdr.addWidget(self._ani_add_slot_btn)
+        ag.addLayout(slot_hdr)
+
+        # Container that holds one row per slot — rebuilt by _ani_rebuild_slots()
+        self._ani_slots_container = QWidget()
+        self._ani_slots_layout = QVBoxLayout(self._ani_slots_container)
+        self._ani_slots_layout.setContentsMargins(0, 0, 0, 0)
+        self._ani_slots_layout.setSpacing(3)
+        ag.addWidget(self._ani_slots_container)
+
+        # Internal slot data: list of {"name": str, "ani_file_id": str}
+        self._ani_slots_data: list = []
+
+        ag.addWidget(_divider())
 
         self.ani_loop_check = QCheckBox("Loop")
         self.ani_loop_check.setStyleSheet(_field_style())
@@ -467,6 +455,20 @@ class ObjectDefEditor(QWidget):
         fps_row.addWidget(self.ani_fps_spin)
         fps_row.addStretch()
         ag.addLayout(fps_row)
+
+        # Default flip state
+        flip_row = QHBoxLayout()
+        flip_row.setSpacing(12)
+        self.ani_flip_h_check = QCheckBox("Flip H")
+        self.ani_flip_h_check.setStyleSheet(_field_style())
+        self.ani_flip_h_check.stateChanged.connect(self._emit)
+        flip_row.addWidget(self.ani_flip_h_check)
+        self.ani_flip_v_check = QCheckBox("Flip V")
+        self.ani_flip_v_check.setStyleSheet(_field_style())
+        self.ani_flip_v_check.stateChanged.connect(self._emit)
+        flip_row.addWidget(self.ani_flip_v_check)
+        flip_row.addStretch()
+        ag.addLayout(flip_row)
 
         self._ani_group.setVisible(False)
         self._layout.addWidget(self._ani_group)
@@ -611,6 +613,11 @@ class ObjectDefEditor(QWidget):
         self.gravity_check.setChecked(False)
         self.gravity_check.stateChanged.connect(self._emit)
         self._layout.addWidget(self.gravity_check)
+        self.mover_check = QCheckBox("Participates in zone checks")
+        self.mover_check.setStyleSheet(_field_style())
+        self.mover_check.setChecked(True)
+        self.mover_check.stateChanged.connect(self._emit)
+        self._layout.addWidget(self.mover_check)
 
         # Frames
         self._frames_section = QWidget()
@@ -691,9 +698,6 @@ class ObjectDefEditor(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        # Track current VN color
-        self._vn_color = "#FFFFFF"
-
     def _emit(self):
         if self._suppress or self._obj is None:
             return
@@ -706,8 +710,7 @@ class ObjectDefEditor(QWidget):
         o.height = self.height_spin.value()
         o.visible_default = self.visible_check.isChecked()
         o.affected_by_gravity = self.gravity_check.isChecked()
-        o.vn_display_name = self.vn_name_edit.text()
-        o.vn_name_color = self._vn_color
+        o.is_mover = self.mover_check.isChecked()
         # GUI fields
         o.gui_text = self.gui_text_edit.text()
         o.gui_text_color = self._gui_text_color
@@ -721,12 +724,14 @@ class ObjectDefEditor(QWidget):
         o.gui_highlight_color = self._gui_highlight_color
         o.gui_image_id = self.gui_image_combo.currentData() or ""
         # Animation fields
-        o.ani_file_id = self.ani_file_combo.currentData() or ""
+        o.ani_slots = [dict(s) for s in self._ani_slots_data]
         o.ani_loop = self.ani_loop_check.isChecked()
         o.ani_play_on_spawn = self.ani_play_on_spawn_check.isChecked()
         o.ani_start_paused = self.ani_start_paused_check.isChecked()
         o.ani_pause_frame = self.ani_pause_frame_spin.value()
         o.ani_fps_override = self.ani_fps_spin.value()
+        o.ani_flip_h = self.ani_flip_h_check.isChecked()
+        o.ani_flip_v = self.ani_flip_v_check.isChecked()
         # LayerAnimation fields
         o.layer_anim_id = self.layer_anim_combo.currentData() or ""
         o.layer_anim_blink = self.layer_anim_blink_check.isChecked()
@@ -740,11 +745,88 @@ class ObjectDefEditor(QWidget):
         o.camera_zoom_default = self.cam_zoom_spin.value()
         self.changed.emit()
 
+    def _ani_rebuild_slots(self):
+        """Rebuild the slot list UI from self._ani_slots_data."""
+        # Clear existing rows
+        while self._ani_slots_layout.count():
+            item = self._ani_slots_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        project = self._project
+        ani_options = []  # list of (display_name, ani_id)
+        if project and hasattr(project, 'animation_exports'):
+            ani_options = [(a.name, a.id) for a in project.animation_exports]
+
+        for i, slot in enumerate(self._ani_slots_data):
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+
+            name_edit = QLineEdit(slot.get("name", str(i)))
+            name_edit.setPlaceholderText("slot name")
+            name_edit.setFixedWidth(72)
+            name_edit.setStyleSheet(_field_style())
+
+            combo = QComboBox()
+            combo.setStyleSheet(_field_style())
+            combo.addItem("(none)", "")
+            for aname, aid in ani_options:
+                combo.addItem(aname, aid)
+            # Set current selection
+            current_fid = slot.get("ani_file_id", "")
+            for ci in range(combo.count()):
+                if combo.itemData(ci) == current_fid:
+                    combo.setCurrentIndex(ci)
+                    break
+
+            remove_btn = QPushButton("✕")
+            remove_btn.setFixedSize(22, 22)
+            remove_btn.setStyleSheet(
+                f"QPushButton {{ background: {SURF2}; color: {DANGER}; border: 1px solid {BORDER};"
+                f" border-radius: 3px; font-size: 10px; padding: 0; }}"
+                f"QPushButton:hover {{ background: {DANGER}; color: #fff; }}"
+            )
+
+            row.addWidget(name_edit)
+            row.addWidget(combo, stretch=1)
+            row.addWidget(remove_btn)
+            self._ani_slots_layout.addWidget(row_widget)
+
+            # Closures capturing index i via default arg
+            def _on_name_changed(text, idx=i):
+                if idx < len(self._ani_slots_data):
+                    self._ani_slots_data[idx]["name"] = text
+                    self._emit()
+
+            def _on_combo_changed(_ci, idx=i):
+                if idx < len(self._ani_slots_data):
+                    c = self._ani_slots_layout.itemAt(idx).widget().findChildren(QComboBox)[0]
+                    self._ani_slots_data[idx]["ani_file_id"] = c.currentData() or ""
+                    self._emit()
+
+            def _on_remove(checked=False, idx=i):
+                if idx < len(self._ani_slots_data):
+                    self._ani_slots_data.pop(idx)
+                    self._ani_rebuild_slots()
+                    self._emit()
+
+            name_edit.textChanged.connect(_on_name_changed)
+            combo.currentIndexChanged.connect(_on_combo_changed)
+            remove_btn.clicked.connect(_on_remove)
+
+    def _ani_add_slot(self):
+        """Add a new empty slot to the list."""
+        next_name = str(len(self._ani_slots_data))
+        self._ani_slots_data.append({"name": next_name, "ani_file_id": ""})
+        self._ani_rebuild_slots()
+        self._emit()
+
     def _on_behavior_type_changed(self, btype: str):
         if self._obj is not None and not self._suppress:
             self._obj.behavior_type = btype
             self.changed.emit()
-        self._vnchar_group.setVisible(btype == "VNCharacter")
         is_gui = btype.startswith("GUI_")
         self._gui_group.setVisible(is_gui)
         self._ani_group.setVisible(btype == "Animation")
@@ -753,15 +835,6 @@ class ObjectDefEditor(QWidget):
     def _on_camera_bounds_changed(self, state):
         self._cam_bounds_row.setVisible(bool(state))
         self._emit()
-
-    def _pick_vn_color(self):
-        color = QColorDialog.getColor(QColor(self._vn_color), self, "Pick Name Tag Color")
-        if color.isValid():
-            self._vn_color = color.name()
-            self._vn_color_preview.setStyleSheet(
-                f"background: {self._vn_color}; border: 1px solid #2e2e42; border-radius: 4px;"
-            )
-            self._emit()
 
     def _pick_gui_text_color(self):
         color = QColorDialog.getColor(QColor(self._gui_text_color), self, "Pick Text Color")
@@ -910,20 +983,12 @@ class ObjectDefEditor(QWidget):
         self.height_spin.setValue(obj.height)
         self.visible_check.setChecked(obj.visible_default)
         self.gravity_check.setChecked(getattr(obj, 'affected_by_gravity', False))
+        self.mover_check.setChecked(getattr(obj, 'is_mover', True))
 
         # Behavior type
         idx = self.behavior_type_combo.findText(obj.behavior_type)
         if idx >= 0:
             self.behavior_type_combo.setCurrentIndex(idx)
-        self._vnchar_group.setVisible(obj.behavior_type == "VNCharacter")
-
-        # VNCharacter fields
-        self.vn_name_edit.setText(obj.vn_display_name)
-        self._vn_color = obj.vn_name_color or "#FFFFFF"
-        self._vn_color_preview.setStyleSheet(
-            f"background: {self._vn_color}; border: 1px solid #2e2e42; border-radius: 4px;"
-        )
-
         # GUI fields
         is_gui = obj.behavior_type.startswith("GUI_")
         is_cam = obj.behavior_type == "Camera"
@@ -934,6 +999,7 @@ class ObjectDefEditor(QWidget):
         self._size_row.setVisible(not is_cam)
         self.visible_check.setVisible(not is_cam)
         self.gravity_check.setVisible(not is_cam)
+        self.mover_check.setVisible(not is_cam)
         self._frames_section.setVisible(not is_cam)
         
         if is_gui:
@@ -1019,23 +1085,15 @@ class ObjectDefEditor(QWidget):
 
         # Animation fields
         self._ani_group.setVisible(obj.behavior_type == "Animation")
-        self.ani_file_combo.blockSignals(True)
-        self.ani_file_combo.clear()
-        self.ani_file_combo.addItem("(none)", "")
-        if hasattr(project, 'animation_exports'):
-            for ani in project.animation_exports:
-                self.ani_file_combo.addItem(ani.name, ani.id)
-        if getattr(obj, 'ani_file_id', ''):
-            for i in range(self.ani_file_combo.count()):
-                if self.ani_file_combo.itemData(i) == obj.ani_file_id:
-                    self.ani_file_combo.setCurrentIndex(i)
-                    break
-        self.ani_file_combo.blockSignals(False)
+        self._ani_slots_data = [dict(s) for s in getattr(obj, 'ani_slots', [])]
+        self._ani_rebuild_slots()
         self.ani_loop_check.setChecked(getattr(obj, 'ani_loop', True))
         self.ani_play_on_spawn_check.setChecked(getattr(obj, 'ani_play_on_spawn', True))
         self.ani_start_paused_check.setChecked(getattr(obj, 'ani_start_paused', False))
         self.ani_pause_frame_spin.setValue(getattr(obj, 'ani_pause_frame', 0))
         self.ani_fps_spin.setValue(getattr(obj, 'ani_fps_override', 0))
+        self.ani_flip_h_check.setChecked(getattr(obj, 'ani_flip_h', False))
+        self.ani_flip_v_check.setChecked(getattr(obj, 'ani_flip_v', False))
 
         # LayerAnimation fields
         self._layer_anim_group.setVisible(obj.behavior_type == "LayerAnimation")
@@ -1499,8 +1557,9 @@ class CollisionEditorPanel(QWidget):
         if self._obj is None:
             return 0
         # Animation behavior type: frame count comes from the .ani export
-        if self._obj.behavior_type == "Animation" and self._obj.ani_file_id and self._project:
-            ani = self._project.get_animation_export(self._obj.ani_file_id)
+        _ani_fid = self._obj.ani_slots[0].get("ani_file_id", "") if self._obj.ani_slots else ""
+        if self._obj.behavior_type == "Animation" and _ani_fid and self._project:
+            ani = self._project.get_animation_export(_ani_fid)
             if ani:
                 return max(ani.frame_count, 1)
         return max(len(self._obj.frames), 1)
@@ -1535,9 +1594,10 @@ class CollisionEditorPanel(QWidget):
 
         # load sprite pixmap for current frame
         pm = None
-        if self._project and self._obj.behavior_type == "Animation" and self._obj.ani_file_id:
+        _ani_fid = self._obj.ani_slots[0].get("ani_file_id", "") if self._obj.ani_slots else ""
+        if self._project and self._obj.behavior_type == "Animation" and _ani_fid:
             # Animation object: crop frame from spritesheet
-            ani = self._project.get_animation_export(self._obj.ani_file_id)
+            ani = self._project.get_animation_export(_ani_fid)
             if ani and ani.spritesheet_path and self._project.project_folder:
                 import os
                 sheet_path = os.path.join(self._project.project_folder, "animations", ani.spritesheet_path)
@@ -1600,8 +1660,9 @@ class CollisionEditorPanel(QWidget):
         self._obj.sync_collision_frames(self._frame_count())
         # default box centered on object — use ani frame size for Animation types
         obj_w, obj_h = self._obj.width, self._obj.height
-        if self._obj.behavior_type == "Animation" and self._obj.ani_file_id and self._project:
-            ani = self._project.get_animation_export(self._obj.ani_file_id)
+        _ani_fid = self._obj.ani_slots[0].get("ani_file_id", "") if self._obj.ani_slots else ""
+        if self._obj.behavior_type == "Animation" and _ani_fid and self._project:
+            ani = self._project.get_animation_export(_ani_fid)
             if ani:
                 obj_w, obj_h = ani.frame_width, ani.frame_height
         bw = max(obj_w // 2, 8)
@@ -1803,8 +1864,6 @@ class ObjectsTab(QWidget):
         self.def_list.clear()
         for od in self._project.object_defs:
             item = QListWidgetItem(od.name)
-            if od.behavior_type == "VNCharacter":
-                item.setForeground(QColor("#f59e0b"))
             self.def_list.addItem(item)
         self.def_list.blockSignals(False)
 

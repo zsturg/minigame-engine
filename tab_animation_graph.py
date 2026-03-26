@@ -309,6 +309,242 @@ def register_node(cls):
     NODE_TYPES[cls.__name__] = cls
     return cls
 
+# ==========================================
+# 3a. LLM COPY/PASTE HELPERS
+# ==========================================
+
+def _ani_format_props(node, frame=0):
+    """Return 'PropName=value ...' string for non-default properties only.
+    If a property has keyframes, emits PropName={frame:val,frame:val,...} instead of a scalar.
+    """
+    parts = []
+    for name, prop in node.properties.items():
+        if prop.keyframes:
+            # Serialize all keyframes — always emit regardless of values
+            inner = ",".join(
+                f"{f}:{round(v, 4)}" if isinstance(v, float) else f"{f}:{v}"
+                for f, v in sorted(prop.keyframes.items())
+            )
+            parts.append(f"{name}={{{inner}}}")
+        else:
+            # No keyframes — emit scalar only if it differs from the class default
+            val = prop.get_value(frame)
+            if val != prop.default_value:
+                if isinstance(val, float):
+                    parts.append(f"{name}={round(val, 4)}")
+                else:
+                    parts.append(f"{name}={val}")
+    return "  ".join(parts)
+
+
+def ani_canvas_to_text(tab, selected_only=False):
+    """Serialize animation graph nodes to human/LLM-readable text."""
+    from PySide6.QtWidgets import QGraphicsScene
+    # Collect GfxNode items
+    all_gfx = [item for item in tab.scene.items() if isinstance(item, GfxNode)]
+    if selected_only:
+        gfx_items = [item for item in all_gfx if item.isSelected()]
+        if not gfx_items:
+            gfx_items = all_gfx
+    else:
+        gfx_items = all_gfx
+
+    # Build local id map
+    local_id = {gfx.logic: i for i, gfx in enumerate(gfx_items)}
+    logic_to_gfx = {gfx.logic: gfx for gfx in gfx_items}
+
+    lines = ["# Animation Graph"]
+    # NODE lines
+    for i, gfx in enumerate(gfx_items):
+        node = gfx.logic
+        cls_name = type(node).__name__
+        p = gfx.pos()
+        prop_str = _ani_format_props(node, 0)
+        line = f"NODE {cls_name}  id={i}  pos={round(p.x(),1)},{round(p.y(),1)}"
+        if prop_str:
+            line += f"  {prop_str}"
+        lines.append(line)
+        # Extra data (e.g. ColorRampNode color_stops, ImageTextureNode image_path)
+        extra = node._extra_to_dict()
+        if extra:
+            lines.append(f"# extra: {json.dumps(extra, separators=(',', ':'))}")
+
+    # CONNECT lines
+    for gfx in gfx_items:
+        node = gfx.logic
+        if node not in local_id:
+            continue
+        to_id = local_id[node]
+        for slot_idx, input_node in enumerate(node.inputs):
+            if input_node is not None and input_node in local_id:
+                from_id = local_id[input_node]
+                lines.append(f"CONNECT from={from_id}  to={to_id}  input={slot_idx}")
+
+    return "\n".join(lines)
+
+
+def ani_text_to_nodes(text):
+    """Parse animation graph text back into node specs and connection specs.
+
+    Returns (node_specs, connection_specs, warnings).
+    node_specs: list of dicts with keys cls_name, local_id, pos, props, extra
+    connection_specs: list of dicts with keys from_id, to_id, input_slot
+    warnings: list of str
+    """
+    node_specs = []
+    connection_specs = []
+    warnings = []
+    last_node_spec = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            # Check for attached extra data
+            if line.startswith("# extra:") and last_node_spec is not None:
+                try:
+                    extra_json = line[len("# extra:"):].strip()
+                    last_node_spec["extra"] = json.loads(extra_json)
+                except Exception as e:
+                    warnings.append(f"Could not parse extra data: {e}")
+            continue
+
+        if line.startswith("NODE "):
+            tokens = line.split()
+            # tokens[0] = "NODE", tokens[1] = ClassName, rest are key=value
+            if len(tokens) < 2:
+                warnings.append(f"Malformed NODE line: {line}")
+                continue
+            cls_name = tokens[1]
+            if cls_name not in NODE_TYPES:
+                warnings.append(f"Unknown node type '{cls_name}' — skipped.")
+                last_node_spec = None
+                continue
+
+            spec = {"cls_name": cls_name, "local_id": None, "pos": QPointF(0, 0),
+                    "props": {}, "extra": {}}
+            for tok in tokens[2:]:
+                if "=" not in tok:
+                    continue
+                k, v = tok.split("=", 1)
+                k = k.strip(); v = v.strip()
+                if k == "id":
+                    try:
+                        spec["local_id"] = int(v)
+                    except ValueError:
+                        pass
+                elif k == "pos":
+                    try:
+                        px, py = v.split(",")
+                        spec["pos"] = QPointF(float(px), float(py))
+                    except Exception:
+                        pass
+                else:
+                    # Property value — check for keyframe dict syntax {f:v,f:v,...}
+                    if v.startswith("{") and v.endswith("}"):
+                        try:
+                            inner = v[1:-1]  # strip braces
+                            kf = {}
+                            for pair in inner.split(","):
+                                if ":" not in pair:
+                                    continue
+                                kf_frame, kf_val = pair.split(":", 1)
+                                kf[int(kf_frame.strip())] = float(kf_val.strip())
+                            spec["props"][k] = kf
+                        except Exception:
+                            warnings.append(f"Could not parse keyframes for '{k}': {v}")
+                    else:
+                        # Plain scalar — try numeric first, then raw string
+                        try:
+                            spec["props"][k] = float(v)
+                        except ValueError:
+                            spec["props"][k] = v
+
+            node_specs.append(spec)
+            last_node_spec = spec
+
+        elif line.startswith("CONNECT "):
+            tokens = line.split()
+            conn = {"from_id": None, "to_id": None, "input_slot": 0}
+            for tok in tokens[1:]:
+                if "=" not in tok:
+                    continue
+                k, v = tok.split("=", 1)
+                k = k.strip(); v = v.strip()
+                try:
+                    if k == "from":
+                        conn["from_id"] = int(v)
+                    elif k == "to":
+                        conn["to_id"] = int(v)
+                    elif k == "input":
+                        conn["input_slot"] = int(v)
+                except ValueError:
+                    pass
+            if conn["from_id"] is not None and conn["to_id"] is not None:
+                connection_specs.append(conn)
+            else:
+                warnings.append(f"Malformed CONNECT line: {line}")
+
+    return node_specs, connection_specs, warnings
+
+
+def build_ani_legend_text():
+    """Build a human/LLM-readable reference document of all registered node types."""
+    # Node types that should not be instantiated (they load files)
+    skip_instantiate = {"ImageTextureNode", "PNGSequenceNode"}
+
+    lines = [
+        "=== VITA ADVENTURE CREATOR — ANIMATION GRAPH NODE LEGEND ===",
+        "Use these class names in NODE lines when writing or editing graphs.",
+        "",
+        "━━ NODE TYPES ━━",
+        "",
+    ]
+
+    for cls_name, cls in sorted(NODE_TYPES.items()):
+        if cls_name in skip_instantiate:
+            lines.append(f"  {cls_name}")
+            lines.append(f"    (contains file path data — omit or set manually after paste)")
+            lines.append("")
+            continue
+        try:
+            node = cls()
+        except Exception:
+            lines.append(f"  {cls_name}  (could not inspect)")
+            lines.append("")
+            continue
+
+        num_inputs = len(node.inputs)
+        lines.append(f"  {cls_name:<30} inputs={num_inputs}")
+
+        for prop_name, prop in node.properties.items():
+            if prop.is_enum and prop.enum_items:
+                items_str = ", ".join(str(x) for x in prop.enum_items)
+                lines.append(f"    {prop_name:<20} enum [{items_str}]  default={prop.default_value}")
+            elif prop.is_bool:
+                lines.append(f"    {prop_name:<20} bool  default={prop.default_value}")
+            elif prop.is_string:
+                lines.append(f"    {prop_name:<20} string  default={repr(prop.default_value)}")
+            else:
+                lines.append(f"    {prop_name:<20} float ({prop.min_val}–{prop.max_val})  default={prop.default_value}")
+        lines.append("")
+
+    lines += [
+        "━━ GRAPH TEXT FORMAT ━━",
+        "  NODE ClassName  id=N  pos=X,Y  PropName=value ...",
+        "  # extra: {\"color_stops\": [...]}   ← optional, for ColorRampNode etc.",
+        "  CONNECT from=<id>  to=<id>  input=<slot>",
+        "",
+        "  KEYFRAMES: Use {frame:val,frame:val,...} instead of a plain scalar to animate a property.",
+        "  Example:  Factor={0:0.0,15:1.0,30:0.0}  (no spaces inside the braces)",
+        "  Omit a prop entirely to keep its default. Omit keyframes to use a static value.",
+        "",
+        "  OutputNode is always present. Paste will skip creating a second OutputNode.",
+        "  id values are local to this paste batch, starting at 0.",
+        "  Omit props with default values to keep text compact.",
+    ]
+    return "\n".join(lines)
+
+
 class BaseNode:
     def __init__(self, name):
         self.name = name
@@ -1559,8 +1795,8 @@ class BrickPatternNode(BaseNode):
 class TileablePatternNode(BaseNode):
     def __init__(self):
         super().__init__("Tileable Patterns")
-        self.inputs = [None, None]
-        self.input_names = ["UV Warp", "Mask"]
+        self.inputs = [None, None, None]
+        self.input_names = ["UV Warp", "Mask", "Input Texture"]
 
         # --- 1. CORE TILE STRUCTURES ---
         layouts = ["Grid", "Brick", "Half-Drop", "Mirror (Ogee)", "Hex Stagger", "Polar Fold"]
@@ -1574,7 +1810,7 @@ class TileablePatternNode(BaseNode):
         # --- 2. SHAPES & GEOMETRY ---
         shapes = ["Circle", "Square", "Stripe V", "Cross", "Cellular (Voronoi)",
                   "Checkerboard", "Diagonal Stripes", "Sine Wave", "Chevron/ZigZag",
-                  "N-Point Star", "Value Noise"]
+                  "N-Point Star", "Value Noise", "Input Texture"]
         self.add_property("Shape", 0.0, 0.0, len(shapes)-1, is_enum=True, items=shapes)
 
         # --- 3. ADVANCED CONTROLS ---
@@ -1711,6 +1947,24 @@ class TileablePatternNode(BaseNode):
             c = hash2(iU, iV + 1.0)
             e = hash2(iU + 1.0, iV + 1.0)
             mask = a + (b - a) * u + (c - a) * v + (a - b - c + e) * u * v
+            is_direct_mask = True
+
+        elif shape_type == 11: # INPUT TEXTURE
+            if self.inputs[2]:
+                tex = self.inputs[2].evaluate(frame, w, h)
+                # cell_U / cell_V are 0->1 within each tile cell.
+                # Use them to index into the texture via nearest-neighbour lookup.
+                tex_h, tex_w = tex.shape[:2]
+                ix = np.clip((cell_U * tex_w).astype(np.int32), 0, tex_w - 1)
+                iy = np.clip((cell_V * tex_h).astype(np.int32), 0, tex_h - 1)
+                # Luminance from RGB channels as the tile mask
+                r = tex[iy, ix, 0]
+                g = tex[iy, ix, 1]
+                b_ch = tex[iy, ix, 2]
+                mask = 0.2126 * r + 0.7152 * g + 0.0722 * b_ch
+            else:
+                # No texture connected — solid white so the node doesn't silently break
+                mask = np.ones((h, w), dtype=np.float32)
             is_direct_mask = True
 
         # Mask modifier via Socket 1
@@ -3107,29 +3361,75 @@ class UICheckboxNode(BaseNode):
 # ==========================================
 # 4. VISUALS
 # ==========================================
+
+# Shared palette matching behavior_node_graph.py
+_C = {
+    "body_bg":      QColor("#1a1a24"),
+    "border":       QColor("#2e2e42"),
+    "border_sel":   QColor("#7c6aff"),
+    "port_in":      QColor("#7c6aff"),
+    "port_out":     QColor("#f59e0b"),
+    "port_border":  QColor("#1a1a24"),
+    "port_hover":   QColor("#ffffff"),
+    "text_title":   QColor("#e8e6f0"),
+    "text_label":   QColor("#9090a8"),
+    "edge_default": QColor("#f59e0b"),
+}
+
 class GfxSocket(QGraphicsItem):
+    RADIUS = 5
+
     def __init__(self, parent_node, index, is_input=True, label=""):
         super().__init__(parent_node)
         self.parent_node = parent_node
         self.index = index
         self.is_input = is_input
-        self.radius = 5
-        self.setPos(-6 if is_input else parent_node.width + 6, 35 + (index * 25))
+        self.radius = self.RADIUS
         self.label = label
+        self._hovered = False
         self.setAcceptHoverEvents(True)
+        self._reposition()
+
+    def _reposition(self):
+        header_h = 28
+        y = header_h + 10 + self.index * 22
+        x = 0 if self.is_input else self.parent_node.width
+        self.setPos(x, y)
 
     def boundingRect(self):
-        return QRectF(-self.radius - 2, -self.radius - 2, (self.radius + 2) * 2, (self.radius + 2) * 2)
+        r = self.radius + 4
+        return QRectF(-r, -r, r * 2, r * 2)
 
     def paint(self, painter, option, widget):
-        c = QColor("#4ea8de") if self.is_input else QColor("#e05488")
-        painter.setBrush(c)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(-self.radius, -self.radius, self.radius * 2, self.radius * 2)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fill = _C["port_hover"] if self._hovered else (
+            _C["port_in"] if self.is_input else _C["port_out"])
+        painter.setPen(QPen(_C["port_border"], 1.5))
+        painter.setBrush(QBrush(fill))
+        r = self.radius
+        painter.drawEllipse(-r, -r, r * 2, r * 2)
         if self.label:
-            painter.setPen(QColor("#aaa"))
-            r = QRectF(12 if self.is_input else -52, -10, 40, 20)
-            painter.drawText(r, Qt.AlignmentFlag.AlignLeft if self.is_input else Qt.AlignmentFlag.AlignRight, self.label)
+            painter.setPen(_C["text_label"])
+            font = QFont("Segoe UI", 8)
+            painter.setFont(font)
+            if self.is_input:
+                painter.drawText(QRectF(r + 4, -8, 60, 16),
+                                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                                 self.label)
+            else:
+                painter.drawText(QRectF(-64 - r, -8, 60, 16),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                 self.label)
+
+    def hoverEnterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().hoverLeaveEvent(event)
 
 NODE_COLORS = {
     NoiseNode: QColor(80, 50, 100),
@@ -3180,11 +3480,15 @@ NODE_COLORS = {
 }
 
 class GfxNode(QGraphicsItem):
+    HEADER_H = 28
+    CORNER   = 8
+    WIDTH    = 150
+
     def __init__(self, logic_node, scene_ref):
         super().__init__()
         self.logic = logic_node
         self.scene_ref = scene_ref
-        self.width = 120
+        self.width = self.WIDTH
         self.height = 80
         self.setPos(logic_node.pos)
         self.setFlags(
@@ -3211,7 +3515,7 @@ class GfxNode(QGraphicsItem):
             ParticleEmitterNode: [("Sprite",)],
             RandomSelectNode: [("1",), ("2",), ("3",), ("4",)],
             BrickPatternNode: [],
-            TileablePatternNode: [("UV",), ("Mask",)],
+            TileablePatternNode: [("UV",), ("Mask",), ("Tex",)],
             PolarCoordsNode: [("Img",)],
             DisplacementNode: [("Src",), ("Map",)],
             ColorAdjustNode: [("Img",)],
@@ -3243,24 +3547,49 @@ class GfxNode(QGraphicsItem):
             self.in_sockets.append(GfxSocket(self, i, True, label))
         if not isinstance(self.logic, OutputNode):
             self.out_sockets.append(GfxSocket(self, 0, False))
-        self.height = 40 + max(len(self.in_sockets), len(self.out_sockets), 1) * 20
+        slot_count = max(len(self.in_sockets), len(self.out_sockets), 1)
+        self.height = self.HEADER_H + 12 + slot_count * 22 + 10
 
     def boundingRect(self):
         return QRectF(0, 0, self.width, self.height)
 
     def paint(self, painter, option, widget):
-        rect = self.boundingRect()
-        painter.setBrush(QColor(40, 40, 40))
-        pc = QColor(255, 165, 0) if self.isSelected() else QColor(20, 20, 20)
-        painter.setPen(QPen(pc, 2 if self.isSelected() else 1))
-        painter.drawRoundedRect(rect, 4, 4)
-        hc = NODE_COLORS.get(type(self.logic), QColor(60, 60, 60))
-        painter.setBrush(hc)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect   = self.boundingRect()
+        corner = self.CORNER
+        hdr_h  = self.HEADER_H
+        w      = self.width
+        sel    = self.isSelected()
+
+        # Body (full rounded rect, dark background)
+        painter.setBrush(QBrush(_C["body_bg"]))
+        painter.setPen(QPen(_C["border_sel"] if sel else _C["border"],
+                            2 if sel else 1))
+        painter.drawRoundedRect(rect, corner, corner)
+
+        # Header band — draw rounded rect then cover bottom half with body color
+        # so only the top corners are rounded, bottom edge is flat
+        hc = NODE_COLORS.get(type(self.logic), QColor(60, 60, 80))
+        painter.setBrush(QBrush(hc))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(0, 0, self.width, 25, 4, 4)
-        painter.drawRect(0, 20, self.width, 5)
-        painter.setPen(QColor(220, 220, 220))
-        painter.drawText(QRectF(0, 0, self.width, 25), Qt.AlignmentFlag.AlignCenter, self.logic.name)
+        painter.drawRoundedRect(QRectF(0, 0, w, hdr_h), corner, corner)
+        # Fill bottom strip of header to square off the bottom corners
+        painter.drawRect(QRectF(0, hdr_h - corner, w, corner))
+
+        # Title text — drawn on top of header, no clipping needed
+        painter.setPen(_C["text_title"])
+        font = QFont("Segoe UI", 9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(QRectF(8, 0, w - 16, hdr_h),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                         self.logic.name)
+
+        # Selection glow
+        if sel:
+            painter.setPen(QPen(_C["border_sel"], 2.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), corner, corner)
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and self.scene():
@@ -3290,10 +3619,10 @@ class GfxConnection(QGraphicsPathItem):
         e = self.in_sock.scenePos()
         path = QPainterPath()
         path.moveTo(s)
-        c = abs(e.x() - s.x()) * 0.5
-        path.cubicTo(s + QPointF(c, 0), e - QPointF(c, 0), e)
+        dx = max(abs(e.x() - s.x()) * 0.55, 60)
+        path.cubicTo(s + QPointF(dx, 0), e - QPointF(dx, 0), e)
         self.setPath(path)
-        self.setPen(QPen(QColor(150, 150, 150), 2))
+        self.setPen(QPen(_C["edge_default"], 2))
 
 # ==========================================
 # 5. NAVIGATION
@@ -3301,13 +3630,13 @@ class GfxConnection(QGraphicsPathItem):
 class InfiniteScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setBackgroundBrush(QColor(35, 35, 35))
+        self.setBackgroundBrush(QColor("#16161c"))
         self.setSceneRect(-100000, -100000, 200000, 200000)
 
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
         gs = 50
-        lc = QColor(50, 50, 50)
+        lc = QColor("#2e2e42")
         left = int(rect.left()) - (int(rect.left()) % gs)
         top = int(rect.top()) - (int(rect.top()) % gs)
         lines = []
@@ -3420,6 +3749,10 @@ class GraphView(QGraphicsView):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         pos = self.mapToScene(event.pos())
+
+        menu.addAction("📋 Copy Nodes as Text",    lambda: self.window_ref.copy_nodes_as_text())
+        menu.addAction("📝 Paste Nodes from Text", lambda: self.window_ref.paste_nodes_from_text(pos))
+        menu.addSeparator()
 
         def spawn(cls):
             n = cls()
@@ -4147,13 +4480,25 @@ class ExportAnimationDialog(QDialog):
         name_row.addWidget(self.name_edit)
         layout.addLayout(name_row)
         
-        # Options
-        self.compress_check = QCheckBox("Compress to 8-bit indexed (Vita optimized)")
-        self.compress_check.setChecked(True)
-        layout.addWidget(self.compress_check)
-        
+        # Sheet count
+        sheet_row = QHBoxLayout()
+        sheet_row.addWidget(QLabel("Spritesheet count:"))
+        self.sheet_combo = QComboBox()
+        self.sheet_combo.addItems(["1", "2", "4", "8", "16", "Auto (best quality)"])
+        self.sheet_combo.setCurrentIndex(0)
+        sheet_row.addWidget(self.sheet_combo)
+        layout.addLayout(sheet_row)
+
+        # Quality estimate label
+        self.quality_label = QLabel("")
+        self.quality_label.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(self.quality_label)
+
+        self.sheet_combo.currentIndexChanged.connect(self._update_quality_estimate)
+        self.type_combo.currentIndexChanged.connect(self._update_quality_estimate)
+
         # Info
-        info = QLabel("This will render all frames, pack them into a spritesheet,\nand save metadata for the Lua exporter.")
+        info = QLabel("This will render all frames, pack them into spritesheets,\nand save metadata for the Lua exporter.")
         info.setStyleSheet("color: #888; font-size: 10px; margin: 10px 0;")
         layout.addWidget(info)
         
@@ -4168,11 +4513,55 @@ class ExportAnimationDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
     
+    def _get_sheet_count(self):
+        """Return selected sheet count, or 0 for Auto."""
+        idx = self.sheet_combo.currentIndex()
+        mapping = [1, 2, 4, 8, 16, 0]  # 0 = auto
+        return mapping[idx]
+
+    def _update_quality_estimate(self):
+        """Show estimated per-frame resolution based on sheet count selection."""
+        is_trans = self.type_combo.currentIndex() == 1
+        if is_trans:
+            self.quality_label.setText("Transitions use fixed 240×136 frames.")
+            return
+        w, h = PROJECT.width, PROJECT.height
+        total = PROJECT.duration
+        if total < 1 or w < 1 or h < 1:
+            self.quality_label.setText("")
+            return
+        sheet_count = self._get_sheet_count()
+        MAX_SHEET = 2048
+        if sheet_count == 0:
+            # Auto: find minimum sheets for full resolution
+            sheet_count = 1
+            while True:
+                fpg = int(np.ceil(total / sheet_count))
+                cols = int(np.ceil(np.sqrt(fpg)))
+                rows = int(np.ceil(fpg / cols))
+                if cols * w <= MAX_SHEET and rows * h <= MAX_SHEET:
+                    break
+                sheet_count += 1
+            self.quality_label.setText(f"Auto: {sheet_count} sheets — full resolution {w}×{h} per frame")
+        else:
+            fpg = int(np.ceil(total / sheet_count))
+            cols = int(np.ceil(np.sqrt(fpg)))
+            rows = int(np.ceil(fpg / cols))
+            sw = cols * w
+            sh = rows * h
+            if sw > MAX_SHEET or sh > MAX_SHEET:
+                scale = min(MAX_SHEET / sw, MAX_SHEET / sh)
+                est_w = max(1, int(w * scale))
+                est_h = max(1, int(h * scale))
+                self.quality_label.setText(f"Estimated frame size: {est_w}×{est_h} (downscaled from {w}×{h})")
+            else:
+                self.quality_label.setText(f"Full resolution: {w}×{h} per frame")
+
     def get_settings(self):
         return {
             'type': 'trans' if self.type_combo.currentIndex() == 1 else 'ani',
             'name': self.name_edit.text() or 'animation',
-            'compress': self.compress_check.isChecked(),
+            'sheet_count': self._get_sheet_count(),
         }
 
 # ==========================================
@@ -4246,18 +4635,18 @@ class AnimationGraphTab(QWidget):
         bp = QPushButton("▶ Play / Stop")
         bp.clicked.connect(self.toggle_play)
         ll.addWidget(bp)
-        be = QPushButton("📁 Export PNG Sequence")
-        be.setStyleSheet("background-color: #2a6e2a; font-weight: bold; padding: 8px;")
+        be = QPushButton("Export PNG Sequence")
+        #be.setStyleSheet("background-color: #2a6e2a; font-weight: bold; padding: 8px;")
         be.clicked.connect(self.export_png_sequence)
         ll.addWidget(be)
 
-        bf = QPushButton("🖼 Export Single Frame")
-        bf.setStyleSheet("background-color: #2a5a7a; font-weight: bold; padding: 8px;")
+        bf = QPushButton("Export Single Frame")
+        #bf.setStyleSheet("background-color: #2a5a7a; font-weight: bold; padding: 8px;")
         bf.clicked.connect(self.export_single_frame)
         ll.addWidget(bf)
 
-        bv = QPushButton("🎮 Export for Vita (.ani/.trans)")
-        bv.setStyleSheet("background-color: #6a2a9e; font-weight: bold; padding: 8px;")
+        bv = QPushButton("Export Animation/Transition (.ani/.trans)")
+        #bv.setStyleSheet("background-color: #6a2a9e; font-weight: bold; padding: 8px;")
         bv.clicked.connect(self.export_for_vita)
         ll.addWidget(bv)
         ll.addStretch()
@@ -4351,6 +4740,103 @@ class AnimationGraphTab(QWidget):
         self.nodes.append(n)
         self.scene.addItem(GfxNode(n, self.scene))
 
+    # ------------------------------------------------------------------
+    # LLM Copy / Paste
+    # ------------------------------------------------------------------
+
+    def _show_toast(self, msg, duration_ms=2000):
+        lbl = QLabel(msg, self.view)
+        lbl.setStyleSheet(
+            "background: rgba(30,30,30,210); color: #eee; padding: 6px 12px;"
+            "border-radius: 6px; font-size: 12px;"
+        )
+        lbl.adjustSize()
+        lbl.move((self.view.width() - lbl.width()) // 2, 12)
+        lbl.show()
+        QTimer.singleShot(duration_ms, lbl.deleteLater)
+
+    def copy_nodes_as_text(self):
+        selected = [item for item in self.scene.selectedItems() if isinstance(item, GfxNode)]
+        text = ani_canvas_to_text(self, selected_only=bool(selected))
+        QApplication.clipboard().setText(text)
+        count = text.count("\nNODE ") + (1 if text.startswith("NODE ") else 0)
+        self._show_toast(f"📋 {count} node(s) copied as text")
+
+    def paste_nodes_from_text(self, scene_pos=None):
+        text = QApplication.clipboard().text()
+        if not text.strip():
+            self._show_toast("⚠ Clipboard is empty")
+            return
+
+        node_specs, connection_specs, warnings = ani_text_to_nodes(text)
+        if not node_specs:
+            self._show_toast("⚠ No valid NODE lines found in clipboard")
+            return
+
+        # Compute centroid of pasted positions for offset
+        if scene_pos is None:
+            scene_pos = self.view.mapToScene(self.view.rect().center())
+
+        positions = [spec["pos"] for spec in node_specs]
+        cx = sum(p.x() for p in positions) / len(positions)
+        cy = sum(p.y() for p in positions) / len(positions)
+
+        # Create nodes
+        local_id_to_node = {}
+        created_count = 0
+        for spec in node_specs:
+            cls_name = spec["cls_name"]
+            # Skip OutputNode if one already exists
+            if cls_name == "OutputNode" and self.output_node is not None:
+                warnings.append("OutputNode skipped (already exists).")
+                continue
+            node = NODE_TYPES[cls_name]()
+            # Position: offset relative to centroid, centred on scene_pos
+            offset = spec["pos"] - QPointF(cx, cy)
+            node.pos = scene_pos + offset
+            # Restore properties
+            for prop_name, val in spec["props"].items():
+                if prop_name in node.properties:
+                    if isinstance(val, dict):
+                        # Keyframe dict: {frame: value, ...}
+                        for kf_frame, kf_val in val.items():
+                            node.properties[prop_name].set_keyframe(kf_frame, kf_val)
+                    else:
+                        node.properties[prop_name].default_value = val
+            # Restore extra data
+            if spec["extra"]:
+                node._extra_from_dict(spec["extra"])
+            self.add_node(node)
+            if cls_name == "OutputNode":
+                self.output_node = node
+            if spec["local_id"] is not None:
+                local_id_to_node[spec["local_id"]] = node
+            created_count += 1
+
+        # Wire connections
+        for conn in connection_specs:
+            from_node = local_id_to_node.get(conn["from_id"])
+            to_node = local_id_to_node.get(conn["to_id"])
+            slot = conn["input_slot"]
+            if from_node and to_node and slot < len(to_node.inputs):
+                to_node.inputs[slot] = from_node
+            else:
+                warnings.append(
+                    f"Could not wire CONNECT from={conn['from_id']} to={conn['to_id']} input={slot}"
+                )
+
+        self.rebuild_connections()
+        self.render_preview(self.timeline.current_frame)
+
+        msg = f"📝 Pasted {created_count} node(s)"
+        if warnings:
+            msg += f" ({len(warnings)} warning(s))"
+        self._show_toast(msg)
+
+    def _copy_ani_legend(self):
+        QApplication.clipboard().setText(build_ani_legend_text())
+        self._show_toast("📋 Animation node legend copied to clipboard")
+
     def toggle_play(self):
         if self.timeline.playing:
             self.timeline.timer.stop()
@@ -4427,6 +4913,13 @@ class AnimationGraphTab(QWidget):
         ui.addAction("UI Panel",    lambda: spawn(UIPanelNode))
         ui.addAction("UI Button",   lambda: spawn(UIButtonNode))
         ui.addAction("UI Checkbox", lambda: spawn(UICheckboxNode))
+
+        menu.addSeparator()
+        dbg = menu.addMenu("Debug")
+        dbg.addAction("📋 Copy Nodes as Text",      lambda: self.copy_nodes_as_text())
+        dbg.addAction("📝 Paste Nodes from Text",   lambda: self.paste_nodes_from_text())
+        dbg.addSeparator()
+        dbg.addAction("📖 Copy Node Legend as Text", lambda: self._copy_ani_legend())
 
         menu.exec(self.view.mapToGlobal(self.view.rect().topLeft()))
 
@@ -4569,7 +5062,7 @@ class AnimationGraphTab(QWidget):
         total = PROJECT.duration
         name = settings['name']
         is_trans = settings['type'] == 'trans'
-        compress = settings['compress']
+        sheet_count_setting = settings['sheet_count']  # 0 = auto
 
         TRANS_W, TRANS_H = 240, 136
         MAX_SHEET = 2048
@@ -4579,10 +5072,28 @@ class AnimationGraphTab(QWidget):
         store_w  = TRANS_W if is_trans else w
         store_h  = TRANS_H if is_trans else h
 
-        # For .ani, check if the spritesheet would exceed 2048x2048 and downscale frames if so
+        # Determine sheet count
+        if is_trans:
+            num_sheets = 1
+        elif sheet_count_setting == 0:
+            # Auto: find minimum sheets for full resolution
+            num_sheets = 1
+            while True:
+                fpg = int(np.ceil(total / num_sheets))
+                cols = int(np.ceil(np.sqrt(fpg)))
+                rows = int(np.ceil(fpg / cols))
+                if cols * store_w <= MAX_SHEET and rows * store_h <= MAX_SHEET:
+                    break
+                num_sheets += 1
+        else:
+            num_sheets = sheet_count_setting
+
+        frames_per_sheet = int(np.ceil(total / num_sheets))
+
+        # For .ani, compute per-sheet layout and downscale if needed
         if not is_trans:
-            cols = int(np.ceil(np.sqrt(total)))
-            rows = int(np.ceil(total / cols))
+            cols = int(np.ceil(np.sqrt(frames_per_sheet)))
+            rows = int(np.ceil(frames_per_sheet / cols))
             sheet_w = cols * store_w
             sheet_h = rows * store_h
             if sheet_w > MAX_SHEET or sheet_h > MAX_SHEET:
@@ -4590,7 +5101,7 @@ class AnimationGraphTab(QWidget):
                 store_w = max(1, int(store_w * scale_factor))
                 store_h = max(1, int(store_h * scale_factor))
 
-        progress = QProgressDialog("Rendering frames...", "Cancel", 0, total + 2, self)
+        progress = QProgressDialog("Rendering frames...", "Cancel", 0, total + num_sheets + 1, self)
         progress.setWindowTitle("Exporting")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.show()
@@ -4613,47 +5124,52 @@ class AnimationGraphTab(QWidget):
                 arr = np.array(pil_frame)
 
             frames.append(arr)
-        
-        progress.setLabelText("Packing spritesheet...")
-        progress.setValue(total)
-        QApplication.processEvents()
-        
-        cols = int(np.ceil(np.sqrt(total)))
-        rows = int(np.ceil(total / cols))
+
+        # Pack frames into sheets
+        sheet_filenames = []
+        cols = int(np.ceil(np.sqrt(frames_per_sheet)))
+        rows = int(np.ceil(frames_per_sheet / cols))
         sheet_w = cols * store_w
         sheet_h = rows * store_h
 
-        spritesheet = np.zeros((sheet_h, sheet_w, 4), dtype=np.uint8)
-        for i, frame_arr in enumerate(frames):
-            row = i // cols
-            col = i % cols
-            y = row * store_h
-            x = col * store_w
-            spritesheet[y:y+store_h, x:x+store_w] = frame_arr
-        
-        progress.setLabelText("Saving files...")
-        progress.setValue(total + 1)
+        for si in range(num_sheets):
+            if progress.wasCanceled():
+                return
+            progress.setLabelText(f"Packing spritesheet {si + 1}/{num_sheets}...")
+            progress.setValue(total + si)
+            QApplication.processEvents()
+
+            start_idx = si * frames_per_sheet
+            end_idx = min(start_idx + frames_per_sheet, total)
+            chunk = frames[start_idx:end_idx]
+
+            spritesheet = np.zeros((sheet_h, sheet_w, 4), dtype=np.uint8)
+            for i, frame_arr in enumerate(chunk):
+                r = i // cols
+                c = i % cols
+                y = r * store_h
+                x = c * store_w
+                spritesheet[y:y+store_h, x:x+store_w] = frame_arr
+
+            img = PILImage.fromarray(spritesheet, 'RGBA')
+
+            # Premultiply alpha for vita2d
+            arr_final = np.array(img).astype(np.float32)
+            alpha_channel = arr_final[:, :, 3:4] / 255.0
+            arr_final[:, :, :3] *= alpha_channel
+            img = PILImage.fromarray(arr_final.astype(np.uint8), 'RGBA')
+
+            if num_sheets == 1:
+                sheet_filename = f"{name}.png"
+            else:
+                sheet_filename = f"{name}_{si}.png"
+            sheet_path = os.path.join(project_anim_dir, sheet_filename)
+            img.save(sheet_path, "PNG")
+            sheet_filenames.append(sheet_filename)
+
+        progress.setLabelText("Saving metadata...")
+        progress.setValue(total + num_sheets)
         QApplication.processEvents()
-        
-        img = PILImage.fromarray(spritesheet, 'RGBA')
-
-        if compress and not is_trans:
-            img_rgb = img.convert('RGB')
-            img_p = img_rgb.quantize(colors=255, method=PILImage.Quantize.MEDIANCUT)
-            img_pa = img_p.convert('RGBA')
-            alpha = img.split()[3]
-            img_pa.putalpha(alpha)
-            img = img_pa
-
-        # Premultiply alpha for vita2d
-        arr_final = np.array(img).astype(np.float32)
-        alpha_channel = arr_final[:, :, 3:4] / 255.0
-        arr_final[:, :, :3] *= alpha_channel
-        img = PILImage.fromarray(arr_final.astype(np.uint8), 'RGBA')
-
-        sheet_filename = f"{name}.png"
-        sheet_path = os.path.join(project_anim_dir, sheet_filename)
-        img.save(sheet_path, "PNG")
 
         ext = 'trans' if is_trans else 'ani'
         metadata = {
@@ -4663,21 +5179,24 @@ class AnimationGraphTab(QWidget):
             'sheet_width': sheet_w,
             'sheet_height': sheet_h,
             'fps': PROJECT.fps,
-            'spritesheet_path': sheet_filename,
+            'spritesheet_path': sheet_filenames[0],
+            'spritesheet_paths': sheet_filenames,
+            'sheet_count': num_sheets,
+            'frames_per_sheet': frames_per_sheet,
         }
         
         meta_path = os.path.join(project_anim_dir, f"{name}.{ext}")
         with open(meta_path, 'w') as f:
             json.dump(metadata, f, indent=2)
         
-        progress.setValue(total + 2)
+        progress.setValue(total + num_sheets + 1)
         progress.close()
 
         from models import AnimationExport, TransitionExport
         if is_trans:
             entry = TransitionExport(
                 name=name,
-                spritesheet_path=sheet_filename,
+                spritesheet_path=sheet_filenames[0],
                 frame_count=total,
                 sheet_width=sheet_w,
                 sheet_height=sheet_h,
@@ -4687,12 +5206,15 @@ class AnimationGraphTab(QWidget):
         else:
             entry = AnimationExport(
                 name=name,
-                spritesheet_path=sheet_filename,
+                spritesheet_path=sheet_filenames[0],
+                spritesheet_paths=sheet_filenames,
                 frame_count=total,
                 frame_width=store_w,
                 frame_height=store_h,
                 sheet_width=sheet_w,
                 sheet_height=sheet_h,
+                sheet_count=num_sheets,
+                frames_per_sheet=frames_per_sheet,
                 fps=PROJECT.fps
             )
             main_win.project.animation_exports.append(entry)

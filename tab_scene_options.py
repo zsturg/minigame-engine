@@ -350,6 +350,21 @@ class LayerConfigPanel(QWidget):
         self._parallax_row.setVisible(False)
         layout.addWidget(self._parallax_row)
 
+        # ── Tiling ────────────────────────────────────────────
+        layout.addWidget(_section("TILING"))
+        tile_hint = QLabel("Repeat the image to fill the screen. Pairs with scrolling for seamless looping backgrounds.")
+        tile_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        tile_hint.setWordWrap(True)
+        layout.addWidget(tile_hint)
+        self.tile_x_check = QCheckBox("Tile horizontally")
+        self.tile_x_check.setStyleSheet(_field_style())
+        self.tile_x_check.stateChanged.connect(self._emit)
+        layout.addWidget(self.tile_x_check)
+        self.tile_y_check = QCheckBox("Tile vertically")
+        self.tile_y_check.setStyleSheet(_field_style())
+        self.tile_y_check.stateChanged.connect(self._emit)
+        layout.addWidget(self.tile_y_check)
+
         layout.addStretch()
 
     def _on_image_changed(self):
@@ -375,6 +390,8 @@ class LayerConfigPanel(QWidget):
         cfg["scroll_speed"]        = self.scroll_speed.value()
         cfg["scroll_direction"]    = self.scroll_dir.currentText()
         cfg["parallax"]            = self.parallax_spin.value()
+        cfg["tile_x"]              = self.tile_x_check.isChecked()
+        cfg["tile_y"]              = self.tile_y_check.isChecked()
         # Hide parallax when screen-space locked (it's meaningless)
         has_img = cfg["image_id"] is not None
         self._parallax_row.setVisible(has_img and not cfg["screen_space_locked"])
@@ -416,6 +433,9 @@ class LayerConfigPanel(QWidget):
 
         self.parallax_spin.setValue(cfg.get("parallax", 1.0))
         self._parallax_row.setVisible(has_img and not cfg.get("screen_space_locked", False))
+
+        self.tile_x_check.setChecked(cfg.get("tile_x", False))
+        self.tile_y_check.setChecked(cfg.get("tile_y", False))
 
         self._suppress = False
 
