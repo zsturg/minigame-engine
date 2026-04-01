@@ -147,12 +147,27 @@ local sprites = {}       -- array of sprite entries
 local sprite_count = 0   -- number of active sprites
 local sprite_order = {}  -- reusable sort buffer
 
+-- Tile Metadata Globals
+local tile_meta = {}   -- {["col,row"] = {type, state, tag, target_scene, closed_value}}
+
+-- Named Object Registry Globals
+local obj_registry = {}   -- {[id_string] = {sprite_idx, interact_range}}
+
 -- Internal Functions (DON'T EDIT)
 local function arc2rad(val)
 	return (val*PI)/ANGLE180
 end
 local function rad2arc(val)
 	return (val*ANGLE180)/PI
+end
+
+-- isSolid: returns true if the map cell at (col, row) blocks movement.
+-- Open doors have map[cell]=0 but we still want them passable, so this
+-- is just a thin wrapper around the map value. Keeping it as a function
+-- means S7 can add extra logic (e.g. per-object blocking) in one place.
+local function isSolid(col, row)
+	local idx = row * map_width + col + 1
+	return map[idx] ~= 0
 end
 
 local function WallRender(x,y,stride,top_wall,wh,cell_idx,offs)
@@ -587,14 +602,14 @@ function RayCast3D.movePlayer(dir, speed)
 	ytmp = shift_r(pl_y,tile_shift)
 	xtmp = shift_r(pl_x,tile_shift)
 	new_cell = 1 + (xtmp) + (ytmp * map_width)
-	if map[new_cell] ~= 0 then
+	if isSolid(xtmp, ytmp) then
 		old2_x = pl_x
 		old2_y = pl_y
 		ydiff = shift_r(old_y,tile_shift)
 		ydiff2 = ydiff - ytmp
 		xdiff = shift_r(old_x,tile_shift)
 		xdiff2 = xdiff - xtmp
-		if  map[1 + (xdiff) + (ytmp * map_width)] ~= 0 then
+		if isSolid(xdiff, ytmp) then
 			if ydiff2 > 0 then
 				pl_y = shift_l(ytmp,tile_shift) + (tile_size + 1)
 			elseif ydiff2 < 0 then
@@ -603,7 +618,7 @@ function RayCast3D.movePlayer(dir, speed)
 		end
 		xdiff = shift_r(old_x,tile_shift)
 		xdiff2 = xdiff - xtmp
-		if map[1 + (xtmp) + (ydiff * map_width)] ~= 0 then
+		if isSolid(xtmp, ydiff) then
 			if xdiff2 > 0 then
 				pl_x = shift_l(xtmp,tile_shift) + (tile_size + 1)
 			elseif xdiff2 < 0 then
@@ -615,6 +630,57 @@ function RayCast3D.movePlayer(dir, speed)
 			pl_y = old_y
 		end
 	end
+end
+
+--[[snapPlayerToGrid: Snap player position to the center of the current tile.]]--
+function RayCast3D.snapPlayerToGrid()
+	local col = shift_r(pl_x, tile_shift)
+	local row = shift_r(pl_y, tile_shift)
+	local half = shift_r(tile_size, 1)
+	pl_x = shift_l(col, tile_shift) + half
+	pl_y = shift_l(row, tile_shift) + half
+end
+
+--[[movePlayerGrid: Move exactly one tile in the requested direction.
+    This is intended for discrete grid movement and never allows partial
+    collision resolution to leave the player off-center between tiles.]]--
+function RayCast3D.movePlayerGrid(dir)
+	RayCast3D.snapPlayerToGrid()
+
+	local step = tile_size
+	local xmov = ceil_num((costable[pl_angle] * step) - .5)
+	local ymov = ceil_num((sintable[pl_angle] * step) - .5)
+	local nx = pl_x
+	local ny = pl_y
+
+	if dir == FORWARD then
+		nx = nx + xmov
+		ny = ny + ymov
+	elseif dir == BACK then
+		nx = nx - xmov
+		ny = ny - ymov
+	elseif dir == LEFT then
+		nx = nx + ymov
+		ny = ny - xmov
+	elseif dir == RIGHT then
+		nx = nx - ymov
+		ny = ny + xmov
+	end
+
+	if noclip then
+		pl_x = nx
+		pl_y = ny
+		return true
+	end
+
+	local col = shift_r(nx, tile_shift)
+	local row = shift_r(ny, tile_shift)
+	if not isSolid(col, row) then
+		pl_x = nx
+		pl_y = ny
+		return true
+	end
+	return false
 end
 
 --[[rotateCamera: Rotates camera]]--
@@ -816,10 +882,17 @@ end
 --[[addSprite: Add a billboard sprite, returns 1-based index]]--
 function RayCast3D.addSprite(wx, wy, img, scl, voff, blocking)
 	sprite_count = sprite_count + 1
+	local sw = nil
+	local sh = nil
+	if img then
+		sw = getWidth(img)
+		sh = getHeight(img)
+	end
 	sprites[sprite_count] = {
 		x = wx, y = wy, img = img,
 		scale = scl or 1.0, voff = voff or 0.0,
 		visible = true, blocking = blocking or false,
+		src_x = 0, src_y = 0, src_w = sw, src_h = sh,
 	}
 	return sprite_count
 end
@@ -851,6 +924,42 @@ end
 function RayCast3D.setSpriteImage(idx, img)
 	if sprites[idx] then
 		sprites[idx].img = img
+		if img then
+			sprites[idx].src_x = 0
+			sprites[idx].src_y = 0
+			sprites[idx].src_w = getWidth(img)
+			sprites[idx].src_h = getHeight(img)
+		else
+			sprites[idx].src_x = 0
+			sprites[idx].src_y = 0
+			sprites[idx].src_w = nil
+			sprites[idx].src_h = nil
+		end
+	end
+end
+
+--[[setSpriteFrame: Point a sprite at a sub-rectangle of an image sheet.]]--
+function RayCast3D.setSpriteFrame(idx, img, sx, sy, sw, sh)
+	if sprites[idx] then
+		sprites[idx].img = img
+		sprites[idx].src_x = sx or 0
+		sprites[idx].src_y = sy or 0
+		sprites[idx].src_w = sw
+		sprites[idx].src_h = sh
+	end
+end
+
+--[[setSpriteScale: Update billboard scale for an existing sprite.]]--
+function RayCast3D.setSpriteScale(idx, scl)
+	if sprites[idx] then
+		sprites[idx].scale = scl or 1.0
+	end
+end
+
+--[[setSpriteBlocking: Update whether a sprite blocks player movement.]]--
+function RayCast3D.setSpriteBlocking(idx, blocking)
+	if sprites[idx] then
+		sprites[idx].blocking = blocking and true or false
 	end
 end
 
@@ -945,32 +1054,57 @@ function RayCast3D.renderSprites(x, y)
 		-- Skip sprites behind the camera
 		if transformY > 0.1 then
 			local spriteScreenX = floor_num(half_w * (1.0 + transformX / transformY))
-			local spriteHeight = floor_num(math.abs(wall_height * dist_proj / transformY) * s.scale)
-			local spriteWidth = spriteHeight  -- square billboard
+			local img = s.img
+			if img then
+				local iw = s.src_w or getWidth(img)
+				local ih = s.src_h or getHeight(img)
+				if iw > 0 and ih > 0 then
+					local spriteHeight = floor_num(math.abs(wall_height * dist_proj / transformY) * s.scale)
+					local spriteWidth = floor_num(spriteHeight * (iw / ih))
+					if spriteWidth < 1 then
+						spriteWidth = 1
+					end
 
-			-- Vertical centering on horizon, shifted by vertical offset
-			local voff_px = floor_num(s.voff * dist_proj / transformY)
-			local drawStartY = ycenter - floor_num(spriteHeight * 0.5) - voff_px
-			local drawStartX = spriteScreenX - floor_num(spriteWidth * 0.5)
-
-			-- Simple whole-sprite z-test at center column
-			local testCol = spriteScreenX
-			if testCol >= 0 and testCol < vwidth then
-				-- Only draw if sprite is closer than the wall at this column
-				-- zbuffer is keyed by stride values (0, accuracy, 2*accuracy, ...)
-				-- snap to nearest stride column
-				local snapCol = floor_num(testCol / accuracy) * accuracy
-				if zbuffer[snapCol] and transformY < zbuffer[snapCol] then
-					local img = s.img
-					if img then
-						local iw = getWidth(img)
-						local ih = getHeight(img)
-						local sx = spriteWidth / iw
-						local sy = spriteHeight / ih
-						-- drawImageExtended anchor quirk: subtract full scaled dimensions
-						local dstX = drawStartX - (iw * sx)
-						local dstY = drawStartY - (ih * sy)
-						drawImage(dstX + x, dstY + y, img, 0, 0, iw, ih, 0, sx, sy)
+					-- Vertical centering on horizon, shifted by vertical offset
+					local voff_px = floor_num(s.voff * dist_proj / transformY)
+					local drawStartY = ycenter - floor_num(spriteHeight * 0.5) - voff_px
+					local drawStartX = spriteScreenX - floor_num(spriteWidth * 0.5)
+					local drawEndX = drawStartX + spriteWidth - 1
+					local baseX = s.src_x or 0
+					local baseY = s.src_y or 0
+					local sy = spriteHeight / ih
+					local yDraw = drawStartY + floor_num(spriteHeight * 0.5)
+					local stripeStart = floor_num(drawStartX / accuracy) * accuracy
+					if stripeStart < drawStartX then
+						stripeStart = stripeStart + accuracy
+					end
+					for stripe = stripeStart, drawEndX, accuracy do
+						if stripe >= 0 and stripe < vwidth then
+							local snapCol = floor_num(stripe / accuracy) * accuracy
+							if zbuffer[snapCol] and transformY < zbuffer[snapCol] then
+								local stripeW = doMin(accuracy, drawEndX - stripe + 1)
+								if stripeW > 0 then
+									local texLeft = (stripe - drawStartX) / spriteWidth
+									local texRight = (stripe - drawStartX + stripeW) / spriteWidth
+									local srcX = baseX + floor_num(texLeft * iw)
+									local srcW = ceil_num((texRight - texLeft) * iw)
+									if srcX < baseX then
+										srcX = baseX
+									end
+									if srcX >= baseX + iw then
+										srcX = baseX + iw - 1
+									end
+									if srcX + srcW > baseX + iw then
+										srcW = baseX + iw - srcX
+									end
+									if srcW < 1 then
+										srcW = 1
+									end
+									local sx = stripeW / srcW
+									drawImage(stripe + x, yDraw + y, img, srcX, baseY, srcW, ih, 0, sx, sy)
+								end
+							end
+						end
 					end
 				end
 			end
@@ -981,4 +1115,243 @@ function RayCast3D.renderSprites(x, y)
 	for i = 1, count do
 		sprite_order[i] = nil
 	end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  TILE METADATA + DOOR / INTERACT SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+
+--[[loadTileMeta: Ingest tile metadata table at scene load.
+    meta_table format: {["col,row"] = {type, state, tag, target_scene, closed_value}}
+    Reads the current map cell for each door/switch entry and stores it
+    as closed_value so interactFacing() can restore it on close.
+    If closed_value is provided explicitly, it takes precedence.]]--
+function RayCast3D.loadTileMeta(meta_table)
+	tile_meta = {}
+	for key, entry in pairs(meta_table) do
+		-- Parse "col,row" key
+		local col, row = key:match("^(-?%d+),(-?%d+)$")
+		col = tonumber(col)
+		row = tonumber(row)
+		local cell_idx = row * map_width + col + 1
+		local closed_val = entry.closed_value or map[cell_idx]
+		-- If the entry starts open, closed_value would be 0 which is wrong.
+		-- Default to 1 (solid) as fallback; exporter should always load maps
+		-- with doors in their closed state so this path is safe.
+		if closed_val == 0 then
+			closed_val = 1
+		end
+		tile_meta[key] = {
+			type         = entry.type         or "door",
+			state        = entry.state        or "closed",
+			tag          = entry.tag          or "",
+			target_scene = entry.target_scene or 0,
+			closed_value = closed_val,
+		}
+		-- Sync map cell to match initial state
+		if tile_meta[key].type == "door" then
+			if tile_meta[key].state == "open" then
+				map[cell_idx] = 0
+			else
+				map[cell_idx] = closed_val
+			end
+		end
+	end
+end
+
+--[[getFacingTile: Cast a short ray forward from the player and return
+    the tile coords {x, y} of the first solid cell within range pixels.
+    Returns nil if nothing solid is within range.
+    Default range is 80px (~1.25 tiles at tile_size=64).]]--
+function RayCast3D.getFacingTile(range)
+	range = range or 80
+	local angle = pl_angle
+	local dx = costable[angle]
+	local dy = sintable[angle]
+	local step = tile_size * 0.25   -- sample every quarter-tile
+	local dist = step
+	while dist <= range do
+		local wx = pl_x + dx * dist
+		local wy = pl_y + dy * dist
+		local col = floor_num(wx / tile_size)
+		local row = floor_num(wy / tile_size)
+		if col >= 0 and col < map_width and row >= 0 and row < map_height then
+			local cell_idx = row * map_width + col + 1
+			if map[cell_idx] ~= 0 then
+				return {x = col, y = row}
+			end
+		end
+		dist = dist + step
+	end
+	-- Also check for open doors within range — they have map=0 but
+	-- may still be interactive. Walk again checking tile_meta.
+	dist = step
+	while dist <= range do
+		local wx = pl_x + dx * dist
+		local wy = pl_y + dy * dist
+		local col = floor_num(wx / tile_size)
+		local row = floor_num(wy / tile_size)
+		local key = col .. "," .. row
+		if tile_meta[key] then
+			return {x = col, y = row}
+		end
+		dist = dist + step
+	end
+	return nil
+end
+
+--[[interactFacing: Interact with the tile the player is facing.
+    Doors: toggle open/closed — mutates map cell and tile_meta state.
+    Other types: returns the metadata table so the caller can act on it
+    (exits, triggers, switches handled by the scene loop in S3/S7).
+    Returns the tile metadata table if a meta tile was found, else nil.]]--
+function RayCast3D.interactFacing(range)
+	local tile = RayCast3D.getFacingTile(range)
+	if not tile then
+		return nil
+	end
+	local key = tile.x .. "," .. tile.y
+	local meta = tile_meta[key]
+	if not meta then
+		return nil
+	end
+	if meta.type == "door" then
+		local cell_idx = tile.y * map_width + tile.x + 1
+		if meta.state == "closed" then
+			meta.state = "open"
+			map[cell_idx] = 0
+		else
+			meta.state = "closed"
+			map[cell_idx] = meta.closed_value
+		end
+	end
+	return meta
+end
+
+--[[getTileMeta: Return the metadata table for tile (col, row), or nil.
+    Useful for the scene loop to check exit/trigger tiles the player
+    is standing on or facing without calling interactFacing.]]--
+function RayCast3D.getTileMeta(col, row)
+	return tile_meta[col .. "," .. row]
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  NAMED OBJECT REGISTRY
+-- ═══════════════════════════════════════════════════════════════
+
+--[[registerObject: Bind a string id to an existing sprite index.
+    interact_range controls how close the player must be facing this
+    sprite for getInteractableObject to return it (default 80px).
+    Does not alter the underlying sprite entry — blocking inherits
+    from whatever was set on the sprite at addSprite time.]]--
+function RayCast3D.registerObject(id, sprite_idx, interact_range)
+	obj_registry[id] = {
+		sprite_idx     = sprite_idx,
+		interact_range = interact_range or 80,
+	}
+end
+
+--[[unregisterObject: Remove a named binding. Does not remove the
+    underlying sprite — call removeSprite separately if needed.]]--
+function RayCast3D.unregisterObject(id)
+	obj_registry[id] = nil
+end
+
+--[[clearObjects: Remove all named bindings. Leaves sprites intact.]]--
+function RayCast3D.clearObjects()
+	obj_registry = {}
+end
+
+--[[getObject: Return the registry entry for id, or nil.
+    Entry fields: sprite_idx, interact_range.]]--
+function RayCast3D.getObject(id)
+	return obj_registry[id]
+end
+
+--[[moveObject: Set world position of the sprite bound to id.]]--
+function RayCast3D.moveObject(id, wx, wy)
+	local entry = obj_registry[id]
+	if entry then
+		RayCast3D.moveSprite(entry.sprite_idx, wx, wy)
+	end
+end
+
+--[[showObject: Make the sprite bound to id visible.]]--
+function RayCast3D.showObject(id)
+	local entry = obj_registry[id]
+	if entry then
+		RayCast3D.setSpriteVisible(entry.sprite_idx, true)
+	end
+end
+
+--[[hideObject: Hide the sprite bound to id.]]--
+function RayCast3D.hideObject(id)
+	local entry = obj_registry[id]
+	if entry then
+		RayCast3D.setSpriteVisible(entry.sprite_idx, false)
+	end
+end
+
+--[[setSpriteImageById: Change the image of the sprite bound to id.
+    Named setSpriteImage in the S5 spec; prefixed to avoid shadowing
+    the numeric RayCast3D.setSpriteImage(idx, img).]]--
+function RayCast3D.setSpriteImageById(id, img)
+	local entry = obj_registry[id]
+	if entry then
+		RayCast3D.setSpriteImage(entry.sprite_idx, img)
+	end
+end
+
+--[[getInteractableObject: Walk all registered objects and return the
+    id string of the nearest visible sprite whose centre is within its
+    own interact_range of the player AND is in the forward half-plane
+    (dot product with facing direction > 0).
+    Returns id_string, sprite_idx, distance  —  or nil if none qualify.
+
+    "Nearest" is measured as straight-line distance from the player
+    centre to the sprite centre, not along the ray. This is intentional:
+    it matches the feel of the tile interact system (reach out, grab the
+    closest thing in front of you) without requiring a full ray-march per
+    object.]]--
+function RayCast3D.getInteractableObject(range)
+	local dirX = costable[pl_angle]
+	local dirY = sintable[pl_angle]
+
+	local best_id    = nil
+	local best_idx   = nil
+	local best_dist  = math.huge
+
+	for id, entry in pairs(obj_registry) do
+		local s = sprites[entry.sprite_idx]
+		if s and s.visible then
+			local dx   = s.x - pl_x
+			local dy   = s.y - pl_y
+			local dist = math.sqrt(dx * dx + dy * dy)
+
+			-- Per-object range cap; caller range (if provided) acts as an
+			-- additional global ceiling so the scene loop can narrow further.
+			local cap = entry.interact_range
+			if range and range < cap then
+				cap = range
+			end
+
+			if dist <= cap then
+				-- Forward half-plane test: sprite must be in front of the player.
+				-- dot(facing, toSprite) > 0  →  angle < 90°
+				local dot = dirX * dx + dirY * dy
+				if dot > 0 then
+					if dist < best_dist then
+						best_dist = dist
+						best_id   = id
+						best_idx  = entry.sprite_idx
+					end
+				end
+			end
+		end
+	end
+
+	if best_id then
+		return best_id, best_idx, best_dist
+	end
+	return nil
 end

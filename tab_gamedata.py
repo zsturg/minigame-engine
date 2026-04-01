@@ -21,6 +21,7 @@ from models import (
     Project, RegisteredImage, RegisteredAudio, RegisteredFont,
     GameVariable, InventoryItem, GameData, InputAction, GameSignal
 )
+from theme_utils import replace_widget_theme_colors
 
 # ── Colours (match main.py) ──────────────────────────────────
 DARK    = "#0f0f12"
@@ -38,34 +39,18 @@ WARNING = "#facc15"
 DANGER  = "#f87171"
 
 # ── Image category colours ───────────────────────────────────
-CAT_COLORS = {
-    "background": "#7c6aff",
-    "foreground":  "#06b6d4",
-    "character":   "#f59e0b",
-    "ui":          "#4ade80",
-    "other":       "#7a7890",
-}
+CAT_COLORS = {}
 
 # ── Audio type colours ───────────────────────────────────────
-AUDIO_COLORS = {
-    "music": "#c084fc",
-    "sfx":   "#fb923c",
-}
+AUDIO_COLORS = {}
 
 # ── Variable type colours ────────────────────────────────────
-VAR_COLORS = {
-    "number": "#38bdf8",
-    "string": "#4ade80",
-    "bool":   "#fb923c",
-}
+VAR_COLORS = {}
 
 # ── Input event colours ──────────────────────────────────────
-INPUT_COLORS = {
-    "pressed":  "#7c6aff",
-    "released": "#ff6a9b",
-    "held":     "#facc15",
-    "hold_for": "#4ade80",
-}
+INPUT_COLORS = {}
+FONT_COLOR = ACCENT2
+SIGNAL_COLOR = ACCENT2
 
 INPUT_BUTTONS = [
     "cross", "circle", "square", "triangle",
@@ -73,6 +58,76 @@ INPUT_BUTTONS = [
     "l", "r",
     "start", "select",
 ]
+
+
+def _theme_snapshot():
+    return {
+        "DARK": DARK,
+        "PANEL": PANEL,
+        "SURFACE": SURFACE,
+        "SURF2": SURF2,
+        "BORDER": BORDER,
+        "ACCENT": ACCENT,
+        "ACCENT2": ACCENT2,
+        "TEXT": TEXT,
+        "DIM": DIM,
+        "MUTED": MUTED,
+        "SUCCESS": SUCCESS,
+        "WARNING": WARNING,
+        "DANGER": DANGER,
+    }
+
+
+def _sync_semantic_colors():
+    global FONT_COLOR, SIGNAL_COLOR
+    CAT_COLORS.clear()
+    CAT_COLORS.update({
+        "background": ACCENT,
+        "foreground": ACCENT2,
+        "character": WARNING,
+        "ui": SUCCESS,
+        "other": DIM,
+    })
+    AUDIO_COLORS.clear()
+    AUDIO_COLORS.update({
+        "music": ACCENT2,
+        "sfx": WARNING,
+    })
+    VAR_COLORS.clear()
+    VAR_COLORS.update({
+        "number": ACCENT,
+        "string": SUCCESS,
+        "bool": WARNING,
+    })
+    INPUT_COLORS.clear()
+    INPUT_COLORS.update({
+        "pressed": ACCENT,
+        "released": ACCENT2,
+        "held": WARNING,
+        "hold_for": SUCCESS,
+    })
+    FONT_COLOR = ACCENT2
+    SIGNAL_COLOR = ACCENT2
+
+
+def _list_style():
+    return f"""
+        QListWidget {{
+            background: {SURFACE}; border: 1px solid {BORDER};
+            border-radius: 4px; color: {TEXT}; outline: none;
+        }}
+        QListWidget::item {{
+            padding: 8px 10px; border-radius: 3px;
+            border-bottom: 1px solid {BORDER};
+        }}
+        QListWidget::item:selected {{
+            background: {ACCENT}; color: white;
+        }}
+        QListWidget::item:hover:!selected {{ background: {SURF2}; }}
+    """
+
+
+_sync_semantic_colors()
 
 INPUT_EVENTS = ["pressed", "released", "held", "hold_for"]
 
@@ -119,7 +174,7 @@ def _divider() -> QFrame:
 
 def _field_style():
     return f"""
-        QLineEdit, QComboBox, QSpinBox, QTextEdit {{
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit {{
             background: {SURFACE};
             color: {TEXT};
             border: 1px solid {BORDER};
@@ -127,7 +182,7 @@ def _field_style():
             padding: 5px 8px;
             font-size: 12px;
         }}
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus {{
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus {{
             border-color: {ACCENT};
         }}
         QComboBox::drop-down {{
@@ -140,7 +195,7 @@ def _field_style():
             border: 1px solid {BORDER};
             selection-background-color: {ACCENT};
         }}
-        QSpinBox::up-button, QSpinBox::down-button {{
+        QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
             background: {SURF2};
             border: none;
             width: 16px;
@@ -164,53 +219,100 @@ def _field_style():
     """
 
 
+def _contrast_text(bg: str) -> str:
+    color = QColor(bg)
+    if not color.isValid():
+        return TEXT
+    luminance = (
+        0.2126 * color.redF() +
+        0.7152 * color.greenF() +
+        0.0722 * color.blueF()
+    )
+    return DARK if luminance >= 0.6 else "#ffffff"
+
+
+def _button_style(role: str = "default") -> str:
+    if role == "accent":
+        fg = _contrast_text(ACCENT)
+        hover_fg = _contrast_text(ACCENT2)
+        return f"""
+            QPushButton {{
+                background-color: {ACCENT};
+                color: {fg};
+                border: none;
+                border-radius: 4px;
+                padding: 0 12px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {ACCENT2}; color: {hover_fg}; }}
+            QPushButton:pressed {{ background-color: {ACCENT}; color: {fg}; }}
+        """
+    if role == "danger":
+        return f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {DANGER};
+                border: 1px solid {DANGER};
+                border-radius: 4px;
+                padding: 0 12px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background-color: {DANGER}; color: {_contrast_text(DANGER)}; }}
+        """
+    return f"""
+        QPushButton {{
+            background-color: {SURF2};
+            color: {TEXT};
+            border: 1px solid {BORDER};
+            border-radius: 4px;
+            padding: 0 12px;
+            font-size: 12px;
+        }}
+        QPushButton:hover {{
+            background-color: {ACCENT};
+            border-color: {ACCENT};
+            color: {_contrast_text(ACCENT)};
+        }}
+    """
+
+
+def _style_button(btn: QPushButton) -> None:
+    role = btn.property("_theme_role") or "default"
+    btn.setStyleSheet(_button_style(role))
+
+
+def _restyle_form_controls(root: QWidget | None) -> None:
+    if root is None:
+        return
+    for widget_type in (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QCheckBox):
+        for widget in root.findChildren(widget_type):
+            widget.setStyleSheet(_field_style())
+
+
+def _restyle_role_buttons(root: QWidget | None) -> None:
+    if root is None:
+        return
+    for btn in root.findChildren(QPushButton):
+        if btn.property("_theme_role"):
+            _style_button(btn)
+
+
+def _restyle_plain_labels(root: QWidget | None) -> None:
+    if root is None:
+        return
+    for lbl in root.findChildren(QLabel):
+        if not lbl.styleSheet():
+            lbl.setStyleSheet(f"color: {TEXT}; background: transparent;")
+
+
 def _btn(label: str, accent=False, danger=False, small=False) -> QPushButton:
     b = QPushButton(label)
     h = 28 if small else 32
     b.setFixedHeight(h)
-    
-    if accent:
-        b.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {ACCENT}; 
-                color: white; 
-                border: none;
-                border-radius: 4px; 
-                padding: 0 12px;
-                font-size: 12px; 
-                font-weight: 600;
-            }}
-            QPushButton:hover {{ background-color: #6a59ef; }}
-            QPushButton:pressed {{ background-color: #5a4adf; }}
-        """)
-    elif danger:
-        b.setStyleSheet(f"""
-            QPushButton {{
-                background-color: transparent; 
-                color: {DANGER};
-                border: 1px solid {DANGER}; 
-                border-radius: 4px;
-                padding: 0 12px; 
-                font-size: 12px;
-            }}
-            QPushButton:hover {{ background-color: {DANGER}; color: white; }}
-        """)
-    else:
-        b.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {SURF2}; 
-                color: {TEXT};
-                border: 1px solid {BORDER}; 
-                border-radius: 4px;
-                padding: 0 12px; 
-                font-size: 12px;
-            }}
-            QPushButton:hover {{ 
-                background-color: {ACCENT}; 
-                border-color: {ACCENT}; 
-                color: white; 
-            }}
-        """)
+    role = "accent" if accent else ("danger" if danger else "default")
+    b.setProperty("_theme_role", role)
+    _style_button(b)
     return b
 
 
@@ -239,6 +341,7 @@ class RegistryPanel(QWidget):
 
         # ── Left: list ──────────────────────────────────────
         left = QWidget()
+        self._left_panel = left
         left.setFixedWidth(230)
         left.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
         lv = QVBoxLayout(left)
@@ -246,20 +349,7 @@ class RegistryPanel(QWidget):
         lv.setSpacing(6)
 
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet(f"""
-            QListWidget {{
-                background: {SURFACE}; border: 1px solid {BORDER};
-                border-radius: 4px; color: {TEXT}; outline: none;
-            }}
-            QListWidget::item {{
-                padding: 8px 10px; border-radius: 3px;
-                border-bottom: 1px solid {BORDER};
-            }}
-            QListWidget::item:selected {{
-                background: {ACCENT}; color: white;
-            }}
-            QListWidget::item:hover:!selected {{ background: {SURF2}; }}
-        """)
+        self.list_widget.setStyleSheet(_list_style())
         self.list_widget.currentRowChanged.connect(self._on_select)
         lv.addWidget(self.list_widget)
 
@@ -293,6 +383,16 @@ class RegistryPanel(QWidget):
         root.addWidget(right_scroll, stretch=1)
 
         self._show_empty()
+
+    def restyle(self):
+        self._left_panel.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
+        self.list_widget.setStyleSheet(_list_style())
+        self.editor_widget.setStyleSheet(f"background: {DARK};")
+        _restyle_form_controls(self.editor_widget)
+        _restyle_role_buttons(self._left_panel)
+        _restyle_role_buttons(self.editor_widget)
+        _restyle_plain_labels(self.editor_widget)
+        self._refresh_list()
 
     # Subclasses override these ──────────────────────────────
 
@@ -392,7 +492,8 @@ class RegistryPanel(QWidget):
 
 class ImageRegistryPanel(RegistryPanel):
     def _item_label(self, item: RegisteredImage) -> str:
-        cat = item.category.upper()
+        display_cat = "layer" if item.category == "background" else ("object" if item.category == "other" else item.category)
+        cat = display_cat.upper()
         name = item.name or Path(item.path).name if item.path else "unnamed"
         return f"[{cat}]  {name}"
 
@@ -440,7 +541,7 @@ class ImageRegistryPanel(RegistryPanel):
         # Category
         self.editor_layout.addWidget(_section("CATEGORY"))
         self.cat_combo = QComboBox()
-        self.cat_combo.addItems(["background", "foreground", "character", "ui", "other"])
+        self.cat_combo.addItems(["layer", "foreground", "character", "ui", "object"])
         self.cat_combo.setStyleSheet(_field_style())
         self.cat_combo.currentTextChanged.connect(self._emit_change)
         self.editor_layout.addWidget(self.cat_combo)
@@ -487,7 +588,8 @@ class ImageRegistryPanel(RegistryPanel):
     def _load_item(self, item: RegisteredImage):
         self.name_edit.setText(item.name)
         self.path_edit.setText(item.path or "")
-        idx = self.cat_combo.findText(item.category)
+        display_category = "layer" if item.category == "background" else ("object" if item.category == "other" else item.category)
+        idx = self.cat_combo.findText(display_category)
         if idx >= 0:
             self.cat_combo.setCurrentIndex(idx)
         if item.path:
@@ -499,7 +601,15 @@ class ImageRegistryPanel(RegistryPanel):
     def _save_item(self, item: RegisteredImage):
         item.name = self.name_edit.text().strip() or "Unnamed"
         item.path = self.path_edit.text() or None
-        item.category = self.cat_combo.currentText()
+        item.category = "background" if self.cat_combo.currentText() == "layer" else ("other" if self.cat_combo.currentText() == "object" else self.cat_combo.currentText())
+
+    def restyle(self):
+        super().restyle()
+        self.thumb.setStyleSheet(f"""
+            background: {SURFACE}; border: 1px solid {BORDER};
+            border-radius: 4px; color: {DIM}; font-size: 11px;
+        """)
+        self.info_label.setStyleSheet(f"color: {DIM}; font-size: 11px;")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -572,7 +682,7 @@ class AudioRegistryPanel(RegistryPanel):
             c = AUDIO_COLORS[key]
             if btn.isChecked():
                 btn.setStyleSheet(f"""
-                    QPushButton {{ background: {c}22; color: {c};
+                    QPushButton {{ background: {c}22; color: {_contrast_text(c)};
                     border: 1px solid {c}; border-radius: 4px; font-weight: 600; }}
                 """)
             else:
@@ -581,6 +691,10 @@ class AudioRegistryPanel(RegistryPanel):
                     border: 1px solid {BORDER}; border-radius: 4px; }}
                     QPushButton:hover {{ color: {TEXT}; }}
                 """)
+
+    def restyle(self):
+        super().restyle()
+        self._style_type_btns()
 
     def _browse_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -626,7 +740,7 @@ class FontRegistryPanel(RegistryPanel):
         return item.name or "Unnamed"
 
     def _item_color(self, item) -> str:
-        return "#c084fc"
+        return FONT_COLOR
 
     def _new_item(self) -> RegisteredFont:
         return RegisteredFont(name="font_body")
@@ -695,6 +809,14 @@ class FontRegistryPanel(RegistryPanel):
         item.name = self.name_edit.text().strip() or "font_unnamed"
         item.path = self.path_edit.text() or None
 
+    def restyle(self):
+        super().restyle()
+        self.preview_label.setStyleSheet(f"""
+            background: {SURFACE}; color: {TEXT};
+            border: 1px solid {BORDER}; border-radius: 4px;
+            padding: 12px; font-size: 16px;
+        """)
+
 
 # ─────────────────────────────────────────────────────────────
 #  VARIABLES PANEL
@@ -717,6 +839,7 @@ class VariablesPanel(QWidget):
 
         # ── Left ─────────────────────────────────────────────
         left = QWidget()
+        self._left_panel = left
         left.setFixedWidth(230)
         left.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
         lv = QVBoxLayout(left)
@@ -724,15 +847,7 @@ class VariablesPanel(QWidget):
         lv.setSpacing(6)
 
         self.var_list = QListWidget()
-        self.var_list.setStyleSheet(f"""
-            QListWidget {{
-                background: {SURFACE}; border: 1px solid {BORDER};
-                border-radius: 4px; color: {TEXT}; outline: none;
-            }}
-            QListWidget::item {{ padding: 8px 10px; border-radius: 3px; border-bottom: 1px solid {BORDER}; }}
-            QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
-            QListWidget::item:hover:!selected {{ background: {SURF2}; }}
-        """)
+        self.var_list.setStyleSheet(_list_style())
         self.var_list.currentRowChanged.connect(self._on_select)
         lv.addWidget(self.var_list)
 
@@ -898,6 +1013,19 @@ class VariablesPanel(QWidget):
             self._current = -1
             self._editor_widget.setEnabled(False)
 
+    def restyle(self):
+        self._left_panel.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
+        self.var_list.setStyleSheet(_list_style())
+        self._editor_widget.setStyleSheet(f"background: {DARK};")
+        _restyle_form_controls(self._editor_widget)
+        _restyle_role_buttons(self._left_panel)
+        _restyle_role_buttons(self._editor_widget)
+        _restyle_plain_labels(self._editor_widget)
+        self._refresh_list()
+        if 0 <= self._current < len(self._variables):
+            c = VAR_COLORS.get(self._variables[self._current].var_type, TEXT)
+            self.type_badge.setStyleSheet(f"color: {c}; font-size: 11px; font-weight: 700;")
+
 
 # ─────────────────────────────────────────────────────────────
 #  INVENTORY PANEL
@@ -921,6 +1049,7 @@ class InventoryPanel(QWidget):
 
         # ── Left list ────────────────────────────────────────
         left = QWidget()
+        self._left_panel = left
         left.setFixedWidth(230)
         left.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
         lv = QVBoxLayout(left)
@@ -928,13 +1057,7 @@ class InventoryPanel(QWidget):
         lv.setSpacing(6)
 
         self.item_list = QListWidget()
-        self.item_list.setStyleSheet(f"""
-            QListWidget {{ background: {SURFACE}; border: 1px solid {BORDER};
-                border-radius: 4px; color: {TEXT}; outline: none; }}
-            QListWidget::item {{ padding: 8px 10px; border-radius: 3px; border-bottom: 1px solid {BORDER}; }}
-            QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
-            QListWidget::item:hover:!selected {{ background: {SURF2}; }}
-        """)
+        self.item_list.setStyleSheet(_list_style())
         self.item_list.currentRowChanged.connect(self._on_select)
         lv.addWidget(self.item_list)
 
@@ -1103,6 +1226,18 @@ class InventoryPanel(QWidget):
         if self._current >= 0:
             self._refresh_icon_combo()
 
+    def restyle(self):
+        self._left_panel.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
+        self.item_list.setStyleSheet(_list_style())
+        self._editor_widget.setStyleSheet(f"background: {DARK};")
+        _restyle_form_controls(self._editor_widget)
+        _restyle_role_buttons(self._left_panel)
+        _restyle_plain_labels(self._editor_widget)
+        self.icon_thumb.setStyleSheet(f"""
+            background: {SURFACE}; border: 1px solid {BORDER};
+            border-radius: 4px; color: {DIM}; font-size: 10px;
+        """)
+
 
 # ─────────────────────────────────────────────────────────────
 #  SIGNALS PANEL
@@ -1125,6 +1260,7 @@ class SignalsPanel(QWidget):
 
         # ── Left list ────────────────────────────────────────
         left = QWidget()
+        self._left_panel = left
         left.setFixedWidth(230)
         left.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
         lv = QVBoxLayout(left)
@@ -1132,15 +1268,7 @@ class SignalsPanel(QWidget):
         lv.setSpacing(6)
 
         self.sig_list = QListWidget()
-        self.sig_list.setStyleSheet(f"""
-            QListWidget {{
-                background: {SURFACE}; border: 1px solid {BORDER};
-                border-radius: 4px; color: {TEXT}; outline: none;
-            }}
-            QListWidget::item {{ padding: 8px 10px; border-radius: 3px; border-bottom: 1px solid {BORDER}; }}
-            QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
-            QListWidget::item:hover:!selected {{ background: {SURF2}; }}
-        """)
+        self.sig_list.setStyleSheet(_list_style())
         self.sig_list.currentRowChanged.connect(self._on_select)
         lv.addWidget(self.sig_list)
 
@@ -1192,6 +1320,7 @@ class SignalsPanel(QWidget):
             "📡  Emit with emit_signal action.\n"
             "🎧  React with on_signal trigger."
         )
+        self.usage_box = usage_box
         usage_box.setStyleSheet(f"""
             background: {SURF2}; color: {DIM};
             border: 1px solid {BORDER}; border-radius: 4px;
@@ -1232,7 +1361,7 @@ class SignalsPanel(QWidget):
         self.sig_list.clear()
         for s in self._signals:
             item = QListWidgetItem(f"📡  {s.name}")
-            item.setForeground(QColor("#06b6d4"))
+            item.setForeground(QColor(SIGNAL_COLOR))
             self.sig_list.addItem(item)
         self.sig_list.blockSignals(False)
 
@@ -1269,17 +1398,45 @@ class SignalsPanel(QWidget):
             self._current = -1
             self._editor_widget.setEnabled(False)
 
+    def restyle(self):
+        self._left_panel.setStyleSheet(f"background: {PANEL}; border-right: 1px solid {BORDER};")
+        self.sig_list.setStyleSheet(_list_style())
+        self._editor_widget.setStyleSheet(f"background: {DARK};")
+        _restyle_form_controls(self._editor_widget)
+        _restyle_role_buttons(self._left_panel)
+        _restyle_plain_labels(self._editor_widget)
+        self.usage_box.setStyleSheet(f"""
+            background: {SURF2}; color: {DIM};
+            border: 1px solid {BORDER}; border-radius: 4px;
+            padding: 10px; font-size: 11px; line-height: 1.6;
+        """)
+        self._refresh_list()
+
 
 # ─────────────────────────────────────────────────────────────
 #  INPUT PANEL
 # ─────────────────────────────────────────────────────────────
 
+
 class InputPanel(RegistryPanel):
+    def __init__(self, parent=None):
+        self._project_ref = None
+        super().__init__(parent)
+
     def _item_label(self, item: InputAction) -> str:
+        src = getattr(item, "source_type", "button")
         event = item.event.upper()
         if item.event == "hold_for":
             dur = getattr(item, "hold_duration", 2.0)
+            if src == "stick_direction":
+                stick = getattr(item, "stick", "left")
+                direction = getattr(item, "direction", "up")
+                return f"[HOLD {dur}s]  {stick} stick {direction}  →  {item.name}"
             return f"[HOLD {dur}s]  {item.button}  →  {item.name}"
+        if src == "stick_direction":
+            stick = getattr(item, "stick", "left")
+            direction = getattr(item, "direction", "up")
+            return f"[{event}]  {stick} stick {direction}  →  {item.name}"
         return f"[{event}]  {item.button}  →  {item.name}"
 
     def _item_color(self, item: InputAction) -> str:
@@ -1288,7 +1445,58 @@ class InputPanel(RegistryPanel):
     def _new_item(self) -> InputAction:
         return InputAction(name="action", button="cross", event="pressed")
 
+    def _on_mirror_changed(self):
+        if self._project_ref is None:
+            return
+        idx = self._mirror_combo.currentIndex()
+        self._project_ref.game_data.dpad_mirror_stick = ["none", "left", "right"][idx]
+        self._project_ref.game_data.dpad_mirror_deadzone = self._mirror_dz_spin.value()
+        self.changed.emit()
+
+    def load_items(self, items, project=None):
+        self._project_ref = project
+        if project is not None:
+            stick = getattr(project.game_data, "dpad_mirror_stick", "none")
+            idx = {"none": 0, "left": 1, "right": 2}.get(stick, 0)
+            self._mirror_combo.blockSignals(True)
+            self._mirror_combo.setCurrentIndex(idx)
+            self._mirror_combo.blockSignals(False)
+            self._mirror_dz_spin.blockSignals(True)
+            self._mirror_dz_spin.setValue(getattr(project.game_data, "dpad_mirror_deadzone", 32))
+            self._mirror_dz_spin.blockSignals(False)
+        super().load_items(items, project)
+
     def _build_editor(self):
+        self.editor_layout.addWidget(_section("GLOBAL ANALOG SETTINGS"))
+        self.editor_layout.addWidget(_divider())
+
+        mirror_row = QHBoxLayout()
+        mirror_lbl = QLabel("Mirror D-pad from:")
+        mirror_lbl.setStyleSheet(f"color: {DIM}; font-size: 11px; font-weight: 600;")
+        mirror_row.addWidget(mirror_lbl)
+
+        self._mirror_combo = QComboBox()
+        self._mirror_combo.addItems(["None", "Left Stick", "Right Stick"])
+        self._mirror_combo.setFixedWidth(130)
+        self._mirror_combo.setStyleSheet(_field_style())
+        self._mirror_combo.currentIndexChanged.connect(self._on_mirror_changed)
+        mirror_row.addWidget(self._mirror_combo)
+
+        dz_lbl = QLabel("Deadzone:")
+        dz_lbl.setStyleSheet(f"color: {DIM}; font-size: 11px; font-weight: 600;")
+        mirror_row.addWidget(dz_lbl)
+
+        self._mirror_dz_spin = QSpinBox()
+        self._mirror_dz_spin.setRange(1, 127)
+        self._mirror_dz_spin.setValue(32)
+        self._mirror_dz_spin.setFixedWidth(60)
+        self._mirror_dz_spin.setStyleSheet(_field_style())
+        self._mirror_dz_spin.valueChanged.connect(self._on_mirror_changed)
+        mirror_row.addWidget(self._mirror_dz_spin)
+        mirror_row.addStretch()
+        self.editor_layout.addLayout(mirror_row)
+
+        self.editor_layout.addSpacing(8)
         self.editor_layout.addWidget(_section("INPUT ACTION"))
         self.editor_layout.addWidget(_divider())
 
@@ -1310,13 +1518,69 @@ class InputPanel(RegistryPanel):
         self.name_error.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
         self.editor_layout.addWidget(self.name_error)
 
-        # Button
-        self.editor_layout.addWidget(_section("BUTTON"))
+        # Source type
+        self.editor_layout.addWidget(_section("INPUT SOURCE"))
+        self._source_combo = QComboBox()
+        self._source_combo.addItems(["Button", "Stick Direction"])
+        self._source_combo.setStyleSheet(_field_style())
+        self._source_combo.currentIndexChanged.connect(self._on_source_changed)
+        self.editor_layout.addWidget(self._source_combo)
+
+        # ── Source sub-editors ─────────────────────────────
+        self._source_stack = QWidget()
+        stack_layout = QVBoxLayout(self._source_stack)
+        stack_layout.setContentsMargins(0, 0, 0, 0)
+        stack_layout.setSpacing(6)
+
+        # Button sub-editor
+        self._btn_editor = QWidget()
+        btn_layout = QVBoxLayout(self._btn_editor)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(4)
+        btn_layout.addWidget(_section("BUTTON"))
         self.button_combo = QComboBox()
         self.button_combo.addItems(INPUT_BUTTONS)
         self.button_combo.setStyleSheet(_field_style())
         self.button_combo.currentTextChanged.connect(self._emit_change)
-        self.editor_layout.addWidget(self.button_combo)
+        btn_layout.addWidget(self.button_combo)
+        stack_layout.addWidget(self._btn_editor)
+
+        # Stick-direction sub-editor
+        self._stick_editor = QWidget()
+        stick_layout = QVBoxLayout(self._stick_editor)
+        stick_layout.setContentsMargins(0, 0, 0, 0)
+        stick_layout.setSpacing(4)
+
+        stick_layout.addWidget(_section("STICK"))
+        self._stick_combo = QComboBox()
+        self._stick_combo.addItems(["Left Stick", "Right Stick"])
+        self._stick_combo.setStyleSheet(_field_style())
+        self._stick_combo.currentIndexChanged.connect(self._emit_change)
+        stick_layout.addWidget(self._stick_combo)
+
+        stick_layout.addWidget(_section("DIRECTION"))
+        self._dir_combo = QComboBox()
+        self._dir_combo.addItems(["Up", "Down", "Left", "Right"])
+        self._dir_combo.setStyleSheet(_field_style())
+        self._dir_combo.currentIndexChanged.connect(self._emit_change)
+        stick_layout.addWidget(self._dir_combo)
+
+        stick_layout.addWidget(_section("DEADZONE"))
+        dz_hint = QLabel("Integer 1–127. Stick values are 0–255 centered at 128;\nthis threshold is applied after subtracting 128.")
+        dz_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        dz_hint.setWordWrap(True)
+        stick_layout.addWidget(dz_hint)
+        self._deadzone_spin = QSpinBox()
+        self._deadzone_spin.setRange(1, 127)
+        self._deadzone_spin.setValue(32)
+        self._deadzone_spin.setStyleSheet(_field_style())
+        self._deadzone_spin.valueChanged.connect(self._emit_change)
+        stick_layout.addWidget(self._deadzone_spin)
+
+        stack_layout.addWidget(self._stick_editor)
+        self._stick_editor.setVisible(False)
+
+        self.editor_layout.addWidget(self._source_stack)
 
         # Event
         self.editor_layout.addWidget(_section("EVENT"))
@@ -1327,21 +1591,10 @@ class InputPanel(RegistryPanel):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setFixedHeight(30)
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {SURF2}; color: {DIM};
-                    border: 1px solid {BORDER}; border-radius: 4px;
-                    font-size: 12px; padding: 0 10px;
-                }}
-                QPushButton:checked {{
-                    background: {INPUT_COLORS[ev]}; color: {DARK};
-                    border-color: {INPUT_COLORS[ev]}; font-weight: 600;
-                }}
-                QPushButton:hover:!checked {{ background: {SURF2}; color: {TEXT}; }}
-            """)
             btn.clicked.connect(lambda checked, e=ev: self._set_event(e))
             event_row.addWidget(btn)
             self._event_btns[ev] = btn
+        self._style_event_btns()
         self.editor_layout.addLayout(event_row)
 
         # Hold duration row (shown only when event == "hold_for")
@@ -1381,19 +1634,53 @@ class InputPanel(RegistryPanel):
             self.name_error.setText("")
         self._emit_change()
 
+    def _on_source_changed(self):
+        is_stick = self._source_combo.currentIndex() == 1
+        self._btn_editor.setVisible(not is_stick)
+        self._stick_editor.setVisible(is_stick)
+        self._emit_change()
+
     def _set_event(self, event: str):
         for ev, btn in self._event_btns.items():
             btn.setChecked(ev == event)
+        self._style_event_btns()
         self._hold_row_widget.setVisible(event == "hold_for")
         self._emit_change()
 
     def _load_item(self, item: InputAction):
         self.name_edit.setText(item.name)
+
+        src = getattr(item, "source_type", "button")
+        is_stick = src == "stick_direction"
+        self._source_combo.blockSignals(True)
+        self._source_combo.setCurrentIndex(1 if is_stick else 0)
+        self._source_combo.blockSignals(False)
+        self._btn_editor.setVisible(not is_stick)
+        self._stick_editor.setVisible(is_stick)
+
         idx = self.button_combo.findText(item.button)
         if idx >= 0:
             self.button_combo.setCurrentIndex(idx)
+
+        stick = getattr(item, "stick", "left")
+        self._stick_combo.blockSignals(True)
+        self._stick_combo.setCurrentIndex(0 if stick == "left" else 1)
+        self._stick_combo.blockSignals(False)
+
+        direction = getattr(item, "direction", "up")
+        dir_map = {"up": 0, "down": 1, "left": 2, "right": 3}
+        self._dir_combo.blockSignals(True)
+        self._dir_combo.setCurrentIndex(dir_map.get(direction, 0))
+        self._dir_combo.blockSignals(False)
+
+        dz = getattr(item, "deadzone", 32)
+        self._deadzone_spin.blockSignals(True)
+        self._deadzone_spin.setValue(int(dz))
+        self._deadzone_spin.blockSignals(False)
+
         for ev, btn in self._event_btns.items():
             btn.setChecked(ev == item.event)
+        self._style_event_btns()
         dur = getattr(item, "hold_duration", 2.0)
         self.hold_duration_spin.setValue(float(dur))
         self._hold_row_widget.setVisible(item.event == "hold_for")
@@ -1402,9 +1689,40 @@ class InputPanel(RegistryPanel):
         raw = self.name_edit.text().strip()
         if _ACTION_NAME_RE.match(raw):
             item.name = raw
-        item.button = self.button_combo.currentText()
+
+        is_stick = self._source_combo.currentIndex() == 1
+        item.source_type = "stick_direction" if is_stick else "button"
+
+        if is_stick:
+            item.stick = "right" if self._stick_combo.currentIndex() == 1 else "left"
+            dir_list = ["up", "down", "left", "right"]
+            item.direction = dir_list[self._dir_combo.currentIndex()]
+            item.deadzone = self._deadzone_spin.value()
+        else:
+            item.button = self.button_combo.currentText()
+
         item.event = next((ev for ev, btn in self._event_btns.items() if btn.isChecked()), "pressed")
         item.hold_duration = self.hold_duration_spin.value()
+
+    def _style_event_btns(self):
+        for ev, btn in self._event_btns.items():
+            active = INPUT_COLORS[ev]
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {SURF2}; color: {DIM};
+                    border: 1px solid {BORDER}; border-radius: 4px;
+                    font-size: 12px; padding: 0 10px;
+                }}
+                QPushButton:checked {{
+                    background: {active}; color: {_contrast_text(active)};
+                    border-color: {active}; font-weight: 600;
+                }}
+                QPushButton:hover:!checked {{ background: {SURF2}; color: {TEXT}; }}
+            """)
+
+    def restyle(self):
+        super().restyle()
+        self._style_event_btns()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1425,6 +1743,7 @@ class ProjectSettingsPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("border: none; background: transparent;")
         rw = QWidget()
+        self._body = rw
         rw.setStyleSheet(f"background: {DARK};")
         rl = QVBoxLayout(rw)
         rl.setContentsMargins(24, 16, 24, 24)
@@ -1497,11 +1816,6 @@ class ProjectSettingsPanel(QWidget):
         rl.addWidget(_section("SYSTEMS"))
         rl.addWidget(_divider())
 
-        # Save system
-        self.save_check = QCheckBox("Enable save system")
-        self.save_check.setStyleSheet(_field_style())
-        self.save_check.stateChanged.connect(self._emit)
-        rl.addWidget(self.save_check)
 
         # Inventory
         inv_row = QHBoxLayout()
@@ -1568,6 +1882,13 @@ class ProjectSettingsPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+    def restyle(self):
+        self._body.setStyleSheet(f"background: {DARK};")
+        _restyle_form_controls(self._body)
+        _restyle_role_buttons(self._body)
+        _restyle_plain_labels(self._body)
+        self.folder_path_label.setStyleSheet(f"color: {TEXT}; font-size: 11px; padding: 6px 0;")
+
     def _randomize_id(self):
         import random, string
         letters = "".join(random.choices(string.ascii_uppercase, k=4))
@@ -1603,45 +1924,6 @@ class ProjectSettingsPanel(QWidget):
             self.folder_path_label.setText(path)
             self.changed.emit()
 
-    def restyle(self, c: dict):
-        self._header.setStyleSheet(f"background: {c['PANEL']}; border-bottom: 1px solid {c['BORDER']};")
-        # Registry panels each have left/right split with inline styles — restyle them
-        for panel in (self.images_panel, self.audio_panel, self.fonts_panel, self.input_panel):
-            if hasattr(panel, 'list_widget'):
-                panel.list_widget.setStyleSheet(f"""
-                    QListWidget {{ background: {c['SURFACE']}; border: 1px solid {c['BORDER']};
-                        border-radius: 4px; color: {c['TEXT']}; outline: none; }}
-                    QListWidget::item {{ padding: 8px 10px; border-radius: 3px;
-                        border-bottom: 1px solid {c['BORDER']}; }}
-                    QListWidget::item:selected {{ background: {c['ACCENT']}; color: white; }}
-                    QListWidget::item:hover:!selected {{ background: {c['SURFACE2']}; }}
-                """)
-            # left sidebar background
-            left = panel.list_widget.parent() if hasattr(panel, 'list_widget') else None
-            if left:
-                left.setStyleSheet(f"background: {c['PANEL']}; border-right: 1px solid {c['BORDER']};")
-            if hasattr(panel, 'editor_widget'):
-                panel.editor_widget.setStyleSheet(f"background: {c['DARK']};")
-        for panel in (self.vars_panel, self.inv_panel):
-            if hasattr(panel, 'var_list'):
-                panel.var_list.setStyleSheet(f"""
-                    QListWidget {{ background: {c['SURFACE']}; border: 1px solid {c['BORDER']};
-                        border-radius: 4px; color: {c['TEXT']}; outline: none; }}
-                    QListWidget::item {{ padding: 8px 10px; border-radius: 3px;
-                        border-bottom: 1px solid {c['BORDER']}; }}
-                    QListWidget::item:selected {{ background: {c['ACCENT']}; color: white; }}
-                    QListWidget::item:hover:!selected {{ background: {c['SURFACE2']}; }}
-                """)
-            if hasattr(panel, 'item_list'):
-                panel.item_list.setStyleSheet(f"""
-                    QListWidget {{ background: {c['SURFACE']}; border: 1px solid {c['BORDER']};
-                        border-radius: 4px; color: {c['TEXT']}; outline: none; }}
-                    QListWidget::item {{ padding: 8px 10px; border-radius: 3px;
-                        border-bottom: 1px solid {c['BORDER']}; }}
-                    QListWidget::item:selected {{ background: {c['ACCENT']}; color: white; }}
-                    QListWidget::item:hover:!selected {{ background: {c['SURFACE2']}; }}
-                """)
-
     def load_project(self, project: Project):
         self._project = project
         self._suppress = True
@@ -1649,7 +1931,6 @@ class ProjectSettingsPanel(QWidget):
         self.title_id_edit.setText(project.title_id)
         self.author_edit.setText(project.author)
         self.version_edit.setText(project.version)
-        self.save_check.setChecked(project.game_data.save_enabled)
         self.inv_check.setChecked(project.game_data.inventory_enabled)
         self.inv_max_spin.setValue(project.game_data.inventory_max)
         self.volume_spin.setValue(project.game_data.volume_default)
@@ -1667,7 +1948,6 @@ class ProjectSettingsPanel(QWidget):
         self._project.title_id = self.title_id_edit.text().strip().upper()
         self._project.author = self.author_edit.text().strip()
         self._project.version = self.version_edit.text().strip() or "1.0"
-        self._project.game_data.save_enabled = self.save_check.isChecked()
         self._project.game_data.inventory_enabled = self.inv_check.isChecked()
         self._project.game_data.inventory_max = self.inv_max_spin.value()
         self._project.game_data.volume_default = self.volume_spin.value()
@@ -1679,35 +1959,36 @@ class ProjectSettingsPanel(QWidget):
 #  GAME DATA TAB  (assembles all panels into a sub-tabbed view)
 # ─────────────────────────────────────────────────────────────
 
-SUBTAB_STYLE = f"""
-QTabWidget::pane {{
-    border: none;
-    border-top: 1px solid {BORDER};
-    background: {DARK};
-}}
-QTabBar {{
-    background: {PANEL};
-}}
-QTabBar::tab {{
-    background: {PANEL};
-    color: {DIM};
-    padding: 9px 18px;
-    border: none;
-    border-bottom: 2px solid transparent;
-    font-size: 12px;
-    font-weight: 500;
-    min-width: 80px;
-}}
-QTabBar::tab:selected {{
-    color: {TEXT};
-    background: {PANEL};
-    border-bottom: 2px solid {ACCENT};
-}}
-QTabBar::tab:hover:!selected {{
-    color: {TEXT};
-    background: {SURF2};
-}}
-"""
+def _subtab_style():
+    return f"""
+    QTabWidget::pane {{
+        border: none;
+        border-top: 1px solid {BORDER};
+        background: {DARK};
+    }}
+    QTabBar {{
+        background: {PANEL};
+    }}
+    QTabBar::tab {{
+        background: {PANEL};
+        color: {DIM};
+        padding: 9px 18px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        font-size: 12px;
+        font-weight: 500;
+        min-width: 80px;
+    }}
+    QTabBar::tab:selected {{
+        color: {TEXT};
+        background: {PANEL};
+        border-bottom: 2px solid {ACCENT};
+    }}
+    QTabBar::tab:hover:!selected {{
+        color: {TEXT};
+        background: {SURF2};
+    }}
+    """
 
 
 class GameDataTab(QWidget):
@@ -1747,7 +2028,7 @@ class GameDataTab(QWidget):
 
         # Sub-tabs
         self.sub_tabs = QTabWidget()
-        self.sub_tabs.setStyleSheet(SUBTAB_STYLE)
+        self.sub_tabs.setStyleSheet(_subtab_style())
         self.sub_tabs.setTabPosition(QTabWidget.TabPosition.North)
 
         # Images registry
@@ -1793,6 +2074,40 @@ class GameDataTab(QWidget):
         root.addWidget(self.sub_tabs)
 
     # ── Load / sync ─────────────────────────────────────────
+
+    def restyle(self, c: dict):
+        global DARK, PANEL, SURFACE, SURF2, BORDER, ACCENT, ACCENT2, TEXT, DIM, MUTED, SUCCESS, WARNING, DANGER
+        old = _theme_snapshot()
+        DARK = c.get("DARK", DARK)
+        PANEL = c.get("PANEL", PANEL)
+        SURFACE = c.get("SURFACE", SURFACE)
+        SURF2 = c.get("SURFACE2", SURF2)
+        BORDER = c.get("BORDER", BORDER)
+        ACCENT = c.get("ACCENT", ACCENT)
+        ACCENT2 = c.get("ACCENT2", ACCENT2)
+        TEXT = c.get("TEXT", TEXT)
+        DIM = c.get("TEXT_DIM", DIM)
+        MUTED = c.get("TEXT_MUTED", MUTED)
+        SUCCESS = c.get("SUCCESS", SUCCESS)
+        WARNING = c.get("WARNING", WARNING)
+        DANGER = c.get("DANGER", DANGER)
+        _sync_semantic_colors()
+        replace_widget_theme_colors(self, old, _theme_snapshot())
+        _restyle_plain_labels(self)
+        self._header.setStyleSheet(f"background: {c['PANEL']}; border-bottom: 1px solid {c['BORDER']};")
+        self.sub_tabs.setStyleSheet(_subtab_style())
+        for panel in (
+            self.images_panel,
+            self.audio_panel,
+            self.fonts_panel,
+            self.vars_panel,
+            self.inv_panel,
+            self.input_panel,
+            self.signals_panel,
+            self.settings_panel,
+        ):
+            if hasattr(panel, "restyle"):
+                panel.restyle()
 
     def load_project(self, project: Project):
         self._project = project

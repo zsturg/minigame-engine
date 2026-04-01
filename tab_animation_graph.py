@@ -2,18 +2,22 @@ import sys
 import os
 import json
 import numpy as np
+from itertools import product
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QMessageBox,
                              QHBoxLayout, QGraphicsView, QGraphicsScene, QSplitter, 
                              QLabel, QPushButton, QDoubleSpinBox, 
                              QToolButton, QMenu, QGraphicsPathItem, QGraphicsItem,
                              QComboBox, QColorDialog, QDialog, QFormLayout, QSpinBox,
                              QCheckBox, QFileDialog, QProgressDialog, QLineEdit,
-                             QFontComboBox, QScrollArea, QFrame)
-from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, Signal
+                             QFontComboBox, QScrollArea, QFrame, QTextEdit,
+                             QPlainTextEdit)
+from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, Signal, QEvent
 from PySide6.QtGui import (QColor, QPen, QPainterPath, QImage, QPixmap, QPainter,
                          QFont, QBrush, QPolygonF, QFontDatabase)
 from PIL import Image as PILImage
 import glob
+import shlex
+from theme_utils import get_default_theme, replace_widget_theme_colors
 # ==========================================
 # 0. PROJECT SETTINGS
 # ==========================================
@@ -46,6 +50,10 @@ class ProjectConfig:
         self.preview_mode = d.get('preview_mode', 'Fit')
 
 PROJECT = ProjectConfig()
+
+# TileCanvasNode updates this before rendering each atlas cell so seed-driven
+# nodes can vary per tile without changing the rest of the graph API.
+TILE_SEED_OFFSET = 0
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -165,11 +173,111 @@ def _hash2d_gradient(xi, yi, seed=0):
 def _smoothstep(t): return t*t*t*(t*(t*6.0-15.0)+10.0)
 def _lerp(a, b, t): return a + (b - a) * t
 
+_HASH_PRIMES = (
+    np.int64(374761393),
+    np.int64(668265263),
+    np.int64(2147483647),
+    np.int64(1274126177),
+    np.int64(97531),
+)
+
+_SIMPLEX_GRAD3 = np.array([
+    [1, 1, 0],  [-1, 1, 0],  [1, -1, 0],  [-1, -1, 0],
+    [1, 0, 1],  [-1, 0, 1],  [1, 0, -1],  [-1, 0, -1],
+    [0, 1, 1],  [0, -1, 1],  [0, 1, -1],  [0, -1, -1],
+], dtype=np.float32)
+
+_SIMPLEX_GRAD4 = np.array([
+    [0, 1, 1, 1],   [0, 1, 1, -1],  [0, 1, -1, 1],  [0, 1, -1, -1],
+    [0, -1, 1, 1],  [0, -1, 1, -1], [0, -1, -1, 1], [0, -1, -1, -1],
+    [1, 0, 1, 1],   [1, 0, 1, -1],  [1, 0, -1, 1],  [1, 0, -1, -1],
+    [-1, 0, 1, 1],  [-1, 0, 1, -1], [-1, 0, -1, 1], [-1, 0, -1, -1],
+    [1, 1, 0, 1],   [1, 1, 0, -1],  [1, -1, 0, 1],  [1, -1, 0, -1],
+    [-1, 1, 0, 1],  [-1, 1, 0, -1], [-1, -1, 0, 1], [-1, -1, 0, -1],
+    [1, 1, 1, 0],   [1, 1, -1, 0],  [1, -1, 1, 0],  [1, -1, -1, 0],
+    [-1, 1, 1, 0],  [-1, 1, -1, 0], [-1, -1, 1, 0], [-1, -1, -1, 0],
+], dtype=np.float32)
+
+def _smoothstep_edges(edge0, edge1, x):
+    width = max(float(edge1) - float(edge0), 1e-6)
+    return _smoothstep(np.clip((x - edge0) / width, 0.0, 1.0))
+
+def _hash_nd(seed, *coords):
+    acc = np.zeros_like(np.asarray(coords[0], dtype=np.int64), dtype=np.int64)
+    acc += np.int64(seed) * np.int64(1274126177)
+    for idx, coord in enumerate(coords):
+        ci = np.asarray(coord, dtype=np.int64)
+        acc ^= ci * _HASH_PRIMES[idx % len(_HASH_PRIMES)]
+        acc = (acc ^ (acc >> 13)) * np.int64(1274126177)
+        acc ^= (acc >> 16)
+    return (acc & np.int64(0x7fffffff)) / float(0x7fffffff)
+
+def _normalize_components(*components):
+    mag_sq = np.zeros_like(np.asarray(components[0], dtype=np.float64), dtype=np.float64)
+    for comp in components:
+        mag_sq += comp * comp
+    mag = np.sqrt(mag_sq)
+    mag = np.where(mag < 1e-8, 1.0, mag)
+    return tuple(comp / mag for comp in components)
+
+def _hash3d_gradient(xi, yi, zi, seed=0):
+    gx = _hash_nd(seed + 11, xi, yi, zi) * 2.0 - 1.0
+    gy = _hash_nd(seed + 29, xi, yi, zi) * 2.0 - 1.0
+    gz = _hash_nd(seed + 47, xi, yi, zi) * 2.0 - 1.0
+    return _normalize_components(gx, gy, gz)
+
+def _hash4d_gradient(xi, yi, zi, wi, seed=0):
+    gx = _hash_nd(seed + 11, xi, yi, zi, wi) * 2.0 - 1.0
+    gy = _hash_nd(seed + 29, xi, yi, zi, wi) * 2.0 - 1.0
+    gz = _hash_nd(seed + 47, xi, yi, zi, wi) * 2.0 - 1.0
+    gw = _hash_nd(seed + 71, xi, yi, zi, wi) * 2.0 - 1.0
+    return _normalize_components(gx, gy, gz, gw)
+
+def _interpolate_hypercube(values, weights):
+    acc = list(values)
+    for t in reversed(weights):
+        acc = [_lerp(acc[i], acc[i + 1], t) for i in range(0, len(acc), 2)]
+    return acc[0]
+
+def _simplex_grad3(cx, cy, cz, seed=0):
+    idx = (_hash_nd(seed + 313, cx, cy, cz) * len(_SIMPLEX_GRAD3)).astype(np.int32) % len(_SIMPLEX_GRAD3)
+    grads = _SIMPLEX_GRAD3[idx]
+    return grads[..., 0], grads[..., 1], grads[..., 2]
+
+def _simplex_grad4(cx, cy, cz, cw, seed=0):
+    idx = (_hash_nd(seed + 313, cx, cy, cz, cw) * len(_SIMPLEX_GRAD4)).astype(np.int32) % len(_SIMPLEX_GRAD4)
+    grads = _SIMPLEX_GRAD4[idx]
+    return grads[..., 0], grads[..., 1], grads[..., 2], grads[..., 3]
+
 def value_noise_2d(X, Y, seed=0):
     xi = np.floor(X).astype(np.int64); yi = np.floor(Y).astype(np.int64)
     xf = X - xi; yf = Y - yi; u = _smoothstep(xf); v = _smoothstep(yf)
     return _lerp(_lerp(_hash2d_vec(xi,yi,seed), _hash2d_vec(xi+1,yi,seed), u),
                  _lerp(_hash2d_vec(xi,yi+1,seed), _hash2d_vec(xi+1,yi+1,seed), u), v)
+
+def value_noise_3d(X, Y, Z, seed=0):
+    X = np.asarray(X, dtype=np.float64); Y = np.asarray(Y, dtype=np.float64); Z = np.asarray(Z, dtype=np.float64)
+    xi = np.floor(X).astype(np.int64); yi = np.floor(Y).astype(np.int64); zi = np.floor(Z).astype(np.int64)
+    xf = X - xi; yf = Y - yi; zf = Z - zi
+    u = _smoothstep(xf); v = _smoothstep(yf); w = _smoothstep(zf)
+    corners = [
+        _hash_nd(seed, xi + dx, yi + dy, zi + dz)
+        for dx, dy, dz in product((0, 1), repeat=3)
+    ]
+    return _interpolate_hypercube(corners, (u, v, w))
+
+def value_noise_4d(X, Y, Z, W, seed=0):
+    X = np.asarray(X, dtype=np.float64); Y = np.asarray(Y, dtype=np.float64)
+    Z = np.asarray(Z, dtype=np.float64); W = np.asarray(W, dtype=np.float64)
+    xi = np.floor(X).astype(np.int64); yi = np.floor(Y).astype(np.int64)
+    zi = np.floor(Z).astype(np.int64); wi = np.floor(W).astype(np.int64)
+    xf = X - xi; yf = Y - yi; zf = Z - zi; wf = W - wi
+    u = _smoothstep(xf); v = _smoothstep(yf); s = _smoothstep(zf); t = _smoothstep(wf)
+    corners = [
+        _hash_nd(seed, xi + dx, yi + dy, zi + dz, wi + dw)
+        for dx, dy, dz, dw in product((0, 1), repeat=4)
+    ]
+    return _interpolate_hypercube(corners, (u, v, s, t))
 
 def perlin_noise_2d(X, Y, seed=0):
     xi = np.floor(X).astype(np.int64); yi = np.floor(Y).astype(np.int64)
@@ -179,6 +287,34 @@ def perlin_noise_2d(X, Y, seed=0):
     n00=gd(xi,yi,xf,yf); n10=gd(xi+1,yi,xf-1,yf)
     n01=gd(xi,yi+1,xf,yf-1); n11=gd(xi+1,yi+1,xf-1,yf-1)
     return _lerp(_lerp(n00,n10,u), _lerp(n01,n11,u), v) * 0.7071 + 0.5
+
+def perlin_noise_3d(X, Y, Z, seed=0):
+    X = np.asarray(X, dtype=np.float64); Y = np.asarray(Y, dtype=np.float64); Z = np.asarray(Z, dtype=np.float64)
+    xi = np.floor(X).astype(np.int64); yi = np.floor(Y).astype(np.int64); zi = np.floor(Z).astype(np.int64)
+    xf = X - xi; yf = Y - yi; zf = Z - zi
+    u = _smoothstep(xf); v = _smoothstep(yf); w = _smoothstep(zf)
+
+    def gd(dx, dy, dz):
+        gx, gy, gz = _hash3d_gradient(xi + dx, yi + dy, zi + dz, seed)
+        return gx * (xf - dx) + gy * (yf - dy) + gz * (zf - dz)
+
+    corners = [gd(dx, dy, dz) for dx, dy, dz in product((0, 1), repeat=3)]
+    return np.clip(_interpolate_hypercube(corners, (u, v, w)) * 0.5 + 0.5, 0.0, 1.0)
+
+def perlin_noise_4d(X, Y, Z, W, seed=0):
+    X = np.asarray(X, dtype=np.float64); Y = np.asarray(Y, dtype=np.float64)
+    Z = np.asarray(Z, dtype=np.float64); W = np.asarray(W, dtype=np.float64)
+    xi = np.floor(X).astype(np.int64); yi = np.floor(Y).astype(np.int64)
+    zi = np.floor(Z).astype(np.int64); wi = np.floor(W).astype(np.int64)
+    xf = X - xi; yf = Y - yi; zf = Z - zi; wf = W - wi
+    u = _smoothstep(xf); v = _smoothstep(yf); s = _smoothstep(zf); t = _smoothstep(wf)
+
+    def gd(dx, dy, dz, dw):
+        gx, gy, gz, gw = _hash4d_gradient(xi + dx, yi + dy, zi + dz, wi + dw, seed)
+        return gx * (xf - dx) + gy * (yf - dy) + gz * (zf - dz) + gw * (wf - dw)
+
+    corners = [gd(dx, dy, dz, dw) for dx, dy, dz, dw in product((0, 1), repeat=4)]
+    return np.clip(_interpolate_hypercube(corners, (u, v, s, t)) * 0.5 + 0.5, 0.0, 1.0)
 
 def simplex_noise_2d(X, Y, seed=0):
     F2 = 0.5*(np.sqrt(3.0)-1.0); G2 = (3.0-np.sqrt(3.0))/6.0
@@ -192,35 +328,162 @@ def simplex_noise_2d(X, Y, seed=0):
         gx, gy = _hash2d_gradient(cx, cy, seed); return tt*tt*(gx*dx+gy*dy)
     return (70.0*(ct(i,j,x0,y0)+ct(i+i1,j+j1,x1,y1)+ct(i+1,j+1,x2,y2)))*0.5+0.5
 
-def _dist_euc(dx, dy): return np.sqrt(dx*dx+dy*dy)
-def _dist_man(dx, dy): return np.abs(dx)+np.abs(dy)
-def _dist_cheb(dx, dy): return np.maximum(np.abs(dx), np.abs(dy))
+def simplex_noise_3d(X, Y, Z, seed=0):
+    X = np.asarray(X, dtype=np.float64); Y = np.asarray(Y, dtype=np.float64); Z = np.asarray(Z, dtype=np.float64)
+    F3 = 1.0 / 3.0
+    G3 = 1.0 / 6.0
+    s = (X + Y + Z) * F3
+    i = np.floor(X + s).astype(np.int64)
+    j = np.floor(Y + s).astype(np.int64)
+    k = np.floor(Z + s).astype(np.int64)
+    t = (i + j + k) * G3
+    x0 = X - (i - t)
+    y0 = Y - (j - t)
+    z0 = Z - (k - t)
+
+    rankx = np.zeros_like(x0, dtype=np.int64)
+    ranky = np.zeros_like(x0, dtype=np.int64)
+    rankz = np.zeros_like(x0, dtype=np.int64)
+    rankx += (x0 > y0).astype(np.int64); ranky += (x0 <= y0).astype(np.int64)
+    rankx += (x0 > z0).astype(np.int64); rankz += (x0 <= z0).astype(np.int64)
+    ranky += (y0 > z0).astype(np.int64); rankz += (y0 <= z0).astype(np.int64)
+
+    i1 = (rankx >= 2).astype(np.int64); j1 = (ranky >= 2).astype(np.int64); k1 = (rankz >= 2).astype(np.int64)
+    i2 = (rankx >= 1).astype(np.int64); j2 = (ranky >= 1).astype(np.int64); k2 = (rankz >= 1).astype(np.int64)
+
+    x1 = x0 - i1 + G3;      y1 = y0 - j1 + G3;      z1 = z0 - k1 + G3
+    x2 = x0 - i2 + 2*G3;    y2 = y0 - j2 + 2*G3;    z2 = z0 - k2 + 2*G3
+    x3 = x0 - 1.0 + 3*G3;   y3 = y0 - 1.0 + 3*G3;   z3 = z0 - 1.0 + 3*G3
+
+    def ct(cx, cy, cz, dx, dy, dz):
+        tt = np.maximum(0.6 - dx*dx - dy*dy - dz*dz, 0.0)
+        tt = tt * tt
+        gx, gy, gz = _simplex_grad3(cx, cy, cz, seed)
+        return tt * tt * (gx * dx + gy * dy + gz * dz)
+
+    n0 = ct(i,         j,         k,         x0, y0, z0)
+    n1 = ct(i + i1,    j + j1,    k + k1,    x1, y1, z1)
+    n2 = ct(i + i2,    j + j2,    k + k2,    x2, y2, z2)
+    n3 = ct(i + 1,     j + 1,     k + 1,     x3, y3, z3)
+    return np.clip((32.0 * (n0 + n1 + n2 + n3)) * 0.5 + 0.5, 0.0, 1.0)
+
+def simplex_noise_4d(X, Y, Z, W, seed=0):
+    X = np.asarray(X, dtype=np.float64); Y = np.asarray(Y, dtype=np.float64)
+    Z = np.asarray(Z, dtype=np.float64); W = np.asarray(W, dtype=np.float64)
+    F4 = (np.sqrt(5.0) - 1.0) / 4.0
+    G4 = (5.0 - np.sqrt(5.0)) / 20.0
+    s = (X + Y + Z + W) * F4
+    i = np.floor(X + s).astype(np.int64)
+    j = np.floor(Y + s).astype(np.int64)
+    k = np.floor(Z + s).astype(np.int64)
+    l = np.floor(W + s).astype(np.int64)
+    t = (i + j + k + l) * G4
+    x0 = X - (i - t)
+    y0 = Y - (j - t)
+    z0 = Z - (k - t)
+    w0 = W - (l - t)
+
+    rankx = np.zeros_like(x0, dtype=np.int64)
+    ranky = np.zeros_like(x0, dtype=np.int64)
+    rankz = np.zeros_like(x0, dtype=np.int64)
+    rankw = np.zeros_like(x0, dtype=np.int64)
+
+    rankx += (x0 > y0).astype(np.int64); ranky += (x0 <= y0).astype(np.int64)
+    rankx += (x0 > z0).astype(np.int64); rankz += (x0 <= z0).astype(np.int64)
+    rankx += (x0 > w0).astype(np.int64); rankw += (x0 <= w0).astype(np.int64)
+    ranky += (y0 > z0).astype(np.int64); rankz += (y0 <= z0).astype(np.int64)
+    ranky += (y0 > w0).astype(np.int64); rankw += (y0 <= w0).astype(np.int64)
+    rankz += (z0 > w0).astype(np.int64); rankw += (z0 <= w0).astype(np.int64)
+
+    i1 = (rankx >= 3).astype(np.int64); j1 = (ranky >= 3).astype(np.int64); k1 = (rankz >= 3).astype(np.int64); l1 = (rankw >= 3).astype(np.int64)
+    i2 = (rankx >= 2).astype(np.int64); j2 = (ranky >= 2).astype(np.int64); k2 = (rankz >= 2).astype(np.int64); l2 = (rankw >= 2).astype(np.int64)
+    i3 = (rankx >= 1).astype(np.int64); j3 = (ranky >= 1).astype(np.int64); k3 = (rankz >= 1).astype(np.int64); l3 = (rankw >= 1).astype(np.int64)
+
+    x1 = x0 - i1 + G4;        y1 = y0 - j1 + G4;        z1 = z0 - k1 + G4;        w1 = w0 - l1 + G4
+    x2 = x0 - i2 + 2*G4;      y2 = y0 - j2 + 2*G4;      z2 = z0 - k2 + 2*G4;      w2 = w0 - l2 + 2*G4
+    x3 = x0 - i3 + 3*G4;      y3 = y0 - j3 + 3*G4;      z3 = z0 - k3 + 3*G4;      w3 = w0 - l3 + 3*G4
+    x4 = x0 - 1.0 + 4*G4;     y4 = y0 - 1.0 + 4*G4;     z4 = z0 - 1.0 + 4*G4;     w4 = w0 - 1.0 + 4*G4
+
+    def ct(cx, cy, cz, cw, dx, dy, dz, dw):
+        tt = np.maximum(0.6 - dx*dx - dy*dy - dz*dz - dw*dw, 0.0)
+        tt = tt * tt
+        gx, gy, gz, gw = _simplex_grad4(cx, cy, cz, cw, seed)
+        return tt * tt * (gx * dx + gy * dy + gz * dz + gw * dw)
+
+    n0 = ct(i,         j,         k,         l,         x0, y0, z0, w0)
+    n1 = ct(i + i1,    j + j1,    k + k1,    l + l1,    x1, y1, z1, w1)
+    n2 = ct(i + i2,    j + j2,    k + k2,    l + l2,    x2, y2, z2, w2)
+    n3 = ct(i + i3,    j + j3,    k + k3,    l + l3,    x3, y3, z3, w3)
+    n4 = ct(i + 1,     j + 1,     k + 1,     l + 1,     x4, y4, z4, w4)
+    return np.clip((27.0 * (n0 + n1 + n2 + n3 + n4)) * 0.5 + 0.5, 0.0, 1.0)
+
+def _dist_euc(components):
+    total = np.zeros_like(np.asarray(components[0], dtype=np.float64), dtype=np.float64)
+    for comp in components:
+        total += comp * comp
+    return np.sqrt(total)
+
+def _dist_man(components):
+    total = np.zeros_like(np.asarray(components[0], dtype=np.float64), dtype=np.float64)
+    for comp in components:
+        total += np.abs(comp)
+    return total
+
+def _dist_cheb(components):
+    total = np.zeros_like(np.asarray(components[0], dtype=np.float64), dtype=np.float64)
+    for comp in components:
+        total = np.maximum(total, np.abs(comp))
+    return total
+
 DFUNCS = {0: _dist_euc, 1: _dist_man, 2: _dist_cheb}
 
-def cellular_noise_2d(X, Y, seed=0, jitter=1.0, dist_type=0, mode=0):
+def cellular_info_nd(*coords, seed=0, jitter=1.0, dist_type=0):
+    coord_arrays = [np.asarray(coord, dtype=np.float64) for coord in coords]
+    cell_coords = [np.floor(coord).astype(np.int64) for coord in coord_arrays]
     dfn = DFUNCS.get(dist_type, _dist_euc)
-    cx = np.floor(X).astype(np.int64); cy = np.floor(Y).astype(np.int64)
-    f1 = np.full(X.shape, 999.0); f2 = np.full(X.shape, 999.0); cid = np.zeros(X.shape)
-    for ox in range(-1, 2):
-        for oy in range(-1, 2):
-            nx = cx+ox; ny = cy+oy
-            px = nx+0.5+((_hash2d_vec(nx,ny,seed)-0.5)*jitter)
-            py = ny+0.5+((_hash2d_vec(nx*127+31,ny*269+17,seed)-0.5)*jitter)
-            d = dfn(X-px, Y-py); tid = _hash2d_vec(nx, ny, seed+9999)
-            uf1 = d < f1
-            f2 = np.where(uf1, f1, np.where(d < f2, d, f2))
-            f1 = np.where(uf1, d, f1); cid = np.where(uf1, tid, cid)
-    if mode == 0: r = f1
-    elif mode == 1: r = f2
-    elif mode == 2: r = f2 - f1
-    elif mode == 3: return np.clip(cid, 0.0, 1.0)
-    else: r = f1
-    return np.clip(r / 1.2, 0.0, 1.0)
+    f1 = np.full_like(coord_arrays[0], 999.0, dtype=np.float64)
+    f2 = np.full_like(coord_arrays[0], 999.0, dtype=np.float64)
+    cid = np.zeros_like(coord_arrays[0], dtype=np.float64)
 
-def fbm_noise(X, Y, fn, octaves=1, lac=2.0, pers=0.5, seed=0, **kw):
-    result = np.zeros_like(X); amp = 1.0; freq = 1.0; ma = 0.0
+    for offsets in product((-1, 0, 1), repeat=len(coord_arrays)):
+        lattice = [cell_coords[idx] + offsets[idx] for idx in range(len(coord_arrays))]
+        point = []
+        for dim, cell in enumerate(lattice):
+            h = _hash_nd(seed + 1009 * (dim + 1), *lattice)
+            point.append(cell + 0.5 + ((h - 0.5) * jitter))
+        d = dfn([coord_arrays[idx] - point[idx] for idx in range(len(coord_arrays))])
+        tid = _hash_nd(seed + 9999, *lattice)
+        use_f1 = d < f1
+        f2 = np.where(use_f1, f1, np.where(d < f2, d, f2))
+        f1 = np.where(use_f1, d, f1)
+        cid = np.where(use_f1, tid, cid)
+
+    return f1, f2, np.clip(cid, 0.0, 1.0)
+
+def cellular_noise_nd(*coords, seed=0, jitter=1.0, dist_type=0, mode=0):
+    f1, f2, cid = cellular_info_nd(*coords, seed=seed, jitter=jitter, dist_type=dist_type)
+    if mode == 0:
+        result = f1
+    elif mode == 1:
+        result = f2
+    elif mode == 2:
+        result = f2 - f1
+    elif mode == 3:
+        return cid
+    else:
+        result = f1
+    norm = 1.2 * np.sqrt(max(len(coords), 2) / 2.0)
+    return np.clip(result / norm, 0.0, 1.0)
+
+def cellular_noise_2d(X, Y, seed=0, jitter=1.0, dist_type=0, mode=0):
+    return cellular_noise_nd(X, Y, seed=seed, jitter=jitter, dist_type=dist_type, mode=mode)
+
+def fbm_noise(coords, fn, octaves=1, lac=2.0, pers=0.5, seed=0, **kw):
+    result = np.zeros_like(np.asarray(coords[0], dtype=np.float64), dtype=np.float64)
+    amp = 1.0; freq = 1.0; ma = 0.0
     for i in range(int(octaves)):
-        result += amp * fn(X*freq, Y*freq, seed=seed+i*37, **kw)
+        scaled_coords = tuple(coord * freq for coord in coords)
+        result += amp * fn(*scaled_coords, seed=seed+i*37, **kw)
         ma += amp; amp *= pers; freq *= lac
     return result / ma if ma > 0 else result
 
@@ -230,11 +493,18 @@ def domain_warp(X, Y, strength, seed=0):
     wy = perlin_noise_2d(X, Y, seed=seed+700) - 0.5
     return X + wx*strength, Y + wy*strength
 
-def temporal_evo(frame, total, speed, loop=False):
-    if loop and total > 0:
-        a = (frame/total)*2.0*np.pi
-        return np.cos(a)*speed, np.sin(a)*speed
-    return speed*(frame/max(total, 1)), 0.0
+def normalized_time(frame, total):
+    return frame / max(total - 1, 1)
+
+def temporal_components(frame, total, evolution, loop=False):
+    evo = max(float(evolution), 0.0)
+    if evo <= 0.001:
+        return ()
+    t = normalized_time(frame, total)
+    if loop:
+        angle = t * 2.0 * np.pi
+        return (np.cos(angle) * evo, np.sin(angle) * evo)
+    return (t * evo,)
 
 # ==========================================
 # 2b. PARTICLE UTILITIES
@@ -399,7 +669,6 @@ def ani_text_to_nodes(text):
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
-            # Check for attached extra data
             if line.startswith("# extra:") and last_node_spec is not None:
                 try:
                     extra_json = line[len("# extra:"):].strip()
@@ -409,11 +678,16 @@ def ani_text_to_nodes(text):
             continue
 
         if line.startswith("NODE "):
-            tokens = line.split()
-            # tokens[0] = "NODE", tokens[1] = ClassName, rest are key=value
+            try:
+                tokens = shlex.split(line)
+            except Exception as e:
+                warnings.append(f"Malformed NODE line: {e}")
+                continue
+
             if len(tokens) < 2:
                 warnings.append(f"Malformed NODE line: {line}")
                 continue
+
             cls_name = tokens[1]
             if cls_name not in NODE_TYPES:
                 warnings.append(f"Unknown node type '{cls_name}' — skipped.")
@@ -426,7 +700,8 @@ def ani_text_to_nodes(text):
                 if "=" not in tok:
                     continue
                 k, v = tok.split("=", 1)
-                k = k.strip(); v = v.strip()
+                k = k.strip()
+                v = v.strip()
                 if k == "id":
                     try:
                         spec["local_id"] = int(v)
@@ -439,21 +714,24 @@ def ani_text_to_nodes(text):
                     except Exception:
                         pass
                 else:
-                    # Property value — check for keyframe dict syntax {f:v,f:v,...}
                     if v.startswith("{") and v.endswith("}"):
                         try:
-                            inner = v[1:-1]  # strip braces
+                            inner = v[1:-1]
                             kf = {}
                             for pair in inner.split(","):
                                 if ":" not in pair:
                                     continue
                                 kf_frame, kf_val = pair.split(":", 1)
-                                kf[int(kf_frame.strip())] = float(kf_val.strip())
+                                raw_kf_val = kf_val.strip()
+                                try:
+                                    parsed_kf_val = float(raw_kf_val)
+                                except ValueError:
+                                    parsed_kf_val = raw_kf_val.strip("\"'")
+                                kf[int(kf_frame.strip())] = parsed_kf_val
                             spec["props"][k] = kf
                         except Exception:
                             warnings.append(f"Could not parse keyframes for '{k}': {v}")
                     else:
-                        # Plain scalar — try numeric first, then raw string
                         try:
                             spec["props"][k] = float(v)
                         except ValueError:
@@ -463,7 +741,11 @@ def ani_text_to_nodes(text):
             last_node_spec = spec
 
         elif line.startswith("CONNECT "):
-            tokens = line.split()
+            try:
+                tokens = shlex.split(line)
+            except Exception as e:
+                warnings.append(f"Malformed CONNECT line: {e}")
+                continue
             conn = {"from_id": None, "to_id": None, "input_slot": 0}
             for tok in tokens[1:]:
                 if "=" not in tok:
@@ -486,15 +768,153 @@ def ani_text_to_nodes(text):
 
     return node_specs, connection_specs, warnings
 
+def _ani_parse_bool_value(value):
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        return 1.0 if float(value) != 0.0 else 0.0
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return 1.0
+        if s in ("0", "false", "no", "off"):
+            return 0.0
+    raise ValueError(f"invalid bool value: {value}")
+
+
+def _ani_parse_enum_value(prop, raw_value):
+    if isinstance(raw_value, str):
+        s = raw_value.strip()
+        if s == "":
+            raise ValueError("empty enum value")
+        try:
+            enum_index = int(float(s))
+        except Exception:
+            lowered = s.lower()
+            enum_index = None
+            for i, item in enumerate(prop.enum_items or []):
+                if str(item).strip().lower() == lowered:
+                    enum_index = i
+                    break
+            if enum_index is None:
+                raise ValueError(f"enum requires integer index or valid label, got {raw_value!r}")
+    else:
+        enum_index = int(float(raw_value))
+
+    max_index = max(0, len(prop.enum_items) - 1)
+    if enum_index < 0:
+        enum_index = 0
+    if enum_index > max_index:
+        enum_index = max_index
+    return float(enum_index)
+
+
+def _ani_sanitize_scalar_for_property(prop, raw_value):
+    if prop.is_string:
+        if raw_value is None:
+            return ""
+        return str(raw_value)
+
+    if prop.is_bool:
+        return _ani_parse_bool_value(raw_value)
+
+    if prop.is_enum:
+        return _ani_parse_enum_value(prop, raw_value)
+
+    if isinstance(raw_value, str):
+        s = raw_value.strip()
+        if s == "":
+            raise ValueError("empty numeric value")
+        numeric = float(s)
+    else:
+        numeric = float(raw_value)
+
+    if numeric < prop.min_val:
+        numeric = prop.min_val
+    if numeric > prop.max_val:
+        numeric = prop.max_val
+    return numeric
+
+
+def _ani_apply_sanitized_property(node, prop_name, raw_value, warnings, node_label=""):
+    prop = node.properties.get(prop_name)
+    if prop is None:
+        warnings.append(f"{node_label}Unknown property '{prop_name}' skipped.")
+        return False
+
+    try:
+        clean_value = _ani_sanitize_scalar_for_property(prop, raw_value)
+    except Exception as e:
+        warnings.append(f"{node_label}Property '{prop_name}' skipped: {e}")
+        return False
+
+    prop.default_value = clean_value
+    prop.keyframes.clear()
+    prop.clear_override()
+    return True
+
+
+def _ani_apply_sanitized_keyframes(node, prop_name, raw_keyframes, warnings, node_label=""):
+    prop = node.properties.get(prop_name)
+    if prop is None:
+        warnings.append(f"{node_label}Unknown property '{prop_name}' skipped.")
+        return False
+
+    if not isinstance(raw_keyframes, dict):
+        warnings.append(f"{node_label}Property '{prop_name}' keyframes skipped: not a dict.")
+        return False
+
+    sanitized = {}
+    for raw_frame, raw_value in raw_keyframes.items():
+        try:
+            frame = int(raw_frame)
+            if frame < 0:
+                warnings.append(f"{node_label}Property '{prop_name}' keyframe {raw_frame} skipped: negative frame.")
+                continue
+        except Exception:
+            warnings.append(f"{node_label}Property '{prop_name}' keyframe '{raw_frame}' skipped: invalid frame.")
+            continue
+
+        try:
+            sanitized_value = _ani_sanitize_scalar_for_property(prop, raw_value)
+        except Exception as e:
+            warnings.append(f"{node_label}Property '{prop_name}' keyframe {frame} skipped: {e}")
+            continue
+
+        sanitized[frame] = sanitized_value
+
+    if not sanitized:
+        warnings.append(f"{node_label}Property '{prop_name}' keyframes skipped: no valid entries.")
+        return False
+
+    prop.keyframes.clear()
+    for frame in sorted(sanitized.keys()):
+        prop.set_keyframe(frame, sanitized[frame])
+    prop.clear_override()
+    return True
+
 
 def build_ani_legend_text():
     """Build a human/LLM-readable reference document of all registered node types."""
-    # Node types that should not be instantiated (they load files)
     skip_instantiate = {"ImageTextureNode", "PNGSequenceNode"}
 
     lines = [
         "=== VITA ADVENTURE CREATOR — ANIMATION GRAPH NODE LEGEND ===",
         "Use these class names in NODE lines when writing or editing graphs.",
+        "",
+        "━━ STRICT RULES ━━",
+        "  1. Every node line must start with: NODE ClassName id=N pos=X,Y",
+        "  2. Use quoted strings only for real string properties.",
+        '     Example: NODE TextNode id=0 pos=0,0 Text="Hello World" Font="Times New Roman" Size=48',
+        "  3. Enum properties may use either the numeric index or the exact label shown below.",
+        "  4. Bool properties may use 0/1, true/false, yes/no, on/off.",
+        "  5. Keyframes must use compact braces with no spaces inside one pair.",
+        "     Example: Evolution={0:0.0,300:5.0}",
+        "  6. The # extra line is JSON and must use full objects, not shorthand numbers.",
+        '     Valid ColorRamp extra: # extra: {"color_stops":[{"pos":0.0,"r":0.0,"g":0.0,"b":0.0,"a":1.0},{"pos":1.0,"r":1.0,"g":1.0,"b":1.0,"a":1.0}]}',
+        '     Invalid ColorRamp extra: # extra: {"color_stops":[0.4,0.45]}',
+        "  7. Do not invent node types. Use only the registered node classes listed below.",
+        "  8. Always include explicit pos=X,Y values and spread nodes horizontally.",
         "",
         "━━ NODE TYPES ━━",
         "",
@@ -503,7 +923,7 @@ def build_ani_legend_text():
     for cls_name, cls in sorted(NODE_TYPES.items()):
         if cls_name in skip_instantiate:
             lines.append(f"  {cls_name}")
-            lines.append(f"    (contains file path data — omit or set manually after paste)")
+            lines.append("    (contains file path data — omit or set manually after paste)")
             lines.append("")
             continue
         try:
@@ -518,7 +938,7 @@ def build_ani_legend_text():
 
         for prop_name, prop in node.properties.items():
             if prop.is_enum and prop.enum_items:
-                items_str = ", ".join(str(x) for x in prop.enum_items)
+                items_str = ", ".join(f"{i}:{item}" for i, item in enumerate(prop.enum_items))
                 lines.append(f"    {prop_name:<20} enum [{items_str}]  default={prop.default_value}")
             elif prop.is_bool:
                 lines.append(f"    {prop_name:<20} bool  default={prop.default_value}")
@@ -531,18 +951,30 @@ def build_ani_legend_text():
     lines += [
         "━━ GRAPH TEXT FORMAT ━━",
         "  NODE ClassName  id=N  pos=X,Y  PropName=value ...",
-        "  # extra: {\"color_stops\": [...]}   ← optional, for ColorRampNode etc.",
+        '  # extra: {"color_stops": [...]}   ← optional, for ColorRampNode etc.',
         "  CONNECT from=<id>  to=<id>  input=<slot>",
         "",
-        "  KEYFRAMES: Use {frame:val,frame:val,...} instead of a plain scalar to animate a property.",
-        "  Example:  Factor={0:0.0,15:1.0,30:0.0}  (no spaces inside the braces)",
-        "  Omit a prop entirely to keep its default. Omit keyframes to use a static value.",
+        "━━ VALID EXAMPLES ━━",
+        "  NODE VoronoiNode id=0 pos=-320,0 Output=Edge Scale=12 Evolution={0:0.0,300:5.0}",
+        "  NODE ColorRampNode id=1 pos=-80,0 Mode=Constant",
+        '  # extra: {"color_stops":[{"pos":0.0,"r":0.0,"g":0.2,"b":0.5,"a":1.0},{"pos":0.45,"r":0.0,"g":0.8,"b":1.0,"a":1.0},{"pos":1.0,"r":1.0,"g":1.0,"b":1.0,"a":1.0}]}',
+        "  NODE MergeNode id=2 pos=160,0 Mode=Screen Opacity=0.6",
+        "  NODE OutputNode id=3 pos=400,0",
+        "  CONNECT from=0 to=1 input=0",
+        "  CONNECT from=1 to=2 input=0",
+        "  CONNECT from=2 to=3 input=0",
         "",
-        "  OutputNode is always present. Paste will skip creating a second OutputNode.",
-        "  id values are local to this paste batch, starting at 0.",
-        "  Omit props with default values to keep text compact.",
+        "━━ INVALID EXAMPLES ━━",
+        "  NODE GlowNode id=6                  ← invalid if GlowNode is not in the node list below",
+        "  NODE VoronoiNode id=0 Output=Edge   ← invalid if pos=X,Y is omitted",
+        '  # extra: {"color_stops":[0.4,0.45]}   ← invalid ColorRamp payload',
+        "",
+        "OutputNode is always present. Paste will skip creating a second OutputNode.",
+        "id values are local to this paste batch, starting at 0.",
+        "Omit props with default values to keep text compact.",
     ]
     return "\n".join(lines)
+
 
 
 class BaseNode:
@@ -1347,16 +1779,236 @@ class TextNode(BaseNode):
         arr = np.frombuffer(img.bits(), dtype=np.uint8).reshape(h, w, 4).astype(np.float32) / 255.0
         return arr
 
+# --- TILE CANVAS NODE ---
+@register_node
+class TileCanvasNode(BaseNode):
+    """
+    Tile-aware atlas builder.
+
+    Renders the upstream graph once per cell at Tile Size, optionally varies
+    seed-based nodes per cell, then stamps the results into a larger atlas.
+    """
+
+    MODES = ["Top-Down", "Platformer"]
+    INPUT_MODES = ["Repeat Per Tile", "Slice Atlas"]
+
+    def __init__(self):
+        super().__init__("Tile Canvas")
+        self.inputs = [None]
+        self.add_property("Mode", 0, is_enum=True, items=self.MODES)
+        self.add_property("Input Mode", 0, is_enum=True, items=self.INPUT_MODES)
+        self.add_property("Tile Size", 48, 8, 256)
+        self.add_property("Columns", 8, 1, 64)
+        self.add_property("Rows", 4, 1, 64)
+        self.add_property("Cell Variation", 0.0, 0.0, 1.0)
+        self.add_property("Seamless", 1.0, is_bool=True)
+        self.add_property("Seamless Blend", 0.15, 0.01, 0.5)
+        self.add_property("Band Width", 4, 1, 64)
+        self.add_property("Band R", 1.0, 0.0, 1.0)
+        self.add_property("Band G", 1.0, 0.0, 1.0)
+        self.add_property("Band B", 1.0, 0.0, 1.0)
+        self.add_property("Band Opacity", 0.6, 0.0, 1.0)
+        self.add_property("Show Grid", 1.0, is_bool=True)
+
+    def tile_size(self, frame=0):
+        return max(1, int(self.properties["Tile Size"].get_value(frame)))
+
+    def columns(self, frame=0):
+        return max(1, int(self.properties["Columns"].get_value(frame)))
+
+    def rows(self, frame=0):
+        return max(1, int(self.properties["Rows"].get_value(frame)))
+
+    def atlas_width(self, frame=0):
+        return self.tile_size(frame) * self.columns(frame)
+
+    def atlas_height(self, frame=0):
+        return self.tile_size(frame) * self.rows(frame)
+
+    def _apply_seamless(self, cell, blend_frac, edges=(True, True, True, True)):
+        h, w = cell.shape[:2]
+        result = cell.copy()
+        bh = max(1, int(h * blend_frac))
+        bw = max(1, int(w * blend_frac))
+        top, bottom, left, right = edges
+
+        if top or bottom:
+            for y in range(bh):
+                t = y / bh
+                alpha_edge = 1.0 - t
+                alpha_local = t
+                if top:
+                    result[y, :] = (
+                        alpha_local * cell[y, :] + alpha_edge * cell[h - bh + y, :]
+                    )
+                if bottom:
+                    result[h - bh + y, :] = (
+                        alpha_local * cell[h - bh + y, :] + alpha_edge * cell[y, :]
+                    )
+
+        if left or right:
+            for x in range(bw):
+                t = x / bw
+                alpha_edge = 1.0 - t
+                alpha_local = t
+                if left:
+                    result[:, x] = (
+                        alpha_local * result[:, x] + alpha_edge * result[:, w - bw + x]
+                    )
+                if right:
+                    result[:, w - bw + x] = (
+                        alpha_local * result[:, w - bw + x] + alpha_edge * result[:, x]
+                    )
+
+        return np.clip(result, 0.0, 1.0)
+
+    def _apply_edge_band(self, cell, band_width, r, g, b, opacity):
+        result = cell.copy()
+        h = cell.shape[0]
+        bw = max(1, min(band_width, h))
+        band_color = np.array([r, g, b, 1.0], dtype=np.float32)
+        for y in range(bw):
+            t = 1.0 - (y / bw)
+            alpha = opacity * t
+            result[y, :] = result[y, :] * (1.0 - alpha) + band_color * alpha
+        return np.clip(result, 0.0, 1.0)
+
+    def evaluate(self, frame, w, h):
+        global TILE_SEED_OFFSET
+
+        p = self.properties
+        mode = int(p["Mode"].get_value(frame))
+        input_mode = int(p["Input Mode"].get_value(frame))
+        tile_sz = self.tile_size(frame)
+        cols = self.columns(frame)
+        rows_n = self.rows(frame)
+        variation = p["Cell Variation"].get_value(frame)
+        seamless = bool(p["Seamless"].get_value(frame))
+        blend_frac = p["Seamless Blend"].get_value(frame)
+        band_width = max(1, int(p["Band Width"].get_value(frame)))
+        band_r = p["Band R"].get_value(frame)
+        band_g = p["Band G"].get_value(frame)
+        band_b = p["Band B"].get_value(frame)
+        band_opacity = p["Band Opacity"].get_value(frame)
+
+        atlas = np.zeros((rows_n * tile_sz, cols * tile_sz, 4), dtype=np.float32)
+
+        if self.inputs[0] is None:
+            atlas[..., 3] = 1.0
+            return atlas
+
+        edges = (True, True, True, True) if mode == 0 else (False, True, True, True)
+        total_cells = cols * rows_n
+        source_atlas = None
+
+        if input_mode == 1:
+            TILE_SEED_OFFSET = 0
+            source_atlas = self.inputs[0].evaluate(frame, cols * tile_sz, rows_n * tile_sz).copy()
+
+        for cell_idx in range(total_cells):
+            col = cell_idx % cols
+            row = cell_idx // cols
+
+            y0 = row * tile_sz
+            x0 = col * tile_sz
+
+            if input_mode == 1 and source_atlas is not None:
+                TILE_SEED_OFFSET = 0
+                cell = source_atlas[y0:y0 + tile_sz, x0:x0 + tile_sz].copy()
+            else:
+                TILE_SEED_OFFSET = int(cell_idx * variation * 100) if variation > 0.001 else 0
+                cell = self.inputs[0].evaluate(frame, tile_sz, tile_sz).copy()
+
+            if seamless:
+                cell = self._apply_seamless(cell, blend_frac, edges)
+
+            if mode == 1:
+                cell = self._apply_edge_band(
+                    cell, band_width, band_r, band_g, band_b, band_opacity
+                )
+
+            atlas[y0:y0 + tile_sz, x0:x0 + tile_sz] = cell
+
+        TILE_SEED_OFFSET = 0
+        return np.clip(atlas, 0.0, 1.0)
+
+def build_field_coords(frame, w, h, scale, offset_x, offset_y, evolution, loop, warp_strength, seed, seamless_tile):
+    asp = w / max(h, 1)
+    X, Y = np.meshgrid(np.linspace(0, scale * asp, w), np.linspace(0, scale, h))
+    X += offset_x
+    Y += offset_y
+    if seamless_tile:
+        X = X % scale
+        Y = Y % scale
+    if warp_strength > 0.001:
+        X, Y = domain_warp(X, Y, warp_strength, seed)
+    return (X, Y) + temporal_components(frame, PROJECT.duration, evolution, loop)
+
 # --- NOISE NODE ---
 @register_node
 class NoiseNode(BaseNode):
-    NTYPES = ["Value", "Perlin", "Simplex", "Worley F1", "Worley F2", "Worley Edge", "Voronoi"]
+    NTYPES = ["Value", "Perlin", "Simplex"]
     DTYPES = ["Round", "Diamond", "Square"]
 
     def __init__(self):
         super().__init__("Noise")
         self.inputs = []
         self.add_property("Type", 1, is_enum=True, items=self.NTYPES)
+        self.add_property("Scale", 5, 0.1, 100)
+        self.add_property("Seed", 0, 0, 9999)
+        self.add_property("Octaves", 3, 1, 8)
+        self.add_property("Lacunarity", 2, 1, 4)
+        self.add_property("Persistence", 0.5, 0, 1)
+        self.add_property("Offset X", 0, -1000, 1000)
+        self.add_property("Offset Y", 0, -1000, 1000)
+        self.add_property("Evolution", 0, 0, 100)
+        self.add_property("Temporal Loop", 0, is_bool=True)
+        self.add_property("Warp Strength", 0, 0, 10)
+        self.add_property("Seamless Tile", 0, is_bool=True)
+        self.add_property("Invert", 0, is_bool=True)
+
+    def evaluate(self, frame, w, h):
+        global TILE_SEED_OFFSET
+        p = self.properties
+        nt = int(p["Type"].get_value(frame))
+        sc = max(p["Scale"].get_value(frame), 0.1)
+        sd = int(p["Seed"].get_value(frame)) + TILE_SEED_OFFSET
+        oc = int(np.clip(p["Octaves"].get_value(frame), 1, 8))
+        la = p["Lacunarity"].get_value(frame)
+        pe = p["Persistence"].get_value(frame)
+        ox = p["Offset X"].get_value(frame)
+        oy = p["Offset Y"].get_value(frame)
+        ev = p["Evolution"].get_value(frame)
+        lp = bool(p["Temporal Loop"].get_value(frame))
+        wa = p["Warp Strength"].get_value(frame)
+        ti = bool(p["Seamless Tile"].get_value(frame))
+        inv = bool(p["Invert"].get_value(frame))
+
+        coords = build_field_coords(frame, w, h, sc, ox, oy, ev, lp, wa, sd, ti)
+        temporal_dims = len(coords) - 2
+        fns = [
+            [value_noise_2d, value_noise_3d, value_noise_4d],
+            [perlin_noise_2d, perlin_noise_3d, perlin_noise_4d],
+            [simplex_noise_2d, simplex_noise_3d, simplex_noise_4d],
+        ]
+        fn = fns[nt][min(temporal_dims, 2)]
+        noise = fbm_noise(coords, fn, oc, la, pe, sd)
+        noise = np.clip(noise, 0.0, 1.0)
+        if inv:
+            noise = 1.0 - noise
+        arr = np.zeros((h, w, 4), dtype=np.float32)
+        arr[..., 0] = noise; arr[..., 1] = noise; arr[..., 2] = noise; arr[..., 3] = 1.0
+        return arr
+
+@register_node
+class VoronoiNode(BaseNode):
+    OUTPUTS = ["F1", "F2", "Edge", "Cell ID", "Cells", "Borders"]
+    DTYPES = NoiseNode.DTYPES
+
+    def __init__(self):
+        super().__init__("Voronoi")
+        self.inputs = []
+        self.add_property("Output", 2, is_enum=True, items=self.OUTPUTS)
         self.add_property("Scale", 5, 0.1, 100)
         self.add_property("Seed", 0, 0, 9999)
         self.add_property("Octaves", 3, 1, 8)
@@ -1371,12 +2023,16 @@ class NoiseNode(BaseNode):
         self.add_property("Warp Strength", 0, 0, 10)
         self.add_property("Seamless Tile", 0, is_bool=True)
         self.add_property("Invert", 0, is_bool=True)
+        self.add_property("Border Width", 0.08, 0.001, 1.0)
+        self.add_property("Softness", 0.03, 0.0, 1.0)
+        self.add_property("Variation", 1.0, 0.0, 1.0)
 
     def evaluate(self, frame, w, h):
+        global TILE_SEED_OFFSET
         p = self.properties
-        nt = int(p["Type"].get_value(frame))
+        mode = int(p["Output"].get_value(frame))
         sc = max(p["Scale"].get_value(frame), 0.1)
-        sd = int(p["Seed"].get_value(frame))
+        sd = int(p["Seed"].get_value(frame)) + TILE_SEED_OFFSET
         oc = int(np.clip(p["Octaves"].get_value(frame), 1, 8))
         la = p["Lacunarity"].get_value(frame)
         pe = p["Persistence"].get_value(frame)
@@ -1389,32 +2045,35 @@ class NoiseNode(BaseNode):
         wa = p["Warp Strength"].get_value(frame)
         ti = bool(p["Seamless Tile"].get_value(frame))
         inv = bool(p["Invert"].get_value(frame))
+        border_width = p["Border Width"].get_value(frame)
+        softness = p["Softness"].get_value(frame)
+        variation = p["Variation"].get_value(frame)
 
-        asp = w / h
-        X, Y = np.meshgrid(np.linspace(0, sc * asp, w), np.linspace(0, sc, h))
-        X += ox; Y += oy
-        if ev > 0.001:
-            ex, ey = temporal_evo(frame, PROJECT.duration, ev, lp)
-            X += ex; Y += ey
-        if ti:
-            X, Y = X % sc, Y % sc
-        if wa > 0.001:
-            X, Y = domain_warp(X, Y, wa, sd)
-
+        coords = build_field_coords(frame, w, h, sc, ox, oy, ev, lp, wa, sd, ti)
         ck = dict(jitter=ji, dist_type=dt)
-        fns = [
-            value_noise_2d, perlin_noise_2d, simplex_noise_2d,
-            lambda X, Y, seed=0: cellular_noise_2d(X, Y, seed, mode=0, **ck),
-            lambda X, Y, seed=0: cellular_noise_2d(X, Y, seed, mode=1, **ck),
-            lambda X, Y, seed=0: cellular_noise_2d(X, Y, seed, mode=2, **ck),
-            lambda X, Y, seed=0: cellular_noise_2d(X, Y, seed, mode=3, **ck)
-        ]
-        noise = fbm_noise(X, Y, fns[min(nt, 6)], oc, la, pe, sd)
-        noise = np.clip(noise, 0.0, 1.0)
+
+        if mode <= 2:
+            field = fbm_noise(
+                coords,
+                lambda *sample_coords, seed=0: cellular_noise_nd(*sample_coords, seed=seed, mode=mode, **ck),
+                oc, la, pe, sd
+            )
+        else:
+            f1, f2, cid = cellular_info_nd(*coords, seed=sd, **ck)
+            edge_norm = 1.2 * np.sqrt(max(len(coords), 2) / 2.0)
+            edge = np.clip((f2 - f1) / edge_norm, 0.0, 1.0)
+            if mode == 3:
+                field = cid
+            elif mode == 4:
+                field = np.clip((1.0 - variation) + (cid * variation), 0.0, 1.0)
+            else:
+                field = 1.0 - _smoothstep_edges(border_width, border_width + softness, edge)
+
+        field = np.clip(field, 0.0, 1.0)
         if inv:
-            noise = 1.0 - noise
+            field = 1.0 - field
         arr = np.zeros((h, w, 4), dtype=np.float32)
-        arr[..., 0] = noise; arr[..., 1] = noise; arr[..., 2] = noise; arr[..., 3] = 1.0
+        arr[..., 0] = field; arr[..., 1] = field; arr[..., 2] = field; arr[..., 3] = 1.0
         return arr
 
 # --- RANDOM SELECT NODE ---
@@ -3366,8 +4025,8 @@ class UICheckboxNode(BaseNode):
 _C = {
     "body_bg":      QColor("#1a1a24"),
     "border":       QColor("#2e2e42"),
-    "border_sel":   QColor("#7c6aff"),
-    "port_in":      QColor("#7c6aff"),
+    "border_sel":   QColor("#4a4860"),
+    "port_in":      QColor("#4a4860"),
     "port_out":     QColor("#f59e0b"),
     "port_border":  QColor("#1a1a24"),
     "port_hover":   QColor("#ffffff"),
@@ -3433,6 +4092,7 @@ class GfxSocket(QGraphicsItem):
 
 NODE_COLORS = {
     NoiseNode: QColor(80, 50, 100),
+    VoronoiNode: QColor(100, 60, 120),
     ColorRampNode: QColor(100, 60, 40),
     CircleNode: QColor(40, 70, 90),
     BoxNode: QColor(40, 70, 90),
@@ -3515,6 +4175,7 @@ class GfxNode(QGraphicsItem):
             ParticleEmitterNode: [("Sprite",)],
             RandomSelectNode: [("1",), ("2",), ("3",), ("4",)],
             BrickPatternNode: [],
+            TileCanvasNode: [("In",)],
             TileablePatternNode: [("UV",), ("Mask",), ("Tex",)],
             PolarCoordsNode: [("Img",)],
             DisplacementNode: [("Src",), ("Map",)],
@@ -3624,19 +4285,140 @@ class GfxConnection(QGraphicsPathItem):
         self.setPath(path)
         self.setPen(QPen(_C["edge_default"], 2))
 
+
+class GfxTileCanvas(GfxNode):
+    """Wider card for TileCanvasNode with atlas and grid metadata."""
+
+    WIDTH = 210
+
+    def __init__(self, logic_node, scene_ref):
+        QGraphicsItem.__init__(self)
+        self.logic = logic_node
+        self.scene_ref = scene_ref
+        self.width = self.WIDTH
+        self.height = 120
+        self.setPos(logic_node.pos)
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.in_sockets = []
+        self.out_sockets = []
+        self._init_sockets()
+
+    def _init_sockets(self):
+        self.in_sockets.append(GfxSocket(self, 0, True, "In"))
+        self.out_sockets.append(GfxSocket(self, 0, False))
+
+    def paint(self, painter, option, widget):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.boundingRect()
+        sel = self.isSelected()
+        corner = self.CORNER
+
+        painter.setPen(QPen(_C["border_sel"] if sel else _C["border"], 2 if sel else 1))
+        painter.setBrush(QBrush(_C["body_bg"]))
+        painter.drawRoundedRect(rect, corner, corner)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(30, 100, 70)))
+        painter.drawRoundedRect(QRectF(0, 0, self.width, self.HEADER_H), corner, corner)
+        painter.drawRect(QRectF(0, self.HEADER_H - corner, self.width, corner))
+
+        painter.setPen(_C["text_title"])
+        font = QFont("Segoe UI", 9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(
+            QRectF(8, 0, self.width - 16, self.HEADER_H),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            "Tile Canvas",
+        )
+
+        mode_idx = int(self.logic.properties["Mode"].get_value(0))
+        mode_str = (
+            TileCanvasNode.MODES[mode_idx]
+            if mode_idx < len(TileCanvasNode.MODES)
+            else "?"
+        )
+        input_idx = int(self.logic.properties["Input Mode"].get_value(0))
+        input_str = (
+            TileCanvasNode.INPUT_MODES[input_idx]
+            if input_idx < len(TileCanvasNode.INPUT_MODES)
+            else "?"
+        )
+        sz = self.logic.tile_size()
+        cols = self.logic.columns()
+        rows_n = self.logic.rows()
+        aw = self.logic.atlas_width()
+        ah = self.logic.atlas_height()
+
+        painter.setPen(_C["text_label"])
+        painter.setFont(QFont("Segoe UI", 8))
+        y = self.HEADER_H + 6
+        for line in [
+            f"Mode: {mode_str}",
+            f"Input: {input_str}",
+            f"Tile: {sz}px   {cols} x {rows_n}",
+            f"Atlas: {aw} x {ah} px",
+        ]:
+            painter.drawText(
+                QRectF(8, y, self.width - 16, 15),
+                Qt.AlignmentFlag.AlignLeft,
+                line,
+            )
+            y += 16
+
+        show_grid = bool(self.logic.properties["Show Grid"].get_value(0))
+        if show_grid:
+            preview_rect = QRectF(8, y + 2, self.width - 16, 34)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(15, 35, 25)))
+            painter.drawRoundedRect(preview_rect, 3, 3)
+
+            max_cols = min(cols, 20)
+            max_rows = min(rows_n, 8)
+            cell_w = preview_rect.width() / max_cols
+            cell_h = preview_rect.height() / max_rows
+            painter.setPen(QPen(QColor(60, 180, 100, 150), 0.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+            for c in range(max_cols + 1):
+                x = preview_rect.x() + c * cell_w
+                painter.drawLine(QPointF(x, preview_rect.y()), QPointF(x, preview_rect.bottom()))
+            for r in range(max_rows + 1):
+                yy = preview_rect.y() + r * cell_h
+                painter.drawLine(QPointF(preview_rect.x(), yy), QPointF(preview_rect.right(), yy))
+
+            if mode_idx == 1:
+                band_h_frac = 0.25
+                painter.setPen(QPen(QColor(255, 220, 80, 120), 1.0))
+                for r in range(max_rows):
+                    yy = preview_rect.y() + r * cell_h + cell_h * band_h_frac
+                    painter.drawLine(QPointF(preview_rect.x(), yy), QPointF(preview_rect.right(), yy))
+
+        self.height = int(y + (38 if show_grid else 4))
+
+        if sel:
+            painter.setPen(QPen(_C["border_sel"], 2.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), corner, corner)
+
 # ==========================================
 # 5. NAVIGATION
 # ==========================================
 class InfiniteScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setBackgroundBrush(QColor("#16161c"))
+        self._theme_colors = get_default_theme().copy()
+        self.setBackgroundBrush(QColor(self._theme_colors["PANEL"]))
         self.setSceneRect(-100000, -100000, 200000, 200000)
 
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
         gs = 50
-        lc = QColor("#2e2e42")
+        lc = QColor(self._theme_colors["BORDER"])
         left = int(rect.left()) - (int(rect.left()) % gs)
         top = int(rect.top()) - (int(rect.top()) % gs)
         lines = []
@@ -3765,12 +4547,16 @@ class GraphView(QGraphicsView):
         gen.addAction("Value",         lambda: spawn(ValueNode))
         gen.addAction("Oscillator",    lambda: spawn(OscillatorNode))
         gen.addAction("Noise",         lambda: spawn(NoiseNode))
+        gen.addAction("Voronoi",       lambda: spawn(VoronoiNode))
         gen.addAction("Brick / Tile",  lambda: spawn(BrickPatternNode))
         gen.addAction("Image Texture", lambda: spawn(ImageTextureNode))
         gen.addAction("PNG Sequence",  lambda: spawn(PNGSequenceNode))
         gen.addAction("Wave Texture",   lambda: spawn(WaveNode))
         gen.addAction("Oscilloscope",   lambda: spawn(OscilloscopeNode))
         gen.addAction("Tileable Patterns", lambda: spawn(TileablePatternNode))
+
+        tilesets = menu.addMenu("TileSets")
+        tilesets.addAction("Tile Canvas", lambda: spawn(TileCanvasNode))
 
         # --- Modifiers ---
         mod = menu.addMenu("Modifiers")
@@ -4346,8 +5132,9 @@ class TimelineWidget(QWidget):
         painter = QPainter(self)
         w = self.width()
         step = w / PROJECT.duration
-        painter.fillRect(self.rect(), QColor(30, 30, 30))
-        painter.setPen(QColor(80, 80, 80))
+        theme = getattr(self.main_window, "_theme_colors", get_default_theme())
+        painter.fillRect(self.rect(), QColor(theme["PANEL"]))
+        painter.setPen(QColor(theme["BORDER"]))
         for i in range(PROJECT.duration):
             x = i * step
             painter.drawLine(int(x), 40, int(x), 60)
@@ -4355,7 +5142,7 @@ class TimelineWidget(QWidget):
                 painter.drawText(int(x) + 2, 55, str(i))
         if self.main_window and self.main_window.inspector.current_node:
             nd = self.main_window.inspector.current_node
-            painter.setBrush(QColor("yellow"))
+            painter.setBrush(QColor(theme["WARNING"]))
             painter.setPen(Qt.PenStyle.NoPen)
             keys = set()
             for p in nd.properties.values():
@@ -4364,7 +5151,9 @@ class TimelineWidget(QWidget):
                 if k < PROJECT.duration:
                     painter.drawEllipse(QPointF((k * step) + (step / 2), 30), 3, 3)
         px = self.current_frame * step
-        painter.setBrush(QColor(0, 120, 215, 100))
+        current_fill = QColor(theme["ACCENT"])
+        current_fill.setAlpha(100)
+        painter.setBrush(current_fill)
         painter.drawRect(int(px), 0, int(step), 60)
 
 # ==========================================
@@ -4571,24 +5360,115 @@ class ExportAnimationDialog(QDialog):
 class AnimationGraphTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._theme_colors = get_default_theme().copy()
         self.nodes = []
         self.output_node = None
         self.scene = InfiniteScene()
+        self.scene._theme_colors = self._theme_colors
         self.view = GraphView(self.scene, self)
         self.timeline = TimelineWidget()
         self.timeline.set_main_ref(self)
         self.inspector = Inspector(self.timeline)
         self.preview_lbl = QLabel()
-        self.preview_lbl.setStyleSheet("border: 2px solid #555;")
+        self.preview_lbl.setStyleSheet(f"border: 2px solid {self._theme_colors['BORDER']};")
         self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.setup_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         
         self.timeline.frame_changed.connect(self.inspector.update_ui_from_frame)
         self.timeline.frame_changed.connect(lambda f: self.render_preview(f))
         self.inspector.render_needed.connect(lambda: self.render_preview(self.timeline.current_frame))
         self.init_graph()
         self.update_preview_bg()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress and self._is_graph_widget(obj):
+            if self._handle_graph_hotkey(event):
+                return True
+        return super().eventFilter(obj, event)
+
+    def _is_graph_widget(self, obj):
+        if not isinstance(obj, QWidget):
+            return False
+        return obj is self or self.isAncestorOf(obj)
+
+    def _focus_blocks_graph_hotkeys(self):
+        focus = QApplication.focusWidget()
+        current = focus if isinstance(focus, QWidget) else None
+        while current is not None:
+            if isinstance(current, (QLineEdit, QTextEdit, QPlainTextEdit, QFontComboBox)):
+                return True
+            if isinstance(current, QComboBox) and current.isEditable():
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _keyframe_node_properties(self, node):
+        if node is None:
+            return 0
+        frame = self.timeline.current_frame
+        count = 0
+        for prop in node.properties.values():
+            prop.set_keyframe(frame, prop.get_value(frame))
+            count += 1
+        return count
+
+    def _refresh_keyframe_ui(self):
+        self.inspector.update_ui_from_frame()
+        self.timeline.update()
+        self.render_preview(self.timeline.current_frame)
+
+    def keyframe_selected_node(self):
+        node = self.inspector.current_node
+        if node is None:
+            self._show_toast("No node selected")
+            return
+        count = self._keyframe_node_properties(node)
+        self._refresh_keyframe_ui()
+        self._show_toast(f"Keyframed {count} parameter(s) on {node.name}")
+
+    def keyframe_all_nodes(self):
+        keyed_props = 0
+        keyed_nodes = 0
+        for node in self.nodes:
+            count = self._keyframe_node_properties(node)
+            if count > 0:
+                keyed_props += count
+                keyed_nodes += 1
+        self._refresh_keyframe_ui()
+        self._show_toast(f"Keyframed {keyed_props} parameter(s) across {keyed_nodes} node(s)")
+
+    def _handle_graph_hotkey(self, event):
+        if event.key() != Qt.Key.Key_I:
+            return False
+        if self._focus_blocks_graph_hotkeys():
+            return False
+        if event.isAutoRepeat():
+            return True
+        mods = event.modifiers()
+        disallowed_mods = (
+            Qt.KeyboardModifier.ShiftModifier |
+            Qt.KeyboardModifier.AltModifier |
+            Qt.KeyboardModifier.MetaModifier
+        )
+        if mods & disallowed_mods:
+            return False
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            self.keyframe_all_nodes()
+            return True
+        if mods in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier):
+            self.keyframe_selected_node()
+            return True
+        return False
+
+    def closeEvent(self, event):
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        super().closeEvent(event)
 
     def setup_ui(self):
         left = QWidget()
@@ -4666,7 +5546,19 @@ class AnimationGraphTab(QWidget):
         self.setLayout(ml)
 
     def restyle(self, colors: dict):
-        pass # Stub to prevent crashes on theme change
+        old = dict(self._theme_colors)
+        merged = get_default_theme()
+        merged.update(colors or {})
+        self._theme_colors = merged
+        self.scene._theme_colors = merged
+        self.scene.setBackgroundBrush(QColor(merged["PANEL"]))
+        replace_widget_theme_colors(self, old, merged)
+        self.view.drag_line.setPen(QPen(QColor(merged["TEXT"]), 2, Qt.PenStyle.DashLine))
+        self.update_preview_bg()
+        self.scene.update(self.scene.sceneRect())
+        self.view.viewport().update()
+        self.timeline.update()
+        self.preview_lbl.update()
 
     def file_new(self):
         self.clear_graph()
@@ -4738,7 +5630,43 @@ class AnimationGraphTab(QWidget):
 
     def add_node(self, n):
         self.nodes.append(n)
-        self.scene.addItem(GfxNode(n, self.scene))
+        gfx = GfxTileCanvas(n, self.scene) if isinstance(n, TileCanvasNode) else GfxNode(n, self.scene)
+        self.scene.addItem(gfx)
+
+    def _get_connected_tile_canvas(self):
+        if not self.output_node:
+            return None
+
+        stack = [self.output_node]
+        seen = set()
+        while stack:
+            node = stack.pop()
+            node_key = id(node)
+            if node_key in seen:
+                continue
+            seen.add(node_key)
+            if isinstance(node, TileCanvasNode):
+                return node
+            stack.extend(inp for inp in getattr(node, "inputs", []) if inp is not None)
+        return None
+
+    def _draw_tile_grid_overlay(self, arr, tile_sz, cols, rows_n):
+        result = arr.copy()
+        h, w = result.shape[:2]
+        line_color = np.array([0.3, 1.0, 0.5, 1.0], dtype=np.float32)
+        alpha = 0.4
+
+        for c in range(1, cols):
+            x = c * tile_sz
+            if x < w:
+                result[:, x] = result[:, x] * (1 - alpha) + line_color * alpha
+
+        for r in range(1, rows_n):
+            y = r * tile_sz
+            if y < h:
+                result[y, :] = result[y, :] * (1 - alpha) + line_color * alpha
+
+        return result
 
     # ------------------------------------------------------------------
     # LLM Copy / Paste
@@ -4773,39 +5701,64 @@ class AnimationGraphTab(QWidget):
             self._show_toast("⚠ No valid NODE lines found in clipboard")
             return
 
-        # Compute centroid of pasted positions for offset
         if scene_pos is None:
             scene_pos = self.view.mapToScene(self.view.rect().center())
 
         positions = [spec["pos"] for spec in node_specs]
+        distinct_positions = {(round(p.x(), 3), round(p.y(), 3)) for p in positions}
+        use_auto_layout = len(distinct_positions) <= 1
+
+        if not use_auto_layout:
+            xs = [p.x() for p in positions]
+            ys = [p.y() for p in positions]
+            if (max(xs) - min(xs) < 8.0) and (max(ys) - min(ys) < 8.0):
+                use_auto_layout = True
+
         cx = sum(p.x() for p in positions) / len(positions)
         cy = sum(p.y() for p in positions) / len(positions)
 
-        # Create nodes
+        sorted_specs = list(node_specs)
+        if use_auto_layout:
+            sorted_specs.sort(key=lambda spec: spec.get("local_id") if spec.get("local_id") is not None else 999999)
+            warnings.append("Paste positions were missing or collapsed. Applied automatic layout.")
+
         local_id_to_node = {}
         created_count = 0
-        for spec in node_specs:
+        x_spacing = 240.0
+        y_spacing = 180.0
+        columns = max(1, min(4, int(np.ceil(np.sqrt(max(1, len(sorted_specs)))))))
+
+        for idx, spec in enumerate(sorted_specs):
             cls_name = spec["cls_name"]
-            # Skip OutputNode if one already exists
             if cls_name == "OutputNode" and self.output_node is not None:
                 warnings.append("OutputNode skipped (already exists).")
                 continue
             node = NODE_TYPES[cls_name]()
-            # Position: offset relative to centroid, centred on scene_pos
-            offset = spec["pos"] - QPointF(cx, cy)
-            node.pos = scene_pos + offset
-            # Restore properties
+
+            if use_auto_layout:
+                col = idx % columns
+                row = idx // columns
+                block_w = (columns - 1) * x_spacing
+                offset_x = (col * x_spacing) - (block_w / 2.0)
+                offset_y = row * y_spacing
+                node.pos = QPointF(scene_pos.x() + offset_x, scene_pos.y() + offset_y)
+            else:
+                offset = spec["pos"] - QPointF(cx, cy)
+                node.pos = scene_pos + offset
+
+            node_label = f"{cls_name}: "
             for prop_name, val in spec["props"].items():
-                if prop_name in node.properties:
-                    if isinstance(val, dict):
-                        # Keyframe dict: {frame: value, ...}
-                        for kf_frame, kf_val in val.items():
-                            node.properties[prop_name].set_keyframe(kf_frame, kf_val)
-                    else:
-                        node.properties[prop_name].default_value = val
-            # Restore extra data
+                if isinstance(val, dict):
+                    _ani_apply_sanitized_keyframes(node, prop_name, val, warnings, node_label=node_label)
+                else:
+                    _ani_apply_sanitized_property(node, prop_name, val, warnings, node_label=node_label)
+
             if spec["extra"]:
-                node._extra_from_dict(spec["extra"])
+                try:
+                    node._extra_from_dict(spec["extra"])
+                except Exception as e:
+                    warnings.append(f"{cls_name}: extra data skipped: {e}")
+
             self.add_node(node)
             if cls_name == "OutputNode":
                 self.output_node = node
@@ -4813,7 +5766,6 @@ class AnimationGraphTab(QWidget):
                 local_id_to_node[spec["local_id"]] = node
             created_count += 1
 
-        # Wire connections
         for conn in connection_specs:
             from_node = local_id_to_node.get(conn["from_id"])
             to_node = local_id_to_node.get(conn["to_id"])
@@ -4863,12 +5815,15 @@ class AnimationGraphTab(QWidget):
         gen.addAction("Value",         lambda: spawn(ValueNode))
         gen.addAction("Oscillator",    lambda: spawn(OscillatorNode))
         gen.addAction("Noise",         lambda: spawn(NoiseNode))
+        gen.addAction("Voronoi",       lambda: spawn(VoronoiNode))
         gen.addAction("Brick / Tile",  lambda: spawn(BrickPatternNode))
         gen.addAction("Image Texture", lambda: spawn(ImageTextureNode))
         gen.addAction("PNG Sequence",  lambda: spawn(PNGSequenceNode))
         gen.addAction("Wave Texture",   lambda: spawn(WaveNode))
         gen.addAction("Oscilloscope",   lambda: spawn(OscilloscopeNode))
         gen.addAction("Tileable Patterns", lambda: spawn(TileablePatternNode))
+        tilesets = menu.addMenu("TileSets")
+        tilesets.addAction("Tile Canvas", lambda: spawn(TileCanvasNode))
         mod = menu.addMenu("Modifiers")
         mod.addAction("Blur",                 lambda: spawn(BlurNode))
         mod.addAction("Edge Detect",          lambda: spawn(EdgeDetectNode))
@@ -4937,12 +5892,14 @@ class AnimationGraphTab(QWidget):
             self.render_preview(self.timeline.current_frame)
 
     def update_preview_bg(self):
+        border = self._theme_colors["BORDER"]
         if PROJECT.bg_style == "Black":
-            self.preview_lbl.setStyleSheet("background-color: black; border: 2px solid #555;")
+            bg = self._theme_colors["DARK"]
         elif PROJECT.bg_style == "Dark Gray":
-            self.preview_lbl.setStyleSheet("background-color: #333; border: 2px solid #555;")
+            bg = self._theme_colors["SURFACE2"]
         else:
-            self.preview_lbl.setStyleSheet("background-color: #555; border: 2px solid #555;")
+            bg = self._theme_colors["BORDER"]
+        self.preview_lbl.setStyleSheet(f"background-color: {bg}; border: 2px solid {border};")
 
     def on_preview_mode_changed(self, mode):
         PROJECT.preview_mode = mode
@@ -4954,6 +5911,7 @@ class AnimationGraphTab(QWidget):
         mode = PROJECT.preview_mode
         preview_w = self.preview_lbl.width()
         preview_h = self.preview_lbl.height()
+        tile_node = self._get_connected_tile_canvas()
 
         if mode == "Actual Size":
             # Render at full project resolution — 1:1 pixel mapping
@@ -4965,6 +5923,13 @@ class AnimationGraphTab(QWidget):
             h = max(PROJECT.height // d, 1)
 
         arr = self.output_node.evaluate(frame, w, h)
+        if tile_node and bool(tile_node.properties["Show Grid"].get_value(frame)):
+            arr = self._draw_tile_grid_overlay(
+                arr,
+                tile_node.tile_size(frame),
+                tile_node.columns(frame),
+                tile_node.rows(frame),
+            )
         arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
         if not arr.flags['C_CONTIGUOUS']: arr = np.ascontiguousarray(arr)
         ha, wa, _ = arr.shape
@@ -5001,21 +5966,21 @@ class AnimationGraphTab(QWidget):
             ref_w = int(VITA_W * scale)
             ref_h = int(VITA_H * scale)
             result = QImage(preview_w, preview_h, QImage.Format.Format_RGBA8888)
-            result.fill(QColor(40, 40, 40))
+            result.fill(QColor(self._theme_colors["PANEL"]))
             painter = QPainter(result)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             ref_x = (preview_w - ref_w) // 2
             ref_y = (preview_h - ref_h) // 2
             # Draw background inside the screen rect
             if PROJECT.bg_style == "Black":
-                painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(0, 0, 0))
+                painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(self._theme_colors["DARK"]))
             elif PROJECT.bg_style == "Dark Gray":
-                painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(51, 51, 51))
+                painter.fillRect(ref_x, ref_y, ref_w, ref_h, QColor(self._theme_colors["SURFACE2"]))
             else:
                 checker_size = 8
                 for cy in range(ref_h // checker_size + 1):
                     for cx in range(ref_w // checker_size + 1):
-                        c = QColor(60, 60, 60) if (cx + cy) % 2 == 0 else QColor(80, 80, 80)
+                        c = QColor(self._theme_colors["PANEL"]) if (cx + cy) % 2 == 0 else QColor(self._theme_colors["SURFACE2"])
                         painter.fillRect(ref_x + cx * checker_size, ref_y + cy * checker_size,
                                          checker_size, checker_size, c)
             painter.setClipRect(ref_x, ref_y, ref_w, ref_h)
@@ -5030,10 +5995,10 @@ class AnimationGraphTab(QWidget):
             content_y = ref_y + (ref_h - scaled_img.height()) // 2
             painter.drawImage(content_x, content_y, scaled_img)
             painter.setClipping(False)
-            painter.setPen(QPen(QColor(100, 100, 100), 1))
+            painter.setPen(QPen(QColor(self._theme_colors["BORDER"]), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(ref_x, ref_y, ref_w, ref_h)
-            painter.setPen(QColor(120, 120, 120))
+            painter.setPen(QColor(self._theme_colors["TEXT_DIM"]))
             painter.drawText(ref_x, ref_y - 5, f"{PROJECT.width}x{PROJECT.height}")
             painter.end()
             self.preview_lbl.setPixmap(QPixmap.fromImage(result))
@@ -5058,11 +6023,16 @@ class AnimationGraphTab(QWidget):
         project_anim_dir = os.path.join(os.path.dirname(str(main_win.current_project_path)), "animations")
         os.makedirs(project_anim_dir, exist_ok=True)
         
-        w, h = PROJECT.width, PROJECT.height
         total = PROJECT.duration
         name = settings['name']
         is_trans = settings['type'] == 'trans'
         sheet_count_setting = settings['sheet_count']  # 0 = auto
+        tile_node = self._get_connected_tile_canvas()
+        if tile_node and not is_trans:
+            w = tile_node.atlas_width(0)
+            h = tile_node.atlas_height(0)
+        else:
+            w, h = PROJECT.width, PROJECT.height
 
         TRANS_W, TRANS_H = 240, 136
         MAX_SHEET = 2048
@@ -5118,7 +6088,8 @@ class AnimationGraphTab(QWidget):
             if not arr.flags['C_CONTIGUOUS']:
                 arr = np.ascontiguousarray(arr)
 
-            if is_trans or (store_w != render_w or store_h != render_h):
+            src_h, src_w = arr.shape[:2]
+            if is_trans or (store_w != src_w or store_h != src_h):
                 pil_frame = PILImage.fromarray(arr, 'RGBA')
                 pil_frame = pil_frame.resize((store_w, store_h), PILImage.Resampling.LANCZOS)
                 arr = np.array(pil_frame)
@@ -5227,7 +6198,12 @@ class AnimationGraphTab(QWidget):
         if not self.output_node: return
         folder = QFileDialog.getExistingDirectory(self, "Choose Export Folder")
         if not folder: return
-        w, h = PROJECT.width, PROJECT.height
+        tile_node = self._get_connected_tile_canvas()
+        if tile_node:
+            w = tile_node.atlas_width(0)
+            h = tile_node.atlas_height(0)
+        else:
+            w, h = PROJECT.width, PROJECT.height
         total = PROJECT.duration
         progress = QProgressDialog("Exporting frames...", "Cancel", 0, total, self)
         progress.setWindowTitle("Exporting")
@@ -5239,7 +6215,8 @@ class AnimationGraphTab(QWidget):
             arr = self.output_node.evaluate(frame, w, h)
             arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
             if not arr.flags['C_CONTIGUOUS']: arr = np.ascontiguousarray(arr)
-            img = QImage(arr.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+            frame_h, frame_w = arr.shape[:2]
+            img = QImage(arr.data, frame_w, frame_h, frame_w * 4, QImage.Format.Format_RGBA8888)
             img.save(os.path.join(folder, f"frame_{frame:04d}.png"), "PNG")
         progress.setValue(total); progress.close()
     def export_single_frame(self):

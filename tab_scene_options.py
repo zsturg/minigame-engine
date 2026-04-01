@@ -19,8 +19,10 @@ from PySide6.QtGui import QColor
 
 from models import (
     Project, Scene, SceneComponent, make_component,
-    COMPONENT_TYPES, COMPONENT_DEFAULTS
+    COMPONENT_TYPES, COMPONENT_DEFAULTS, ensure_raycast3d_config
 )
+from plugin_registry import build_auto_panel
+from theme_utils import replace_widget_theme_colors
 
 # -- Colours -------------------------------------------------------------------
 DARK    = "#0f0f12"
@@ -45,6 +47,8 @@ ROLE_COLORS = {
 
 COMPONENT_COLORS = {
     "Layer":          "#38bdf8",
+    "LightmapLayer":  "#fde047",
+    "Raycast3DConfig":"#38bdf8",
     "Music":          "#c084fc",
     "VNDialogBox":    "#f59e0b",
     "ChoiceMenu":     "#4ade80",
@@ -55,12 +59,30 @@ COMPONENT_COLORS = {
     "Gravity":        "#a78bfa",
     "LayerAnimation": "#34d399",
     "Grid":           "#14b8a6",
+    "SaveGame":       "#f59e0b",
 }
 
 BUTTON_CHOICES = ["cross", "square", "circle", "triangle"]
 
 
 # -- Style helpers -------------------------------------------------------------
+
+def _theme_snapshot():
+    return {
+        "DARK": DARK,
+        "PANEL": PANEL,
+        "SURFACE": SURFACE,
+        "SURF2": SURF2,
+        "BORDER": BORDER,
+        "ACCENT": ACCENT,
+        "ACCENT2": ACCENT2,
+        "TEXT": TEXT,
+        "DIM": DIM,
+        "MUTED": MUTED,
+        "SUCCESS": SUCCESS,
+        "WARNING": WARNING,
+        "DANGER": DANGER,
+    }
 
 def _field_style():
     return f"""
@@ -173,8 +195,9 @@ def _dim(text: str) -> QLabel:
 # ─────────────────────────────────────────────────────────────
 
 class AddComponentDialog(QDialog):
-    def __init__(self, existing_types: list[str], parent=None):
+    def __init__(self, existing_types: list[str], project: Project | None = None, parent=None):
         super().__init__(parent)
+        self._project = project
         self.setWindowTitle("Add Component")
         self.setModal(True)
         self.setMinimumWidth(300)
@@ -190,8 +213,19 @@ class AddComponentDialog(QDialog):
 
         # Singletons: Background, Foreground, Music, HUD, Video, VNDialogBox, ChoiceMenu
         # "Layer" is NOT a singleton — multiple are allowed
-        MULTI_ALLOWED = {"Layer", "TileLayer", "CollisionLayer", "Path", "LayerAnimation", "Grid"}
-        available = [t for t in COMPONENT_TYPES if t in MULTI_ALLOWED or t not in existing_types]
+        MULTI_ALLOWED = {"Layer", "TileLayer", "CollisionLayer", "LightmapLayer", "Path", "Grid"}
+        HIDDEN_COMPONENTS = {"LayerAnimation", "HUD", "Video", "SelectionGroup", "ChoiceMenu", "Raycast3DConfig"}
+        registry = getattr(self._project, "plugin_registry", None)
+        available = []
+        for component_type in COMPONENT_TYPES:
+            if component_type in HIDDEN_COMPONENTS:
+                continue
+            if registry and registry.get_component_descriptor(component_type):
+                if registry.is_component_singleton(component_type) and component_type in existing_types:
+                    continue
+            elif component_type not in MULTI_ALLOWED and component_type in existing_types:
+                continue
+            available.append(component_type)
 
         self.list_widget = QListWidget()
         self.list_widget.setStyleSheet(f"""
@@ -203,9 +237,11 @@ class AddComponentDialog(QDialog):
             QListWidget::item:selected {{ background: {ACCENT}; color: white; }}
             QListWidget::item:hover:!selected {{ background: {SURF2}; }}
         """)
-        for t in available:
-            item = QListWidgetItem(t)
-            color = COMPONENT_COLORS.get(t, DIM)
+        for component_type in available:
+            label = registry.get_component_label(component_type) if registry else component_type
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, component_type)
+            color = COMPONENT_COLORS.get(component_type, DIM)
             item.setForeground(QColor(color))
             self.list_widget.addItem(item)
         self.list_widget.doubleClicked.connect(self.accept)
@@ -219,7 +255,7 @@ class AddComponentDialog(QDialog):
 
     def selected_type(self) -> str | None:
         item = self.list_widget.currentItem()
-        return item.text() if item else None
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -622,6 +658,34 @@ class _DialogPageCard(QFrame):
         tw_row.addStretch()
         layout.addLayout(tw_row)
 
+        # ── Text effect tag reference ────────────────────────
+        fx_label = QLabel("TEXT EFFECTS")
+        fx_label.setStyleSheet(f"color: {DIM}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; padding: 8px 0 4px 0; background: transparent;")
+        layout.addWidget(fx_label)
+
+        tags = [
+            ("[color=#rrggbb]…[/color]", "inline color"),
+            ("[b]…[/b]",                 "bold"),
+            ("[bounce]…[/bounce]",        "bouncing text"),
+            ("[shake]…[/shake]",          "shaking text"),
+            ("[wave]…[/wave]",            "wavy text"),
+            ("[rainbow]…[/rainbow]",      "rainbow color"),
+        ]
+        for tag, desc in tags:
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.setContentsMargins(0, 0, 0, 0)
+            tag_lbl = QLabel(tag)
+            tag_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            tag_lbl.setStyleSheet(f"color: {ACCENT}; font-size: 11px; font-family: monospace; background: transparent;")
+            desc_lbl = QLabel(desc)
+            desc_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            desc_lbl.setStyleSheet(f"color: {MUTED}; font-size: 11px; background: transparent;")
+            row.addWidget(tag_lbl)
+            row.addWidget(desc_lbl)
+            row.addStretch()
+            layout.addLayout(row)
+
     def _on_tw_toggled(self):
         self.typewriter_speed_spin.setEnabled(self.typewriter_check.isChecked())
         self.changed.emit()
@@ -957,6 +1021,9 @@ class VNDialogBoxConfigPanel(QWidget):
         self._emit()
 
     def _clear_page_cards(self):
+        # Save current card data to config before destroying widgets
+        if self._component is not None and self._page_cards:
+            self._component.config["dialog_pages"] = [c.get_data() for c in self._page_cards]
         for card in self._page_cards:
             self._pages_container.removeWidget(card)
             card.setParent(None)
@@ -1612,6 +1679,490 @@ class GridConfigPanel(QWidget):
         self._suppress = False
 
 
+class Raycast3DConfigPanel(QWidget):
+    """Required scene-native config for Raycast3D scenes."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._component: SceneComponent | None = None
+        self._project: Project | None = None
+        self._suppress = False
+        self._build_ui()
+
+    def _make_row(self, label_text: str, widget: QWidget) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(_dim(label_text))
+        row.addWidget(widget, stretch=1)
+        return row
+
+    def _build_ui(self):
+        self.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        hint = QLabel(
+            "Built-in runtime configuration for this 3D scene. "
+            "These settings are always present and cannot be removed."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DIM}; font-size: 11px;")
+        layout.addWidget(hint)
+        deferred = QLabel(
+            "Advanced rail, step-turn, camera pitch, and collision tuning are "
+            "hidden until the RayCast3D runtime supports them."
+        )
+        deferred.setWordWrap(True)
+        deferred.setStyleSheet(f"color: {DIM}; font-size: 11px;")
+        layout.addWidget(deferred)
+
+        self.movement_combo = QComboBox()
+        self.movement_combo.addItems(["free", "grid"])
+        self.movement_combo.setStyleSheet(_field_style())
+        self.turn_mode_combo = QComboBox()
+        self.turn_mode_combo.addItems(["smooth", "step"])
+        self.turn_mode_combo.setStyleSheet(_field_style())
+        self.control_profile_combo = QComboBox()
+        self.control_profile_combo.addItems(["grid_classic", "grid_strafe", "free_modern"])
+        self.control_profile_combo.setStyleSheet(_field_style())
+        self.rail_mode_combo = QComboBox()
+        self.rail_mode_combo.addItems(["path", "locked_forward"])
+        self.rail_mode_combo.setStyleSheet(_field_style())
+        self.controller_combo = QComboBox()
+        self.controller_combo.addItems(["standard"])
+        self.controller_combo.setStyleSheet(_field_style())
+        self.collision_combo = QComboBox()
+        self.collision_combo.addItems(["stop", "slide"])
+        self.collision_combo.setStyleSheet(_field_style())
+
+        self.move_speed_spin = QDoubleSpinBox()
+        self.move_speed_spin.setRange(0.1, 64.0)
+        self.move_speed_spin.setSingleStep(0.1)
+        self.move_speed_spin.setDecimals(2)
+        self.move_speed_spin.setStyleSheet(_field_style())
+        self.turn_speed_spin = QDoubleSpinBox()
+        self.turn_speed_spin.setRange(0.1, 64.0)
+        self.turn_speed_spin.setSingleStep(0.1)
+        self.turn_speed_spin.setDecimals(2)
+        self.turn_speed_spin.setStyleSheet(_field_style())
+        self.grid_step_distance_spin = QSpinBox()
+        self.grid_step_distance_spin.setRange(1, 1024)
+        self.grid_step_distance_spin.setStyleSheet(_field_style())
+        self.grid_step_duration_spin = QDoubleSpinBox()
+        self.grid_step_duration_spin.setRange(0.01, 5.0)
+        self.grid_step_duration_spin.setSingleStep(0.01)
+        self.grid_step_duration_spin.setDecimals(2)
+        self.grid_step_duration_spin.setStyleSheet(_field_style())
+        self.turn_step_angle_spin = QSpinBox()
+        self.turn_step_angle_spin.setRange(1, 360)
+        self.turn_step_angle_spin.setStyleSheet(_field_style())
+        self.turn_duration_spin = QDoubleSpinBox()
+        self.turn_duration_spin.setRange(0.01, 5.0)
+        self.turn_duration_spin.setSingleStep(0.01)
+        self.turn_duration_spin.setDecimals(2)
+        self.turn_duration_spin.setStyleSheet(_field_style())
+        self.interact_distance_spin = QSpinBox()
+        self.interact_distance_spin.setRange(1, 1024)
+        self.interact_distance_spin.setStyleSheet(_field_style())
+        self.default_interact_spin = QSpinBox()
+        self.default_interact_spin.setRange(1, 1024)
+        self.default_interact_spin.setStyleSheet(_field_style())
+        self.view_size_spin = QSpinBox()
+        self.view_size_spin.setRange(1, 100)
+        self.view_size_spin.setStyleSheet(_field_style())
+        self.rail_path_edit = QLineEdit()
+        self.rail_path_edit.setPlaceholderText("Path name")
+        self.rail_path_edit.setStyleSheet(_field_style())
+
+        self.allow_strafe_chk = QCheckBox("Allow strafe")
+        self.allow_backstep_chk = QCheckBox("Allow backstep")
+        self.lock_input_chk = QCheckBox("Lock input while moving/turning")
+        self.camera_pitch_chk = QCheckBox("Enable camera pitch")
+        for chk in (
+            self.allow_strafe_chk, self.allow_backstep_chk,
+            self.lock_input_chk, self.camera_pitch_chk,
+        ):
+            chk.setStyleSheet(_field_style())
+
+        layout.addWidget(_section("MOVEMENT"))
+        layout.addLayout(self._make_row("Movement Mode", self.movement_combo))
+        layout.addLayout(self._make_row("Control Profile", self.control_profile_combo))
+        layout.addLayout(self._make_row("Free Move Speed", self.move_speed_spin))
+        layout.addLayout(self._make_row("Smooth Turn Speed", self.turn_speed_spin))
+
+        layout.addWidget(_section("INTERACTION"))
+        layout.addLayout(self._make_row("Interact Distance", self.interact_distance_spin))
+        layout.addLayout(self._make_row("Default Object Distance", self.default_interact_spin))
+
+        layout.addWidget(_section("RENDER"))
+        layout.addLayout(self._make_row("View Size", self.view_size_spin))
+        layout.addStretch()
+
+        for w in (
+            self.movement_combo, self.control_profile_combo,
+        ):
+            w.currentIndexChanged.connect(self._emit)
+        for w in (
+            self.move_speed_spin, self.turn_speed_spin,
+            self.interact_distance_spin, self.default_interact_spin, self.view_size_spin,
+        ):
+            w.valueChanged.connect(self._emit)
+
+    def _emit(self, *_args):
+        if self._suppress or self._component is None:
+            return
+        cfg = self._component.config
+        cfg["movement_mode"] = self.movement_combo.currentText()
+        cfg["control_profile"] = self.control_profile_combo.currentText()
+        cfg["move_speed"] = self.move_speed_spin.value()
+        cfg["turn_speed"] = self.turn_speed_spin.value()
+        cfg["interact_distance"] = self.interact_distance_spin.value()
+        cfg["default_object_interact_distance"] = self.default_interact_spin.value()
+        cfg["render_view_size"] = self.view_size_spin.value()
+        self.changed.emit()
+
+    def load(self, component: SceneComponent, project: Project):
+        self._component = component
+        self._project = project
+        self._suppress = True
+        cfg = component.config
+        movement_mode = cfg.get("movement_mode", "free")
+        if movement_mode not in ("free", "grid"):
+            movement_mode = "grid"
+        self.movement_combo.setCurrentText(movement_mode)
+        self.control_profile_combo.setCurrentText(cfg.get("control_profile", "free_modern" if movement_mode == "free" else "grid_strafe"))
+        self.move_speed_spin.setValue(float(cfg.get("move_speed", 5.0)))
+        self.turn_speed_spin.setValue(float(cfg.get("turn_speed", 5.0)))
+        self.interact_distance_spin.setValue(int(cfg.get("interact_distance", 80)))
+        self.default_interact_spin.setValue(int(cfg.get("default_object_interact_distance", 80)))
+        self.view_size_spin.setValue(int(cfg.get("render_view_size", 60)))
+        self._suppress = False
+
+
+class SaveGameConfigPanel(QWidget):
+    """Config panel for the SaveGame scene component."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._component: SceneComponent | None = None
+        self._project: Project | None = None
+        self._suppress = False
+        self._build_ui()
+
+    def _make_color_row(self, label_text: str):
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        label = _dim(label_text)
+        edit = QLineEdit()
+        edit.setPlaceholderText("#RRGGBB")
+        edit.setStyleSheet(_field_style())
+        edit.textChanged.connect(self._emit)
+
+        btn = _btn("…", small=True)
+        btn.setFixedWidth(34)
+        btn.clicked.connect(lambda: self._choose_color(edit))
+
+        row.addWidget(label)
+        row.addWidget(edit, stretch=1)
+        row.addWidget(btn)
+        return row, edit, btn
+
+    def _choose_color(self, line_edit: QLineEdit):
+        current = line_edit.text().strip() or "#000000"
+        color = QColorDialog.getColor(QColor(current), self)
+        if color.isValid():
+            line_edit.setText(color.name())
+            self._emit()
+
+    def _reload_image_combo(self):
+        current_id = self.background_image_combo.currentData()
+        self.background_image_combo.blockSignals(True)
+        self.background_image_combo.clear()
+        self.background_image_combo.addItem("-- none --", None)
+        if self._project is not None:
+            for img in self._project.images:
+                self.background_image_combo.addItem(img.name, img.id)
+        for i in range(self.background_image_combo.count()):
+            if self.background_image_combo.itemData(i) == current_id:
+                self.background_image_combo.setCurrentIndex(i)
+                break
+        self.background_image_combo.blockSignals(False)
+
+    def _reload_font_combo(self):
+        current_id = self.font_combo.currentData()
+        self.font_combo.blockSignals(True)
+        self.font_combo.clear()
+        self.font_combo.addItem("Default Font", "")
+        if self._project is not None:
+            for font in self._project.fonts:
+                self.font_combo.addItem(font.name, font.id)
+        for i in range(self.font_combo.count()):
+            if self.font_combo.itemData(i) == current_id:
+                self.font_combo.setCurrentIndex(i)
+                break
+        self.font_combo.blockSignals(False)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        intro = QLabel(
+            "This component customizes the generated save/load scene. "
+            "Open it in-game using the existing save menu action."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        layout.addWidget(intro)
+
+        layout.addWidget(_section("TEXT"))
+        layout.addWidget(_dim("Title text:"))
+        self.title_text_edit = QLineEdit()
+        self.title_text_edit.setStyleSheet(_field_style())
+        self.title_text_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.title_text_edit)
+
+        layout.addWidget(_dim("Slot prefix:"))
+        self.slot_prefix_edit = QLineEdit()
+        self.slot_prefix_edit.setStyleSheet(_field_style())
+        self.slot_prefix_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.slot_prefix_edit)
+
+        layout.addWidget(_dim("Help text:"))
+        self.help_text_edit = QLineEdit()
+        self.help_text_edit.setStyleSheet(_field_style())
+        self.help_text_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.help_text_edit)
+
+        layout.addWidget(_dim("Empty slot text:"))
+        self.empty_slot_text_edit = QLineEdit()
+        self.empty_slot_text_edit.setStyleSheet(_field_style())
+        self.empty_slot_text_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.empty_slot_text_edit)
+
+        layout.addWidget(_dim("Saved text:"))
+        self.saved_text_edit = QLineEdit()
+        self.saved_text_edit.setStyleSheet(_field_style())
+        self.saved_text_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.saved_text_edit)
+
+        layout.addWidget(_dim("No-save text:"))
+        self.no_save_text_edit = QLineEdit()
+        self.no_save_text_edit.setStyleSheet(_field_style())
+        self.no_save_text_edit.textChanged.connect(self._emit)
+        layout.addWidget(self.no_save_text_edit)
+
+        layout.addWidget(_section("BACKGROUND"))
+        self.background_use_image_check = QCheckBox("Use background image")
+        self.background_use_image_check.setStyleSheet(_field_style())
+        self.background_use_image_check.stateChanged.connect(self._emit)
+        layout.addWidget(self.background_use_image_check)
+
+        layout.addWidget(_dim("Background image:"))
+        self.background_image_combo = QComboBox()
+        self.background_image_combo.setStyleSheet(_field_style())
+        self.background_image_combo.currentIndexChanged.connect(self._emit)
+        layout.addWidget(self.background_image_combo)
+
+        bg_hint = QLabel(
+            "This background image is intended for fullscreen save scene presentation and 960x544 images are recommended."
+        )
+        bg_hint.setWordWrap(True)
+        bg_hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        layout.addWidget(bg_hint)
+
+        bg_row, self.bg_color_edit, self.bg_color_btn = self._make_color_row("Background color:")
+        layout.addLayout(bg_row)
+
+        layout.addWidget(_section("FONT"))
+        layout.addWidget(_dim("Font:"))
+        self.font_combo = QComboBox()
+        self.font_combo.setStyleSheet(_field_style())
+        self.font_combo.currentIndexChanged.connect(self._emit)
+        layout.addWidget(self.font_combo)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(8)
+        size_row.addWidget(_dim("Title:"))
+        self.title_font_size_spin = QSpinBox()
+        self.title_font_size_spin.setRange(1, 999)
+        self.title_font_size_spin.setStyleSheet(_field_style())
+        self.title_font_size_spin.valueChanged.connect(self._emit)
+        size_row.addWidget(self.title_font_size_spin)
+        size_row.addWidget(_dim("Slot:"))
+        self.slot_font_size_spin = QSpinBox()
+        self.slot_font_size_spin.setRange(1, 999)
+        self.slot_font_size_spin.setStyleSheet(_field_style())
+        self.slot_font_size_spin.valueChanged.connect(self._emit)
+        size_row.addWidget(self.slot_font_size_spin)
+        size_row.addStretch()
+        layout.addLayout(size_row)
+
+        size_row2 = QHBoxLayout()
+        size_row2.setSpacing(8)
+        size_row2.addWidget(_dim("Message:"))
+        self.message_font_size_spin = QSpinBox()
+        self.message_font_size_spin.setRange(1, 999)
+        self.message_font_size_spin.setStyleSheet(_field_style())
+        self.message_font_size_spin.valueChanged.connect(self._emit)
+        size_row2.addWidget(self.message_font_size_spin)
+        size_row2.addWidget(_dim("Help:"))
+        self.help_font_size_spin = QSpinBox()
+        self.help_font_size_spin.setRange(1, 999)
+        self.help_font_size_spin.setStyleSheet(_field_style())
+        self.help_font_size_spin.valueChanged.connect(self._emit)
+        size_row2.addWidget(self.help_font_size_spin)
+        size_row2.addStretch()
+        layout.addLayout(size_row2)
+
+        layout.addWidget(_section("TEXT COLORS"))
+        row, self.title_color_edit, _ = self._make_color_row("Title color:")
+        layout.addLayout(row)
+        row, self.slot_color_edit, _ = self._make_color_row("Slot color:")
+        layout.addLayout(row)
+        row, self.selected_slot_color_edit, _ = self._make_color_row("Selected slot color:")
+        layout.addLayout(row)
+        row, self.empty_slot_color_edit, _ = self._make_color_row("Empty slot color:")
+        layout.addLayout(row)
+        row, self.message_color_edit, _ = self._make_color_row("Message color:")
+        layout.addLayout(row)
+        row, self.help_color_edit, _ = self._make_color_row("Help color:")
+        layout.addLayout(row)
+
+        layout.addWidget(_section("LAYOUT"))
+        layout.addWidget(_dim("Layout preset:"))
+        self.layout_preset_combo = QComboBox()
+        self.layout_preset_combo.addItems(["center", "left", "right"])
+        self.layout_preset_combo.setStyleSheet(_field_style())
+        self.layout_preset_combo.currentIndexChanged.connect(self._emit)
+        layout.addWidget(self.layout_preset_combo)
+
+        layout_row = QHBoxLayout()
+        layout_row.setSpacing(8)
+        layout_row.addWidget(_dim("Slot spacing:"))
+        self.slot_spacing_spin = QSpinBox()
+        self.slot_spacing_spin.setRange(0, 999)
+        self.slot_spacing_spin.setStyleSheet(_field_style())
+        self.slot_spacing_spin.valueChanged.connect(self._emit)
+        layout_row.addWidget(self.slot_spacing_spin)
+        layout_row.addStretch()
+        layout.addLayout(layout_row)
+
+        self.show_help_text_check = QCheckBox("Show help text")
+        self.show_help_text_check.setStyleSheet(_field_style())
+        self.show_help_text_check.stateChanged.connect(self._emit)
+        layout.addWidget(self.show_help_text_check)
+
+        layout.addWidget(_section("PANEL"))
+        self.use_panel_check = QCheckBox("Use panel behind save content")
+        self.use_panel_check.setStyleSheet(_field_style())
+        self.use_panel_check.stateChanged.connect(self._emit)
+        layout.addWidget(self.use_panel_check)
+
+        row, self.panel_color_edit, _ = self._make_color_row("Panel color:")
+        layout.addLayout(row)
+
+        panel_row = QHBoxLayout()
+        panel_row.setSpacing(8)
+        panel_row.addWidget(_dim("Panel opacity:"))
+        self.panel_opacity_spin = QSpinBox()
+        self.panel_opacity_spin.setRange(0, 255)
+        self.panel_opacity_spin.setStyleSheet(_field_style())
+        self.panel_opacity_spin.valueChanged.connect(self._emit)
+        panel_row.addWidget(self.panel_opacity_spin)
+        panel_row.addStretch()
+        layout.addLayout(panel_row)
+
+        layout.addStretch()
+
+    def _emit(self):
+        if self._suppress or self._component is None:
+            return
+        cfg = self._component.config
+        cfg["title_text"] = self.title_text_edit.text()
+        cfg["slot_prefix"] = self.slot_prefix_edit.text()
+        cfg["help_text"] = self.help_text_edit.text()
+        cfg["empty_slot_text"] = self.empty_slot_text_edit.text()
+        cfg["saved_text"] = self.saved_text_edit.text()
+        cfg["no_save_text"] = self.no_save_text_edit.text()
+        cfg["background_use_image"] = self.background_use_image_check.isChecked()
+        cfg["background_image_id"] = self.background_image_combo.currentData()
+        cfg["bg_color"] = self.bg_color_edit.text().strip()
+        cfg["font_id"] = self.font_combo.currentData() or ""
+        cfg["title_font_size"] = self.title_font_size_spin.value()
+        cfg["slot_font_size"] = self.slot_font_size_spin.value()
+        cfg["message_font_size"] = self.message_font_size_spin.value()
+        cfg["help_font_size"] = self.help_font_size_spin.value()
+        cfg["title_color"] = self.title_color_edit.text().strip()
+        cfg["slot_color"] = self.slot_color_edit.text().strip()
+        cfg["selected_slot_color"] = self.selected_slot_color_edit.text().strip()
+        cfg["empty_slot_color"] = self.empty_slot_color_edit.text().strip()
+        cfg["message_color"] = self.message_color_edit.text().strip()
+        cfg["help_color"] = self.help_color_edit.text().strip()
+        cfg["layout_preset"] = self.layout_preset_combo.currentText()
+        cfg["slot_spacing"] = self.slot_spacing_spin.value()
+        cfg["show_help_text"] = self.show_help_text_check.isChecked()
+        cfg["use_panel"] = self.use_panel_check.isChecked()
+        cfg["panel_color"] = self.panel_color_edit.text().strip()
+        cfg["panel_opacity"] = self.panel_opacity_spin.value()
+        self.changed.emit()
+
+    def load(self, component: SceneComponent, project: Project):
+        self._component = component
+        self._project = project
+        self._suppress = True
+        cfg = component.config
+
+        self._reload_image_combo()
+        bg_id = cfg.get("background_image_id")
+        for i in range(self.background_image_combo.count()):
+            if self.background_image_combo.itemData(i) == bg_id:
+                self.background_image_combo.setCurrentIndex(i)
+                break
+
+        self._reload_font_combo()
+        font_id = cfg.get("font_id", "")
+        for i in range(self.font_combo.count()):
+            if self.font_combo.itemData(i) == font_id:
+                self.font_combo.setCurrentIndex(i)
+                break
+
+        self.title_text_edit.setText(cfg.get("title_text", ""))
+        self.slot_prefix_edit.setText(cfg.get("slot_prefix", ""))
+        self.help_text_edit.setText(cfg.get("help_text", ""))
+        self.empty_slot_text_edit.setText(cfg.get("empty_slot_text", ""))
+        self.saved_text_edit.setText(cfg.get("saved_text", ""))
+        self.no_save_text_edit.setText(cfg.get("no_save_text", ""))
+        self.background_use_image_check.setChecked(cfg.get("background_use_image", False))
+        self.bg_color_edit.setText(cfg.get("bg_color", "#000000"))
+        self.title_font_size_spin.setValue(cfg.get("title_font_size", 24))
+        self.slot_font_size_spin.setValue(cfg.get("slot_font_size", 18))
+        self.message_font_size_spin.setValue(cfg.get("message_font_size", 18))
+        self.help_font_size_spin.setValue(cfg.get("help_font_size", 16))
+        self.title_color_edit.setText(cfg.get("title_color", "#FFFFFF"))
+        self.slot_color_edit.setText(cfg.get("slot_color", "#B4B4B4"))
+        self.selected_slot_color_edit.setText(cfg.get("selected_slot_color", "#FFFF64"))
+        self.empty_slot_color_edit.setText(cfg.get("empty_slot_color", "#787878"))
+        self.message_color_edit.setText(cfg.get("message_color", "#FFFFFF"))
+        self.help_color_edit.setText(cfg.get("help_color", "#FFFFFF"))
+
+        idx = self.layout_preset_combo.findText(cfg.get("layout_preset", "center"))
+        self.layout_preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.slot_spacing_spin.setValue(cfg.get("slot_spacing", 0))
+        self.show_help_text_check.setChecked(cfg.get("show_help_text", True))
+        self.use_panel_check.setChecked(cfg.get("use_panel", False))
+        self.panel_color_edit.setText(cfg.get("panel_color", "#000000"))
+        self.panel_opacity_spin.setValue(cfg.get("panel_opacity", 0))
+
+        self._suppress = False
+
+
 # ─────────────────────────────────────────────────────────────
 #  EMPTY STATE PANEL
 # ─────────────────────────────────────────────────────────────
@@ -1756,13 +2307,13 @@ class SceneOptionsTab(QWidget):
         # Component buttons
         comp_btn_row = QHBoxLayout()
         comp_btn_row.setSpacing(4)
-        add_comp_btn = _btn("+ Add", accent=True, small=True)
-        add_comp_btn.clicked.connect(self._add_component)
-        del_comp_btn = _btn("x", danger=True, small=True)
-        del_comp_btn.setFixedWidth(32)
-        del_comp_btn.clicked.connect(self._del_component)
-        comp_btn_row.addWidget(add_comp_btn)
-        comp_btn_row.addWidget(del_comp_btn)
+        self._add_comp_btn = _btn("+ Add", accent=True, small=True)
+        self._add_comp_btn.clicked.connect(self._add_component)
+        self._del_comp_btn = _btn("x", danger=True, small=True)
+        self._del_comp_btn.setFixedWidth(32)
+        self._del_comp_btn.clicked.connect(self._del_component)
+        comp_btn_row.addWidget(self._add_comp_btn)
+        comp_btn_row.addWidget(self._del_comp_btn)
         comp_btn_row.addStretch()
         left_layout.addLayout(comp_btn_row)
 
@@ -1799,6 +2350,7 @@ class SceneOptionsTab(QWidget):
         # Config panels (order matches COMPONENT_TYPES)
         self._panels: dict[str, QWidget] = {
             "Layer":          LayerConfigPanel(),
+            "Raycast3DConfig": Raycast3DConfigPanel(),
             "Music":          MusicConfigPanel(),
             "VNDialogBox":    VNDialogBoxConfigPanel(),
             "ChoiceMenu":     ChoiceMenuConfigPanel(),
@@ -1808,12 +2360,14 @@ class SceneOptionsTab(QWidget):
             "Gravity":        GravityConfigPanel(),
             "LayerAnimation": LayerAnimationConfigPanel(),
             "Grid":           GridConfigPanel(),
+            "SaveGame":       SaveGameConfigPanel(),
         }
         for panel in self._panels.values():
             panel.setStyleSheet("background: transparent;")
             if hasattr(panel, "changed"):
                 panel.changed.connect(self._on_component_config_changed)
             self._stack.addWidget(panel)
+        self._plugin_panel: QWidget | None = None
 
         right_v.addSpacing(10)
         right_v.addWidget(self._stack, stretch=1)
@@ -1822,15 +2376,53 @@ class SceneOptionsTab(QWidget):
 
         outer.addWidget(body, stretch=1)
 
+    def _component_registry(self):
+        return getattr(self._project, "plugin_registry", None)
+
+    def _component_label(self, component_type: str) -> str:
+        registry = self._component_registry()
+        if registry:
+            return registry.get_component_label(component_type)
+        return component_type
+
+    def _clear_plugin_panel(self):
+        if self._plugin_panel is not None:
+            self._stack.removeWidget(self._plugin_panel)
+            self._plugin_panel.deleteLater()
+            self._plugin_panel = None
+
+    def _show_plugin_panel(self, component: SceneComponent):
+        self._clear_plugin_panel()
+        registry = self._component_registry()
+        if not registry:
+            self._stack.setCurrentWidget(self._empty_panel)
+            return
+        descriptor = registry.get_component_descriptor(component.component_type)
+        if not descriptor:
+            self._stack.setCurrentWidget(self._empty_panel)
+            return
+        panel = build_auto_panel(
+            descriptor.get("fields", []),
+            component,
+            self._project,
+            changed_callback=self._on_component_config_changed,
+        )
+        panel.setStyleSheet("background: transparent;")
+        self._plugin_panel = panel
+        self._stack.addWidget(panel)
+        self._stack.setCurrentWidget(panel)
+
     # ── Component list management ────────────────────────────
 
     def _refresh_comp_list(self):
         if self._scene is None:
             return
+        if getattr(self._scene, "scene_type", "2d") == "3d":
+            ensure_raycast3d_config(self._scene)
         self.comp_list.blockSignals(True)
         self.comp_list.clear()
         for c in self._scene.components:
-            if c.component_type in ("Layer", "TileLayer", "CollisionLayer"):
+            if c.component_type in ("Layer", "TileLayer", "CollisionLayer", "LightmapLayer"):
                 label = c.config.get("layer_name", "").strip()
                 display = f"{c.component_type}: {label}" if label else c.component_type
             elif c.component_type == "LayerAnimation":
@@ -1844,8 +2436,10 @@ class SceneOptionsTab(QWidget):
             elif c.component_type == "Grid":
                 gname = c.config.get("grid_name", "").strip()
                 display = f"Grid: {gname}" if gname else "Grid"
+            elif c.component_type == "Raycast3DConfig":
+                display = "Raycast3D Runtime"
             else:
-                display = c.component_type
+                display = self._component_label(c.component_type)
             item = QListWidgetItem(display)
             color = COMPONENT_COLORS.get(c.component_type, DIM)
             item.setForeground(QColor(color))
@@ -1855,28 +2449,31 @@ class SceneOptionsTab(QWidget):
     def _on_comp_selected(self, row: int):
         if self._scene is None or row < 0 or row >= len(self._scene.components):
             self._comp_header.setText("")
+            self._clear_plugin_panel()
             self._stack.setCurrentWidget(self._empty_panel)
             return
         component = self._scene.components[row]
         ct = component.component_type
         color = COMPONENT_COLORS.get(ct, DIM)
-        self._comp_header.setText(ct)
+        header = "Raycast3D Runtime" if ct == "Raycast3DConfig" else self._component_label(ct)
+        self._comp_header.setText(header)
         self._comp_header.setStyleSheet(f"""
             color: {color}; font-size: 14px; font-weight: 700;
             padding-bottom: 6px; background: transparent;
         """)
+        self._clear_plugin_panel()
         panel = self._panels.get(ct)
         if panel:
             panel.load(component, self._project)
             self._stack.setCurrentWidget(panel)
         else:
-            self._stack.setCurrentWidget(self._empty_panel)
+            self._show_plugin_panel(component)
 
     def _add_component(self):
         if self._scene is None:
             return
         existing = [c.component_type for c in self._scene.components]
-        dlg = AddComponentDialog(existing, self)
+        dlg = AddComponentDialog(existing, self._project, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             ct = dlg.selected_type()
             if ct:
@@ -1890,9 +2487,12 @@ class SceneOptionsTab(QWidget):
             return
         row = self.comp_list.currentRow()
         if 0 <= row < len(self._scene.components):
+            if self._scene.components[row].component_type == "Raycast3DConfig":
+                return
             self._scene.components.pop(row)
             self._refresh_comp_list()
             self._comp_header.setText("")
+            self._clear_plugin_panel()
             self._stack.setCurrentWidget(self._empty_panel)
             self.changed.emit()
 
@@ -1953,6 +2553,24 @@ class SceneOptionsTab(QWidget):
             self.scene_selected.emit(index)
 
     def restyle(self, c: dict):
+        global DARK, PANEL, SURFACE, SURF2, BORDER, ACCENT, ACCENT2, TEXT, DIM, MUTED, SUCCESS, WARNING, DANGER
+        old = _theme_snapshot()
+        DARK = c.get("DARK", DARK)
+        PANEL = c.get("PANEL", PANEL)
+        SURFACE = c.get("SURFACE", SURFACE)
+        SURF2 = c.get("SURFACE2", SURF2)
+        BORDER = c.get("BORDER", BORDER)
+        ACCENT = c.get("ACCENT", ACCENT)
+        ACCENT2 = c.get("ACCENT2", ACCENT2)
+        TEXT = c.get("TEXT", TEXT)
+        DIM = c.get("TEXT_DIM", DIM)
+        MUTED = c.get("TEXT_MUTED", MUTED)
+        SUCCESS = c.get("SUCCESS", SUCCESS)
+        WARNING = c.get("WARNING", WARNING)
+        DANGER = c.get("DANGER", DANGER)
+        ROLE_COLORS.update({"start": SUCCESS, "end": DANGER, "": DIM})
+        replace_widget_theme_colors(self, old, _theme_snapshot())
+
         self._header.setStyleSheet(f"background: {c['PANEL']}; border-bottom: 1px solid {c['BORDER']};")
         self._left_panel.setStyleSheet(f"background: {c['PANEL']}; border-right: 1px solid {c['BORDER']};")
         self.comp_list.setStyleSheet(f"""
@@ -1973,6 +2591,8 @@ class SceneOptionsTab(QWidget):
         """)
 
     def load_scene(self, scene: Scene, project: Project):
+        if getattr(scene, "scene_type", "2d") == "3d":
+            ensure_raycast3d_config(scene)
         self._scene = scene
         self._project = project
         self._suppress = True
@@ -1983,9 +2603,12 @@ class SceneOptionsTab(QWidget):
         for r, btn in self._role_btns.items():
             btn.setChecked(r == scene.role)
             btn.setVisible(not is_3d)
+        self._add_comp_btn.setVisible(not is_3d)
+        self._del_comp_btn.setVisible(not is_3d)
 
         self._refresh_comp_list()
         self._comp_header.setText("")
+        self._clear_plugin_panel()
         self._stack.setCurrentWidget(self._empty_panel)
 
         if self._scene.components:

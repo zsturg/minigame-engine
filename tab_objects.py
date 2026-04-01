@@ -11,15 +11,16 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QLineEdit, QComboBox, QCheckBox,
     QSpinBox, QDoubleSpinBox, QFrame, QScrollArea, QSplitter, QSizePolicy, QAbstractItemView,
-    QColorDialog, QDialog
+    QColorDialog, QDialog, QInputDialog
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap, QWheelEvent, QMouseEvent
 
 from models import (
     Project, Scene, ObjectDefinition, SpriteFrame, Behavior,
-    BehaviorAction, PlacedObject, CollisionBox
+    BehaviorAction, PlacedObject, CollisionBox, COLLISION_BOX_ROLES
 )
+from theme_utils import replace_widget_theme_colors
 
 
 # -- Colours -------------------------------------------------------------------
@@ -40,11 +41,34 @@ WARNING = "#facc15"
 TRIGGER_TYPES = [
     "on_create", "on_interact", "on_input", "on_frame", "on_true", "on_false", "on_destroy",
     "on_enter", "on_exit", "on_overlap", "on_interact_zone",
+    "on_object_overlap", "on_object_overlap_enter", "on_object_overlap_exit",
 ]
 BEHAVIOR_TYPES = ["default", "GUI_Label", "GUI_Button", "GUI_Panel", "Animation", "LayerAnimation", "Camera"]
+COLLISION_ROLE_COLORS = {
+    "Physics": "#4ade80",
+    "Hurtbox": "#60a5fa",
+    "Hitbox": "#f87171",
+    "Trigger": "#facc15",
+}
 
 
 # -- Helpers -------------------------------------------------------------------
+
+def _theme_snapshot():
+    return {
+        "DARK": DARK,
+        "PANEL": PANEL,
+        "SURFACE": SURFACE,
+        "SURF2": SURF2,
+        "BORDER": BORDER,
+        "ACCENT": ACCENT,
+        "TEXT": TEXT,
+        "DIM": DIM,
+        "MUTED": MUTED,
+        "DANGER": DANGER,
+        "SUCCESS": SUCCESS,
+        "WARNING": WARNING,
+    }
 
 def _field_style():
     return f"""
@@ -211,9 +235,11 @@ class ObjectDefEditor(QWidget):
         # Behavior type
         self._layout.addWidget(_section("BEHAVIOR TYPE"))
         self.behavior_type_combo = QComboBox()
-        self.behavior_type_combo.addItems(BEHAVIOR_TYPES)
+        _BEHAVIOR_TYPE_LABELS = {"LayerAnimation": "Puppet Animation"}
+        for _bkey in BEHAVIOR_TYPES:
+            self.behavior_type_combo.addItem(_BEHAVIOR_TYPE_LABELS.get(_bkey, _bkey), _bkey)
         self.behavior_type_combo.setStyleSheet(_field_style())
-        self.behavior_type_combo.currentTextChanged.connect(self._on_behavior_type_changed)
+        self.behavior_type_combo.currentIndexChanged.connect(self._on_behavior_type_changed)
         self._layout.addWidget(self.behavior_type_combo)
 
         # ── GUI config ──
@@ -479,10 +505,10 @@ class ObjectDefEditor(QWidget):
         lag.setContentsMargins(0, 0, 0, 0)
         lag.setSpacing(6)
 
-        lag.addWidget(_section("LAYER ANIMATION"))
+        lag.addWidget(_section("PUPPET ANIMATION"))
         lag.addWidget(_divider())
 
-        lag.addWidget(_make_dim_label("Paper Doll Asset:"))
+        lag.addWidget(_make_dim_label("Puppet Asset:"))
         self.layer_anim_combo = QComboBox()
         self.layer_anim_combo.setStyleSheet(_field_style())
         self.layer_anim_combo.currentIndexChanged.connect(self._emit)
@@ -575,6 +601,105 @@ class ObjectDefEditor(QWidget):
         self._camera_group.setVisible(False)
         self._layout.addWidget(self._camera_group)
 
+        # ── 3D actor config (raycast scenes only) ──
+        self._actor3d_group = QWidget()
+        a3g = QVBoxLayout(self._actor3d_group)
+        a3g.setContentsMargins(0, 0, 0, 0)
+        a3g.setSpacing(6)
+
+        a3g.addWidget(_section("3D ACTOR"))
+        a3g.addWidget(_divider())
+
+        self.actor3d_enabled_check = QCheckBox("Use as 3D actor in raycast scenes")
+        self.actor3d_enabled_check.setStyleSheet(_field_style())
+        self.actor3d_enabled_check.stateChanged.connect(self._on_3d_actor_enabled_changed)
+        a3g.addWidget(self.actor3d_enabled_check)
+
+        self._actor3d_fields = QWidget()
+        a3f = QVBoxLayout(self._actor3d_fields)
+        a3f.setContentsMargins(0, 0, 0, 0)
+        a3f.setSpacing(6)
+
+        faction_row = QHBoxLayout()
+        faction_row.addWidget(_make_dim_label("Faction:"))
+        self.actor3d_faction_edit = QLineEdit()
+        self.actor3d_faction_edit.setPlaceholderText("enemy, player, neutral…")
+        self.actor3d_faction_edit.setStyleSheet(_field_style())
+        self.actor3d_faction_edit.textChanged.connect(self._emit)
+        faction_row.addWidget(self.actor3d_faction_edit)
+        a3f.addLayout(faction_row)
+
+        patrol_row = QHBoxLayout()
+        patrol_row.addWidget(_make_dim_label("Patrol Path:"))
+        self.actor3d_patrol_edit = QLineEdit()
+        self.actor3d_patrol_edit.setPlaceholderText("Path component name")
+        self.actor3d_patrol_edit.setStyleSheet(_field_style())
+        self.actor3d_patrol_edit.textChanged.connect(self._emit)
+        patrol_row.addWidget(self.actor3d_patrol_edit)
+        a3f.addLayout(patrol_row)
+
+        state_row = QHBoxLayout()
+        state_row.addWidget(_make_dim_label("Start State:"))
+        self.actor3d_state_edit = QLineEdit()
+        self.actor3d_state_edit.setPlaceholderText("idle")
+        self.actor3d_state_edit.setStyleSheet(_field_style())
+        self.actor3d_state_edit.textChanged.connect(self._emit)
+        state_row.addWidget(self.actor3d_state_edit)
+        a3f.addLayout(state_row)
+
+        stats_row = QHBoxLayout()
+        stats_row.addWidget(_make_dim_label("Health:"))
+        self.actor3d_health_spin = QSpinBox()
+        self.actor3d_health_spin.setRange(1, 99999)
+        self.actor3d_health_spin.setValue(100)
+        self.actor3d_health_spin.setStyleSheet(_field_style())
+        self.actor3d_health_spin.valueChanged.connect(self._emit)
+        stats_row.addWidget(self.actor3d_health_spin)
+        stats_row.addWidget(_make_dim_label("Speed:"))
+        self.actor3d_speed_spin = QDoubleSpinBox()
+        self.actor3d_speed_spin.setRange(0.1, 128.0)
+        self.actor3d_speed_spin.setSingleStep(0.1)
+        self.actor3d_speed_spin.setValue(1.0)
+        self.actor3d_speed_spin.setStyleSheet(_field_style())
+        self.actor3d_speed_spin.valueChanged.connect(self._emit)
+        stats_row.addWidget(self.actor3d_speed_spin)
+        stats_row.addStretch()
+        a3f.addLayout(stats_row)
+
+        range_row = QHBoxLayout()
+        range_row.addWidget(_make_dim_label("Radius:"))
+        self.actor3d_radius_spin = QDoubleSpinBox()
+        self.actor3d_radius_spin.setRange(1.0, 512.0)
+        self.actor3d_radius_spin.setSingleStep(1.0)
+        self.actor3d_radius_spin.setValue(16.0)
+        self.actor3d_radius_spin.setStyleSheet(_field_style())
+        self.actor3d_radius_spin.valueChanged.connect(self._emit)
+        range_row.addWidget(self.actor3d_radius_spin)
+        range_row.addWidget(_make_dim_label("Sight:"))
+        self.actor3d_sight_spin = QDoubleSpinBox()
+        self.actor3d_sight_spin.setRange(0.0, 4096.0)
+        self.actor3d_sight_spin.setSingleStep(8.0)
+        self.actor3d_sight_spin.setValue(160.0)
+        self.actor3d_sight_spin.setStyleSheet(_field_style())
+        self.actor3d_sight_spin.valueChanged.connect(self._emit)
+        range_row.addWidget(self.actor3d_sight_spin)
+        range_row.addWidget(_make_dim_label("Attack:"))
+        self.actor3d_attack_spin = QDoubleSpinBox()
+        self.actor3d_attack_spin.setRange(0.0, 4096.0)
+        self.actor3d_attack_spin.setSingleStep(8.0)
+        self.actor3d_attack_spin.setValue(48.0)
+        self.actor3d_attack_spin.setStyleSheet(_field_style())
+        self.actor3d_attack_spin.valueChanged.connect(self._emit)
+        range_row.addWidget(self.actor3d_attack_spin)
+        range_row.addStretch()
+        a3f.addLayout(range_row)
+
+        self._actor3d_fields.setVisible(False)
+        a3g.addWidget(self._actor3d_fields)
+
+        self._actor3d_group.setVisible(True)
+        self._layout.addWidget(self._actor3d_group)
+
         # Size
         self._size_row = QWidget()
         size_row = QHBoxLayout(self._size_row)
@@ -613,11 +738,51 @@ class ObjectDefEditor(QWidget):
         self.gravity_check.setChecked(False)
         self.gravity_check.stateChanged.connect(self._emit)
         self._layout.addWidget(self.gravity_check)
+
+        self.blocks_2d_check = QCheckBox("Blocks 2D movement")
+        self.blocks_2d_check.setStyleSheet(_field_style())
+        self.blocks_2d_check.setChecked(False)
+        self.blocks_2d_check.stateChanged.connect(self._emit)
+        self._layout.addWidget(self.blocks_2d_check)
+
         self.mover_check = QCheckBox("Participates in zone checks")
         self.mover_check.setStyleSheet(_field_style())
         self.mover_check.setChecked(True)
         self.mover_check.stateChanged.connect(self._emit)
         self._layout.addWidget(self.mover_check)
+
+        # D-pad navigation
+        self.navigable_check = QCheckBox("Navigable (D-pad focus)")
+        self.navigable_check.setStyleSheet(_field_style())
+        self.navigable_check.setChecked(False)
+        self.navigable_check.stateChanged.connect(self._on_navigable_changed)
+        self._layout.addWidget(self.navigable_check)
+
+        self._nav_container = QWidget()
+        nav_layout = QVBoxLayout(self._nav_container)
+        nav_layout.setContentsMargins(12, 4, 0, 4)
+        nav_layout.setSpacing(4)
+
+        def _make_nav_row(label_text):
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = _make_dim_label(label_text)
+            lbl.setFixedWidth(48)
+            combo = QComboBox()
+            combo.setStyleSheet(_field_style())
+            combo.currentIndexChanged.connect(self._emit)
+            row.addWidget(lbl)
+            row.addWidget(combo, stretch=1)
+            nav_layout.addLayout(row)
+            return combo
+
+        self.nav_up_combo    = _make_nav_row("Up:")
+        self.nav_down_combo  = _make_nav_row("Down:")
+        self.nav_left_combo  = _make_nav_row("Left:")
+        self.nav_right_combo = _make_nav_row("Right:")
+
+        self._nav_container.setVisible(False)
+        self._layout.addWidget(self._nav_container)
 
         # Frames
         self._frames_section = QWidget()
@@ -710,7 +875,13 @@ class ObjectDefEditor(QWidget):
         o.height = self.height_spin.value()
         o.visible_default = self.visible_check.isChecked()
         o.affected_by_gravity = self.gravity_check.isChecked()
+        o.blocks_2d_movement = self.blocks_2d_check.isChecked()
         o.is_mover = self.mover_check.isChecked()
+        o.navigable = self.navigable_check.isChecked()
+        o.focus_nav_up    = self.nav_up_combo.currentData()    or ""
+        o.focus_nav_down  = self.nav_down_combo.currentData()  or ""
+        o.focus_nav_left  = self.nav_left_combo.currentData()  or ""
+        o.focus_nav_right = self.nav_right_combo.currentData() or ""
         # GUI fields
         o.gui_text = self.gui_text_edit.text()
         o.gui_text_color = self._gui_text_color
@@ -724,7 +895,24 @@ class ObjectDefEditor(QWidget):
         o.gui_highlight_color = self._gui_highlight_color
         o.gui_image_id = self.gui_image_combo.currentData() or ""
         # Animation fields
-        o.ani_slots = [dict(s) for s in self._ani_slots_data]
+        old_slots = [dict(s) for s in getattr(o, "ani_slots", [])]
+        old_collisions = {
+            str(slot_name): ObjectDefinition.clone_collision_frames(frames)
+            for slot_name, frames in getattr(o, "ani_collision_boxes", {}).items()
+        }
+        normalized_slots = ObjectDefinition.normalize_ani_slots(self._ani_slots_data)
+        o.ani_slots = [dict(s) for s in normalized_slots]
+        rebuilt_collisions = {}
+        for idx, slot in enumerate(normalized_slots):
+            slot_name = slot.get("name", "")
+            old_name = old_slots[idx].get("name", "") if idx < len(old_slots) else ""
+            if old_name in old_collisions:
+                rebuilt_collisions[slot_name] = old_collisions[old_name]
+            elif slot_name in old_collisions:
+                rebuilt_collisions[slot_name] = old_collisions[slot_name]
+            else:
+                rebuilt_collisions[slot_name] = []
+        o.ani_collision_boxes = rebuilt_collisions
         o.ani_loop = self.ani_loop_check.isChecked()
         o.ani_play_on_spawn = self.ani_play_on_spawn_check.isChecked()
         o.ani_start_paused = self.ani_start_paused_check.isChecked()
@@ -743,6 +931,15 @@ class ObjectDefEditor(QWidget):
         o.camera_bounds_height = self.cam_h_spin.value()
         o.camera_follow_lag = self.cam_lag_spin.value()
         o.camera_zoom_default = self.cam_zoom_spin.value()
+        o.is_3d_actor = self.actor3d_enabled_check.isChecked()
+        o.actor_faction = self.actor3d_faction_edit.text().strip()
+        o.actor_max_health = self.actor3d_health_spin.value()
+        o.actor_move_speed = self.actor3d_speed_spin.value()
+        o.actor_radius = self.actor3d_radius_spin.value()
+        o.actor_sight_range = self.actor3d_sight_spin.value()
+        o.actor_attack_range = self.actor3d_attack_spin.value()
+        o.actor_patrol_path = self.actor3d_patrol_edit.text().strip()
+        o.actor_start_state = self.actor3d_state_edit.text().strip() or "idle"
         self.changed.emit()
 
     def _ani_rebuild_slots(self):
@@ -823,7 +1020,10 @@ class ObjectDefEditor(QWidget):
         self._ani_rebuild_slots()
         self._emit()
 
-    def _on_behavior_type_changed(self, btype: str):
+    def _on_behavior_type_changed(self, _index: int):
+        btype = self.behavior_type_combo.currentData()
+        if btype is None:
+            return
         if self._obj is not None and not self._suppress:
             self._obj.behavior_type = btype
             self.changed.emit()
@@ -831,9 +1031,30 @@ class ObjectDefEditor(QWidget):
         self._gui_group.setVisible(is_gui)
         self._ani_group.setVisible(btype == "Animation")
         self._layer_anim_group.setVisible(btype == "LayerAnimation")
+        self._camera_group.setVisible(btype == "Camera")
+        self._actor3d_group.setVisible(btype != "Camera")
+        self._size_row.setVisible(btype != "Camera")
+        self.visible_check.setVisible(btype != "Camera")
+        self.gravity_check.setVisible(btype != "Camera")
+        self.blocks_2d_check.setVisible(btype != "Camera")
+        self.mover_check.setVisible(btype != "Camera")
+        self.navigable_check.setVisible(btype != "Camera")
+        if btype == "Camera":
+            self._nav_container.setVisible(False)
+        else:
+            self._nav_container.setVisible(self.navigable_check.isChecked())
+        self._frames_section.setVisible(btype != "Camera")
 
     def _on_camera_bounds_changed(self, state):
         self._cam_bounds_row.setVisible(bool(state))
+        self._emit()
+
+    def _on_3d_actor_enabled_changed(self, state):
+        self._actor3d_fields.setVisible(bool(state))
+        self._emit()
+
+    def _on_navigable_changed(self, state):
+        self._nav_container.setVisible(bool(state))
         self._emit()
 
     def _pick_gui_text_color(self):
@@ -955,8 +1176,10 @@ class ObjectDefEditor(QWidget):
     def _open_behavior_graph(self):
         if self._obj is None or self._project is None:
             return
+        from plugin_registry import sync_runtime_modules
         from behavior_node_graph import BehaviorGraphDialog
-        dlg = BehaviorGraphDialog(self._obj, parent=self)
+        sync_runtime_modules(getattr(self._project, "plugin_registry", None))
+        dlg = BehaviorGraphDialog(self._obj, parent=self, scene=self._scene, project=self._project)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._refresh_beh_summary()
             self.changed.emit()
@@ -983,10 +1206,35 @@ class ObjectDefEditor(QWidget):
         self.height_spin.setValue(obj.height)
         self.visible_check.setChecked(obj.visible_default)
         self.gravity_check.setChecked(getattr(obj, 'affected_by_gravity', False))
+        self.blocks_2d_check.setChecked(getattr(obj, 'blocks_2d_movement', False))
         self.mover_check.setChecked(getattr(obj, 'is_mover', True))
 
+        # Navigable / D-pad nav
+        nav = getattr(obj, 'navigable', False)
+        self.navigable_check.setChecked(nav)
+        self._nav_container.setVisible(nav)
+
+        def _populate_nav_combo(combo, selected_id):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("-- none --", "")
+            for od in project.object_defs:
+                if od.id != obj.id:
+                    combo.addItem(od.name, od.id)
+            if selected_id:
+                for i in range(combo.count()):
+                    if combo.itemData(i) == selected_id:
+                        combo.setCurrentIndex(i)
+                        break
+            combo.blockSignals(False)
+
+        _populate_nav_combo(self.nav_up_combo,    getattr(obj, 'focus_nav_up',    ""))
+        _populate_nav_combo(self.nav_down_combo,  getattr(obj, 'focus_nav_down',  ""))
+        _populate_nav_combo(self.nav_left_combo,  getattr(obj, 'focus_nav_left',  ""))
+        _populate_nav_combo(self.nav_right_combo, getattr(obj, 'focus_nav_right', ""))
+
         # Behavior type
-        idx = self.behavior_type_combo.findText(obj.behavior_type)
+        idx = self.behavior_type_combo.findData(obj.behavior_type)
         if idx >= 0:
             self.behavior_type_combo.setCurrentIndex(idx)
         # GUI fields
@@ -995,12 +1243,27 @@ class ObjectDefEditor(QWidget):
         
         self._gui_group.setVisible(is_gui)
         self._camera_group.setVisible(is_cam)
+        self._actor3d_group.setVisible(not is_cam)
         
         self._size_row.setVisible(not is_cam)
         self.visible_check.setVisible(not is_cam)
         self.gravity_check.setVisible(not is_cam)
+        self.blocks_2d_check.setVisible(not is_cam)
         self.mover_check.setVisible(not is_cam)
+        self.navigable_check.setVisible(not is_cam)
+        if is_cam:
+            self._nav_container.setVisible(False)
         self._frames_section.setVisible(not is_cam)
+        self.actor3d_enabled_check.setChecked(getattr(obj, "is_3d_actor", False))
+        self._actor3d_fields.setVisible(getattr(obj, "is_3d_actor", False))
+        self.actor3d_faction_edit.setText(getattr(obj, "actor_faction", ""))
+        self.actor3d_health_spin.setValue(int(getattr(obj, "actor_max_health", 100) or 100))
+        self.actor3d_speed_spin.setValue(float(getattr(obj, "actor_move_speed", 1.0) or 1.0))
+        self.actor3d_radius_spin.setValue(float(getattr(obj, "actor_radius", 16.0) or 16.0))
+        self.actor3d_sight_spin.setValue(float(getattr(obj, "actor_sight_range", 160.0) or 160.0))
+        self.actor3d_attack_spin.setValue(float(getattr(obj, "actor_attack_range", 48.0) or 48.0))
+        self.actor3d_patrol_edit.setText(getattr(obj, "actor_patrol_path", ""))
+        self.actor3d_state_edit.setText(getattr(obj, "actor_start_state", "idle"))
         
         if is_gui:
             self.gui_text_edit.setText(obj.gui_text)
@@ -1269,9 +1532,10 @@ class CollisionPreviewWidget(QWidget):
         for i, cb in enumerate(self._boxes):
             r = self._box_widget_rect(cb)
             is_sel = (i == self._selected)
-            fill = QColor(ACCENT)
+            role_color = COLLISION_ROLE_COLORS.get(getattr(cb, "role", "Physics"), ACCENT)
+            fill = QColor(role_color)
             fill.setAlpha(60 if is_sel else 30)
-            border_color = QColor(ACCENT) if is_sel else QColor("#4ade80")
+            border_color = QColor(ACCENT) if is_sel else QColor(role_color)
             p.setBrush(QBrush(fill))
             p.setPen(QPen(border_color, 2 if is_sel else 1))
             p.drawRect(r)
@@ -1282,7 +1546,11 @@ class CollisionPreviewWidget(QWidget):
                     p.fillRect(QRectF(corner.x() - hs, corner.y() - hs, hs * 2, hs * 2), border_color)
             # label
             p.setPen(QPen(border_color))
-            p.drawText(r.adjusted(3, 1, 0, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, str(i))
+            p.drawText(
+                r.adjusted(3, 1, 0, 0),
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                f"{i} {getattr(cb, 'role', 'Physics')}",
+            )
 
         p.end()
 
@@ -1417,6 +1685,7 @@ class CollisionEditorPanel(QWidget):
         self._obj: ObjectDefinition | None = None
         self._project: Project | None = None
         self._frame_idx: int = 0
+        self._slot_idx: int = 0
         self._suppress = False
         self._build_ui()
 
@@ -1522,6 +1791,16 @@ class CollisionEditorPanel(QWidget):
         r2.addStretch()
         fl.addLayout(r2)
 
+        r3 = QHBoxLayout()
+        r3.setSpacing(4)
+        r3.addWidget(_make_dim_label("Role:"))
+        self._role_combo = QComboBox()
+        self._role_combo.addItems(list(COLLISION_BOX_ROLES))
+        self._role_combo.setStyleSheet(_field_style())
+        self._role_combo.currentIndexChanged.connect(self._on_field_changed)
+        r3.addWidget(self._role_combo, stretch=1)
+        fl.addLayout(r3)
+
         self._fields_widget.setVisible(False)
         lay.addWidget(self._fields_widget)
 
@@ -1536,6 +1815,23 @@ class CollisionEditorPanel(QWidget):
         self._copy_all_btn.clicked.connect(self._copy_to_all)
         copy_row.addWidget(self._copy_prev_btn)
         copy_row.addWidget(self._copy_all_btn)
+        self._slot_prev_btn = _btn("< Slot", small=True)
+        self._slot_prev_btn.setToolTip("Switch to previous animation slot")
+        self._slot_prev_btn.clicked.connect(self._prev_slot)
+        self._slot_label = QLabel("Slot 1 / 1")
+        self._slot_label.setStyleSheet(f"color: {TEXT}; font-size: 11px;")
+        self._slot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._slot_label.setMinimumWidth(88)
+        self._slot_next_btn = _btn("Slot >", small=True)
+        self._slot_next_btn.setToolTip("Switch to next animation slot")
+        self._slot_next_btn.clicked.connect(self._next_slot)
+        self._copy_slot_btn = _btn("Copy To Slot", small=True)
+        self._copy_slot_btn.setToolTip("Copy all collision boxes from this slot to another slot")
+        self._copy_slot_btn.clicked.connect(self._copy_to_slot)
+        copy_row.addWidget(self._slot_prev_btn)
+        copy_row.addWidget(self._slot_label)
+        copy_row.addWidget(self._slot_next_btn)
+        copy_row.addWidget(self._copy_slot_btn)
         copy_row.addStretch()
         lay.addLayout(copy_row)
 
@@ -1547,22 +1843,55 @@ class CollisionEditorPanel(QWidget):
         self._obj = obj
         self._project = project
         self._frame_idx = 0
+        self._slot_idx = 0
         if obj:
-            obj.sync_collision_frames(self._frame_count())
+            obj.sync_collision_frames(self._frame_count(), self._current_slot_name())
         self._refresh()
 
     # -- frame navigation --
 
-    def _frame_count(self) -> int:
+    def _is_animation_object(self) -> bool:
+        return self._obj is not None and self._obj.behavior_type == "Animation"
+
+    def _slot_names(self) -> list[str]:
+        if not self._is_animation_object():
+            return []
+        return [
+            str(slot.get("name", "")).strip()
+            for slot in self._obj.ani_slots
+            if str(slot.get("name", "")).strip()
+        ]
+
+    def _current_slot_name(self) -> str:
+        slot_names = self._slot_names()
+        if not slot_names:
+            return ""
+        self._slot_idx = max(0, min(self._slot_idx, len(slot_names) - 1))
+        return slot_names[self._slot_idx]
+
+    def _slot_ani_file_id(self, slot_name: str = "") -> str:
+        if not self._is_animation_object():
+            return ""
+        wanted = slot_name or self._current_slot_name()
+        for slot in self._obj.ani_slots:
+            if str(slot.get("name", "")).strip() == wanted:
+                return str(slot.get("ani_file_id", "") or "")
+        return ""
+
+    def _frame_count(self, slot_name: str = "") -> int:
         if self._obj is None:
             return 0
-        # Animation behavior type: frame count comes from the .ani export
-        _ani_fid = self._obj.ani_slots[0].get("ani_file_id", "") if self._obj.ani_slots else ""
-        if self._obj.behavior_type == "Animation" and _ani_fid and self._project:
+        _ani_fid = self._slot_ani_file_id(slot_name)
+        if self._is_animation_object() and _ani_fid and self._project:
             ani = self._project.get_animation_export(_ani_fid)
             if ani:
                 return max(ani.frame_count, 1)
         return max(len(self._obj.frames), 1)
+
+    def _collision_frames(self, create: bool = False, slot_name: str = "") -> list[list[CollisionBox]]:
+        if self._obj is None:
+            return []
+        return self._obj.collision_frames(slot_name or self._current_slot_name(), create=create)
 
     def _prev_frame(self):
         if self._frame_idx > 0:
@@ -1574,6 +1903,18 @@ class CollisionEditorPanel(QWidget):
             self._frame_idx += 1
             self._refresh()
 
+    def _prev_slot(self):
+        if self._slot_idx > 0:
+            self._slot_idx -= 1
+            self._frame_idx = 0
+            self._refresh()
+
+    def _next_slot(self):
+        if self._slot_idx < len(self._slot_names()) - 1:
+            self._slot_idx += 1
+            self._frame_idx = 0
+            self._refresh()
+
     # -- refresh everything --
 
     def _refresh(self):
@@ -1582,10 +1923,28 @@ class CollisionEditorPanel(QWidget):
             self._preview.set_boxes([])
             self._box_list.clear()
             self._frame_label.setText("No object")
+            self._slot_label.setText("No slot")
+            self._slot_prev_btn.setVisible(False)
+            self._slot_label.setVisible(False)
+            self._slot_next_btn.setVisible(False)
+            self._copy_slot_btn.setVisible(False)
             self._fields_widget.setVisible(False)
             return
 
-        self._obj.sync_collision_frames(self._frame_count())
+        slot_names = self._slot_names()
+        slot_name = self._current_slot_name()
+        show_slot_controls = self._is_animation_object() and bool(slot_names)
+        self._slot_prev_btn.setVisible(show_slot_controls)
+        self._slot_label.setVisible(show_slot_controls)
+        self._slot_next_btn.setVisible(show_slot_controls)
+        self._copy_slot_btn.setVisible(show_slot_controls)
+        self._slot_prev_btn.setEnabled(show_slot_controls and self._slot_idx > 0)
+        self._slot_next_btn.setEnabled(show_slot_controls and self._slot_idx < len(slot_names) - 1)
+        self._copy_slot_btn.setEnabled(show_slot_controls and len(slot_names) > 1)
+        if show_slot_controls:
+            self._slot_label.setText(f"Slot {self._slot_idx + 1} / {len(slot_names)}: {slot_name}")
+
+        self._obj.sync_collision_frames(self._frame_count(), slot_name)
         fc = self._frame_count()
         self._frame_idx = max(0, min(self._frame_idx, fc - 1))
         self._frame_label.setText(f"Frame {self._frame_idx + 1} / {fc}")
@@ -1594,8 +1953,8 @@ class CollisionEditorPanel(QWidget):
 
         # load sprite pixmap for current frame
         pm = None
-        _ani_fid = self._obj.ani_slots[0].get("ani_file_id", "") if self._obj.ani_slots else ""
-        if self._project and self._obj.behavior_type == "Animation" and _ani_fid:
+        _ani_fid = self._slot_ani_file_id(slot_name)
+        if self._project and self._is_animation_object() and _ani_fid:
             # Animation object: crop frame from spritesheet
             ani = self._project.get_animation_export(_ani_fid)
             if ani and ani.spritesheet_path and self._project.project_folder:
@@ -1628,7 +1987,8 @@ class CollisionEditorPanel(QWidget):
         self._preview.set_pixmap(pm)
 
         # boxes for this frame
-        boxes = self._obj.collision_boxes[self._frame_idx] if self._frame_idx < len(self._obj.collision_boxes) else []
+        current_frames = self._collision_frames(create=True)
+        boxes = current_frames[self._frame_idx] if self._frame_idx < len(current_frames) else []
         sel = min(self._box_list.currentRow(), len(boxes) - 1)
         self._preview.set_boxes(boxes, sel)
         self._refresh_box_list(sel)
@@ -1641,27 +2001,29 @@ class CollisionEditorPanel(QWidget):
         self._box_list.blockSignals(True)
         self._box_list.clear()
         for i, cb in enumerate(boxes):
-            self._box_list.addItem(f"Box {i}: ({cb.x},{cb.y}) {cb.width}×{cb.height}")
+            role = getattr(cb, "role", "Physics")
+            self._box_list.addItem(f"Box {i}: [{role}] ({cb.x},{cb.y}) {cb.width}x{cb.height}")
         self._box_list.blockSignals(False)
         if 0 <= select < len(boxes):
             self._box_list.setCurrentRow(select)
         self._on_box_selected(self._box_list.currentRow())
 
     def _current_boxes(self) -> list[CollisionBox]:
-        if self._obj is None or self._frame_idx >= len(self._obj.collision_boxes):
+        current_frames = self._collision_frames(create=False)
+        if self._obj is None or self._frame_idx >= len(current_frames):
             return []
-        return self._obj.collision_boxes[self._frame_idx]
+        return current_frames[self._frame_idx]
 
     # -- box operations --
 
     def _add_box(self):
         if self._obj is None:
             return
-        self._obj.sync_collision_frames(self._frame_count())
+        self._obj.sync_collision_frames(self._frame_count(), self._current_slot_name())
         # default box centered on object — use ani frame size for Animation types
         obj_w, obj_h = self._obj.width, self._obj.height
-        _ani_fid = self._obj.ani_slots[0].get("ani_file_id", "") if self._obj.ani_slots else ""
-        if self._obj.behavior_type == "Animation" and _ani_fid and self._project:
+        _ani_fid = self._slot_ani_file_id()
+        if self._is_animation_object() and _ani_fid and self._project:
             ani = self._project.get_animation_export(_ani_fid)
             if ani:
                 obj_w, obj_h = ani.frame_width, ani.frame_height
@@ -1670,8 +2032,9 @@ class CollisionEditorPanel(QWidget):
         bx = (obj_w - bw) // 2
         by = (obj_h - bh) // 2
         cb = CollisionBox(x=bx, y=by, width=bw, height=bh)
-        self._obj.collision_boxes[self._frame_idx].append(cb)
-        self._refresh_box_list(len(self._obj.collision_boxes[self._frame_idx]) - 1)
+        frames = self._collision_frames(create=True)
+        frames[self._frame_idx].append(cb)
+        self._refresh_box_list(len(frames[self._frame_idx]) - 1)
         self._preview.set_boxes(self._current_boxes(), self._box_list.currentRow())
         self.changed.emit()
 
@@ -1696,6 +2059,7 @@ class CollisionEditorPanel(QWidget):
             self._by_spin.setValue(cb.y)
             self._bw_spin.setValue(cb.width)
             self._bh_spin.setValue(cb.height)
+            self._role_combo.setCurrentText(getattr(cb, "role", "Physics"))
             self._suppress = False
             self._fields_widget.setVisible(True)
             self._preview.set_selected(row)
@@ -1714,6 +2078,7 @@ class CollisionEditorPanel(QWidget):
             cb.y = self._by_spin.value()
             cb.width = self._bw_spin.value()
             cb.height = self._bh_spin.value()
+            cb.role = self._role_combo.currentText() or "Physics"
             self._refresh_box_list(row)
             self._preview.set_boxes(self._current_boxes(), row)
             self.changed.emit()
@@ -1736,7 +2101,8 @@ class CollisionEditorPanel(QWidget):
             self._box_list.blockSignals(True)
             item = self._box_list.item(row)
             if item:
-                item.setText(f"Box {row}: ({cb.x},{cb.y}) {cb.width}×{cb.height}")
+                role = getattr(cb, "role", "Physics")
+                item.setText(f"Box {row}: [{role}] ({cb.x},{cb.y}) {cb.width}x{cb.height}")
             self._box_list.blockSignals(False)
             self.changed.emit()
 
@@ -1745,10 +2111,10 @@ class CollisionEditorPanel(QWidget):
     def _copy_from_prev(self):
         if self._obj is None or self._frame_idx <= 0:
             return
-        import json
-        prev = self._obj.collision_boxes[self._frame_idx - 1]
+        frames = self._collision_frames(create=True)
+        prev = frames[self._frame_idx - 1]
         clones = [CollisionBox.from_dict(cb.to_dict()) for cb in prev]
-        self._obj.collision_boxes[self._frame_idx] = clones
+        frames[self._frame_idx] = clones
         self._refresh_box_list(0 if clones else -1)
         self._preview.set_boxes(self._current_boxes(), self._box_list.currentRow())
         self.changed.emit()
@@ -1756,11 +2122,26 @@ class CollisionEditorPanel(QWidget):
     def _copy_to_all(self):
         if self._obj is None:
             return
-        import json
-        src = self._obj.collision_boxes[self._frame_idx]
-        for i in range(len(self._obj.collision_boxes)):
+        frames = self._collision_frames(create=True)
+        src = frames[self._frame_idx]
+        for i in range(len(frames)):
             if i != self._frame_idx:
-                self._obj.collision_boxes[i] = [CollisionBox.from_dict(cb.to_dict()) for cb in src]
+                frames[i] = [CollisionBox.from_dict(cb.to_dict()) for cb in src]
+        self.changed.emit()
+
+    def _copy_to_slot(self):
+        if self._obj is None or not self._is_animation_object():
+            return
+        current_slot = self._current_slot_name()
+        choices = [name for name in self._slot_names() if name != current_slot]
+        if not choices:
+            return
+        target_slot, ok = QInputDialog.getItem(self, "Copy To Slot", "Target Slot:", choices, 0, False)
+        if not ok or not target_slot:
+            return
+        target_frames = self._collision_frames(create=True, slot_name=target_slot)
+        target_frames[:] = ObjectDefinition.clone_collision_frames(self._collision_frames(create=True))
+        self._obj.sync_collision_frames(self._frame_count(target_slot), target_slot)
         self.changed.emit()
 
 
@@ -1939,6 +2320,22 @@ class ObjectsTab(QWidget):
     # -- Public API ------------------------------------------------------------
 
     def restyle(self, c: dict):
+        global DARK, PANEL, SURFACE, SURF2, BORDER, ACCENT, TEXT, DIM, MUTED, DANGER, SUCCESS, WARNING
+        old = _theme_snapshot()
+        DARK = c.get("DARK", DARK)
+        PANEL = c.get("PANEL", PANEL)
+        SURFACE = c.get("SURFACE", SURFACE)
+        SURF2 = c.get("SURFACE2", SURF2)
+        BORDER = c.get("BORDER", BORDER)
+        ACCENT = c.get("ACCENT", ACCENT)
+        TEXT = c.get("TEXT", TEXT)
+        DIM = c.get("TEXT_DIM", DIM)
+        MUTED = c.get("TEXT_MUTED", MUTED)
+        DANGER = c.get("DANGER", DANGER)
+        SUCCESS = c.get("SUCCESS", SUCCESS)
+        WARNING = c.get("WARNING", WARNING)
+        replace_widget_theme_colors(self, old, _theme_snapshot())
+
         self._header.setStyleSheet(f"background: {c['PANEL']}; border-bottom: 1px solid {c['BORDER']};")
         self._left_panel.setStyleSheet(f"background: {c['PANEL']}; border-right: 1px solid {c['BORDER']};")
         self._right_panel.setStyleSheet(f"background: {c['PANEL']}; border-left: 1px solid {c['BORDER']};")

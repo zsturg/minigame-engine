@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Any
+import copy
 import json
 import uuid
 
@@ -178,6 +179,7 @@ class SpriteFrame:
 @dataclass
 class BehaviorAction:
     action_type: str = "none"
+    plugin_data: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # ── Scene flow ───────────────────────────────────────────
     target_scene: int = 0              # go_to_scene, if branches
@@ -198,6 +200,7 @@ class BehaviorAction:
     bool_name: str = ""
     bool_value: bool = True            # set_flag value
     bool_expected: bool = True         # if_flag expected state
+    signal_name: str = ""              # emit_signal action name
 
     # ── Variable-to-variable / expression actions ────────────
     var_source: str = ""               # set_variable_from_variable, change_variable_by_variable: source variable name
@@ -211,6 +214,7 @@ class BehaviorAction:
     instance_id: str = ""             # specific placed instance (empty = all of type)
     group_name: str = ""              # target group name for group actions
     group_action_type: str = ""       # action type to broadcast to each group member
+    focus_target_object_id: str = ""  # set_focus: which object definition to focus
 
     # ── Transform ────────────────────────────────────────────
     target_x: int = 0
@@ -256,6 +260,9 @@ class BehaviorAction:
     # ── Debug ────────────────────────────────────────────────
     log_message: str = ""
 
+    # ── Raw Lua escape hatch ─────────────────────────────────
+    lua_snippet: str = ""              # lua_code action: raw Lua lines pasted by developer
+
     # ── Movement prebuilts ───────────────────────────────────
     movement_speed: float = 1.0
     movement_style: str = "instant"   # "instant" | "slide"
@@ -285,6 +292,9 @@ class BehaviorAction:
     jump_player_width: int = 32         # player hitbox width for grounded check
     jump_player_height: int = 48        # player hitbox height for grounded check
     jump_button: str = "cross"          # which button triggers the jump (for variable height release)
+    collision_value: int = 1            # collision cell value for collision_set_cell (0=empty, 1=solid)
+    collision_source_role: str = "Hitbox"   # object overlap source role filter
+    collision_target_role: str = "Hurtbox"  # object overlap target role filter
 
     # ── Conditional input actions ────────────────────────────
     button: str = ""                   # cross, circle, square, triangle, dpad_up, etc.
@@ -345,6 +355,16 @@ class BehaviorAction:
     layer_anim_enabled: bool = True          # enable or disable the behavior
     layer_anim_talk_duration: float = 2.0    # seconds for talk_for
 
+    # ── VN Dialog Sound actions ──────────────────────────────
+    # action_types: vn_dialog_sound, vn_tw_sound
+    vn_dialog_sound_id: str = ""             # audio_id for dialog sound
+    vn_dialog_sound_mode: str = "play_once"  # play_once | loop | repeat_on_cycle
+    vn_tw_sound_id_0: str = ""               # click sound pool slot 0
+    vn_tw_sound_id_1: str = ""               # click sound pool slot 1
+    vn_tw_sound_id_2: str = ""               # click sound pool slot 2
+    vn_tw_sound_id_3: str = ""               # click sound pool slot 3
+    vn_tw_sound_interval: int = 1            # fire every N characters
+
     # ── Grid actions ─────────────────────────────────────────
     # action_types: grid_place_at, grid_snap_to, grid_get_cell,
     #               grid_get_at, grid_is_empty, grid_get_neighbors,
@@ -363,6 +383,25 @@ class BehaviorAction:
     grid_row2: int = 0                       # second cell row (grid_swap)
     grid_col2_var: str = ""                  # read second col from variable (grid_swap)
     grid_row2_var: str = ""                  # read second row from variable (grid_swap)
+
+    # 3D scene actions
+    door_target_mode: str = "coords"         # open_door / close_door / toggle_door: "coords" | "tag"
+    door_col: int = 0                        # target door column when targeting by coords
+    door_row: int = 0                        # target door row when targeting by coords
+    door_tag: str = ""                       # target door tag when targeting by tag
+    obj_3d_id: str = ""                      # move_3d_object / set_3d_object_visible target object id
+    obj_3d_wx: float = 0.0                   # target 3D world x position
+    obj_3d_wy: float = 0.0                   # target 3D world y position
+    obj_3d_visible: bool = True              # target 3D visibility state
+    actor_3d_state: str = ""                 # 3D actor state string
+    actor_3d_angle: float = 0.0              # 3D actor facing angle in degrees
+    actor_3d_query_range: float = 0.0        # optional distance override for 3D actor queries
+    actor_3d_alive: bool = True              # 3D actor alive/dead state
+    actor_3d_blocking: bool = True           # 3D actor blocking state
+    actor_3d_interactable: bool = True       # 3D actor interactable state
+    actor_3d_patrol_enabled: bool = True     # 3D actor patrol paused/running state
+    player_tile_where: str = "under_player"  # check_player_tile source: under_player | facing_tile
+    player_tile_type: str = "empty"          # check_player_tile test: empty | wall | door | exit | trigger | switch
 
     def to_dict(self):
         d = self.__dict__.copy()
@@ -383,12 +422,15 @@ class BehaviorAction:
                 setattr(obj, k, [BehaviorAction.from_dict(sa) if isinstance(sa, dict) else sa for sa in v])
             elif hasattr(obj, k):
                 setattr(obj, k, v)
+        if not isinstance(obj.plugin_data, dict):
+            obj.plugin_data = {}
         return obj
 
 
 @dataclass
 class Behavior:
     trigger: str = "on_scene_start"
+    plugin_data: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Valid triggers:
     #   on_input              — any mapped input action fires (uses input_action_name)
     #   on_frame              — runs every frame (uses frame_count for interval)
@@ -408,11 +450,14 @@ class Behavior:
     #   on_variable_threshold — fires when a variable crosses a comparison threshold
     #                           (uses threshold_var, threshold_value, threshold_compare, threshold_repeat)
     #   on_touch_tap          — fires when the front touchscreen is tapped inside this object's bounding box
+    #   on_touch_swipe        — fires when a touch gesture ends and qualifies as a swipe
+    #                           (uses swipe_direction, swipe_min_distance, swipe_scope)
     #   on_path_complete      — fires when an object finishes following a named path (uses path_name)
     #   on_animation_finish   — fires once when a non-looping Animation object reaches its last frame
     #                           (uses ani_trigger_object: object_def_id of the Animation object to watch)
     #   on_animation_frame    — fires each time an Animation object reaches a specific frame index
     #                           (uses ani_trigger_object and ani_trigger_frame)
+    #   on_selection          — fires once when this object becomes the focused navigation target
     frame_count: int = 60
     bool_var: str = ""
     input_action_name: str = ""
@@ -425,11 +470,19 @@ class Behavior:
     path_name: str = ""            # on_path_complete: name of the path to watch
     ani_trigger_object: str = ""  # on_animation_finish / on_animation_frame: object_def_id of Animation object
     ani_trigger_frame: int = 0    # on_animation_frame: frame index to watch for
+    overlap_object_id: str = ""   # object type or instance id to test against for object-overlap triggers
+    overlap_source_role: str = "Hitbox"
+    overlap_target_role: str = "Hurtbox"
+    swipe_direction: str = "any"  # on_touch_swipe: left | right | up | down | any
+    swipe_min_distance: int = 48  # on_touch_swipe: minimum pixel distance to qualify as a swipe
+    swipe_scope: str = "screen"   # on_touch_swipe: screen | object
+    lua_condition: str = ""       # on_lua_condition: raw Lua boolean expression evaluated every frame
     actions: list[BehaviorAction] = field(default_factory=list)
 
     def to_dict(self):
         return {
             "trigger":            self.trigger,
+            "plugin_data":        copy.deepcopy(self.plugin_data),
             "frame_count":        self.frame_count,
             "bool_var":           self.bool_var,
             "input_action_name":  self.input_action_name,
@@ -442,6 +495,13 @@ class Behavior:
             "path_name":          self.path_name,
             "ani_trigger_object": self.ani_trigger_object,
             "ani_trigger_frame":  self.ani_trigger_frame,
+            "overlap_object_id":  self.overlap_object_id,
+            "overlap_source_role": self.overlap_source_role,
+            "overlap_target_role": self.overlap_target_role,
+            "swipe_direction":    self.swipe_direction,
+            "swipe_min_distance": self.swipe_min_distance,
+            "swipe_scope":        self.swipe_scope,
+            "lua_condition":      self.lua_condition,
             "actions":            [a.to_dict() for a in self.actions],
         }
 
@@ -449,6 +509,8 @@ class Behavior:
     def from_dict(cls, d):
         b = cls()
         b.trigger           = d.get("trigger",           "on_scene_start")
+        plugin_data = d.get("plugin_data", {})
+        b.plugin_data = copy.deepcopy(plugin_data) if isinstance(plugin_data, dict) else {}
         b.frame_count       = d.get("frame_count",       60)
         b.bool_var          = d.get("bool_var",          "")
         b.input_action_name = d.get("input_action_name", "")
@@ -461,8 +523,43 @@ class Behavior:
         b.path_name         = d.get("path_name",         "")
         b.ani_trigger_object = d.get("ani_trigger_object", "")
         b.ani_trigger_frame  = d.get("ani_trigger_frame",  0)
+        b.overlap_object_id  = d.get("overlap_object_id",  "")
+        b.overlap_source_role = d.get("overlap_source_role", "Hitbox")
+        b.overlap_target_role = d.get("overlap_target_role", "Hurtbox")
+        b.swipe_direction    = d.get("swipe_direction",    "any")
+        b.swipe_min_distance = d.get("swipe_min_distance", 48)
+        b.swipe_scope        = d.get("swipe_scope",        "screen")
+        b.lua_condition      = d.get("lua_condition",      "")
         b.actions           = [BehaviorAction.from_dict(a) for a in d.get("actions", [])]
         return b
+
+
+def get_behavior_plugin_value(container: Any, code: str, field_name: str, default: Any = None) -> Any:
+    if hasattr(container, field_name):
+        return getattr(container, field_name)
+    plugin_data = getattr(container, "plugin_data", {}) or {}
+    bucket = plugin_data.get(code, {})
+    if isinstance(bucket, dict):
+        return bucket.get(field_name, default)
+    return default
+
+
+def set_behavior_plugin_value(container: Any, code: str, field_name: str, value: Any) -> None:
+    if hasattr(container, field_name):
+        setattr(container, field_name, value)
+        return
+    plugin_data = getattr(container, "plugin_data", None)
+    if not isinstance(plugin_data, dict):
+        plugin_data = {}
+        setattr(container, "plugin_data", plugin_data)
+    bucket = plugin_data.setdefault(code, {})
+    if not isinstance(bucket, dict):
+        bucket = {}
+        plugin_data[code] = bucket
+    bucket[field_name] = value
+
+
+COLLISION_BOX_ROLES = ("Physics", "Hurtbox", "Hitbox", "Trigger")
 
 
 @dataclass
@@ -472,15 +569,26 @@ class CollisionBox:
     y: int = 0
     width: int = 32
     height: int = 32
+    role: str = "Physics"
 
     def to_dict(self):
-        return {"x": self.x, "y": self.y, "width": self.width, "height": self.height}
+        return {
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "role": self.role if self.role in COLLISION_BOX_ROLES else "Physics",
+        }
 
     @classmethod
     def from_dict(cls, d):
+        role = str(d.get("role", "Physics") or "Physics")
+        if role not in COLLISION_BOX_ROLES:
+            role = "Physics"
         return cls(
             x=d.get("x", 0), y=d.get("y", 0),
             width=d.get("width", 32), height=d.get("height", 32),
+            role=role,
         )
 
 
@@ -515,6 +623,16 @@ class ObjectDefinition:
     camera_bounds_height: int = 544          # manual bounds height (only if enabled)
     camera_follow_lag: float = 0.0           # 0 = instant, higher = smoother (0.0 to 0.95)
     camera_zoom_default: float = 1.0         # starting zoom level for this camera (0.25 – 4.0)
+    # 3D actor config — only meaningful for raycast scenes
+    is_3d_actor: bool = False
+    actor_faction: str = ""
+    actor_max_health: int = 100
+    actor_move_speed: float = 1.0
+    actor_radius: float = 16.0
+    actor_sight_range: float = 160.0
+    actor_attack_range: float = 48.0
+    actor_patrol_path: str = ""
+    actor_start_state: str = "idle"
 
     # Animation config — only meaningful when behavior_type == "Animation"
     ani_file_id: str = ""                    # DEPRECATED — kept for migration only; use ani_slots[0]
@@ -540,10 +658,21 @@ class ObjectDefinition:
     # Physics config
     affected_by_gravity: bool = False        # True = scene gravity applies to this object
     is_mover: bool = True                    # participates in zone overlap checks
+    blocks_2d_movement: bool = False         # if True, this object blocks 2D movement against other objects
+
+    # D-pad navigation config
+    navigable: bool = False                  # True = this object can receive focus
+    focus_nav_up: str = ""                   # object_def_id of neighbor when pressing up
+    focus_nav_down: str = ""                 # object_def_id of neighbor when pressing down
+    focus_nav_left: str = ""                 # object_def_id of neighbor when pressing left
+    focus_nav_right: str = ""               # object_def_id of neighbor when pressing right
 
     # Collision boxes — per-frame list of collision rectangles
     # collision_boxes[frame_index] = list of CollisionBox for that frame
     collision_boxes: list[list[CollisionBox]] = field(default_factory=list)
+    # Animation collision boxes — keyed by slot name, then frame index
+    # ani_collision_boxes[slot_name][frame_index] = list of CollisionBox
+    ani_collision_boxes: dict[str, list[list[CollisionBox]]] = field(default_factory=dict)
 
     def to_dict(self):
         return {
@@ -574,6 +703,15 @@ class ObjectDefinition:
             "camera_bounds_height": self.camera_bounds_height,
             "camera_follow_lag": self.camera_follow_lag,
             "camera_zoom_default": self.camera_zoom_default,
+            "is_3d_actor": self.is_3d_actor,
+            "actor_faction": self.actor_faction,
+            "actor_max_health": self.actor_max_health,
+            "actor_move_speed": self.actor_move_speed,
+            "actor_radius": self.actor_radius,
+            "actor_sight_range": self.actor_sight_range,
+            "actor_attack_range": self.actor_attack_range,
+            "actor_patrol_path": self.actor_patrol_path,
+            "actor_start_state": self.actor_start_state,
             "ani_slots": list(self.ani_slots),
             "ani_loop": self.ani_loop,
             "ani_play_on_spawn": self.ani_play_on_spawn,
@@ -590,7 +728,17 @@ class ObjectDefinition:
             "zone_target": self.zone_target,
             "affected_by_gravity": self.affected_by_gravity,
             "is_mover": self.is_mover,
+            "blocks_2d_movement": self.blocks_2d_movement,
+            "navigable": self.navigable,
+            "focus_nav_up": self.focus_nav_up,
+            "focus_nav_down": self.focus_nav_down,
+            "focus_nav_left": self.focus_nav_left,
+            "focus_nav_right": self.focus_nav_right,
             "collision_boxes": [[cb.to_dict() for cb in frame_boxes] for frame_boxes in self.collision_boxes],
+            "ani_collision_boxes": {
+                slot_name: [[cb.to_dict() for cb in frame_boxes] for frame_boxes in frames]
+                for slot_name, frames in self.ani_collision_boxes.items()
+            },
         }
 
     @classmethod
@@ -623,13 +771,22 @@ class ObjectDefinition:
         obj.camera_bounds_height = d.get("camera_bounds_height", 544)
         obj.camera_follow_lag = d.get("camera_follow_lag", 0.0)
         obj.camera_zoom_default = d.get("camera_zoom_default", 1.0)
+        obj.is_3d_actor = d.get("is_3d_actor", False)
+        obj.actor_faction = d.get("actor_faction", "")
+        obj.actor_max_health = d.get("actor_max_health", 100)
+        obj.actor_move_speed = d.get("actor_move_speed", 1.0)
+        obj.actor_radius = d.get("actor_radius", 16.0)
+        obj.actor_sight_range = d.get("actor_sight_range", 160.0)
+        obj.actor_attack_range = d.get("actor_attack_range", 48.0)
+        obj.actor_patrol_path = d.get("actor_patrol_path", "")
+        obj.actor_start_state = d.get("actor_start_state", "idle")
         obj.ani_file_id = d.get("ani_file_id", "")  # kept only for migration below
         # Migrate: if saved with old single ani_file_id and no ani_slots, seed slot 0
         raw_slots = d.get("ani_slots", None)
         if raw_slots is not None:
-            obj.ani_slots = list(raw_slots)
+            obj.ani_slots = cls.normalize_ani_slots(raw_slots)
         elif obj.ani_file_id:
-            obj.ani_slots = [{"name": "0", "ani_file_id": obj.ani_file_id}]
+            obj.ani_slots = cls.normalize_ani_slots([{"name": "0", "ani_file_id": obj.ani_file_id}])
         else:
             obj.ani_slots = []
         obj.ani_loop = d.get("ani_loop", True)
@@ -647,10 +804,28 @@ class ObjectDefinition:
         obj.zone_target = d.get("zone_target", "player")
         obj.affected_by_gravity = d.get("affected_by_gravity", False)
         obj.is_mover = d.get("is_mover", True)
+        obj.blocks_2d_movement = d.get("blocks_2d_movement", False)
+        obj.navigable = d.get("navigable", False)
+        obj.focus_nav_up = d.get("focus_nav_up", "")
+        obj.focus_nav_down = d.get("focus_nav_down", "")
+        obj.focus_nav_left = d.get("focus_nav_left", "")
+        obj.focus_nav_right = d.get("focus_nav_right", "")
         obj.collision_boxes = [
             [CollisionBox.from_dict(cb) for cb in frame_boxes]
             for frame_boxes in d.get("collision_boxes", [])
         ]
+        obj.ani_collision_boxes = {
+            str(slot_name): [
+                [CollisionBox.from_dict(cb) for cb in frame_boxes]
+                for frame_boxes in frames
+            ]
+            for slot_name, frames in d.get("ani_collision_boxes", {}).items()
+        }
+        if obj.behavior_type == "Animation" and not obj.ani_collision_boxes and obj.collision_boxes:
+            for slot in obj.ani_slots:
+                slot_name = str(slot.get("name", "")).strip()
+                if slot_name:
+                    obj.ani_collision_boxes[slot_name] = cls.clone_collision_frames(obj.collision_boxes)
         # Do NOT call sync_collision_frames() here — for Animation behavior_type objects
         # the real frame count comes from the AnimationExport, which isn't available at
         # load time. Calling it here would truncate saved collision frames down to 1.
@@ -658,7 +833,70 @@ class ObjectDefinition:
         # sync_collision_frames(frame_count_override) with the correct count.
         return obj
 
-    def sync_collision_frames(self, frame_count_override: int = 0):
+    @staticmethod
+    def clone_collision_frames(frames: list[list[CollisionBox]]) -> list[list[CollisionBox]]:
+        return [
+            [CollisionBox.from_dict(cb.to_dict()) for cb in frame_boxes]
+            for frame_boxes in frames
+        ]
+
+    @staticmethod
+    def normalize_ani_slots(slots: list) -> list[dict]:
+        normalized: list[dict] = []
+        used_names: set[str] = set()
+        for idx, slot in enumerate(slots or []):
+            raw_name = str((slot or {}).get("name", "")).strip() or str(idx)
+            name = raw_name
+            suffix = 1
+            while name in used_names:
+                name = f"{raw_name}_{suffix}"
+                suffix += 1
+            used_names.add(name)
+            normalized.append({
+                "name": name,
+                "ani_file_id": str((slot or {}).get("ani_file_id", "") or ""),
+            })
+        return normalized
+
+    def default_ani_slot_name(self) -> str:
+        return next(
+            (str(slot.get("name", "")).strip() for slot in self.ani_slots if str(slot.get("name", "")).strip()),
+            "",
+        )
+
+    def collision_slot_name(self, slot_name: str = "") -> str:
+        if self.behavior_type != "Animation":
+            return ""
+        wanted = str(slot_name or "").strip()
+        valid_names = {
+            str(slot.get("name", "")).strip()
+            for slot in self.ani_slots
+            if str(slot.get("name", "")).strip()
+        }
+        if wanted and wanted in valid_names:
+            return wanted
+        return self.default_ani_slot_name()
+
+    def collision_frames(self, slot_name: str = "", create: bool = False) -> list[list[CollisionBox]]:
+        if self.behavior_type != "Animation":
+            return self.collision_boxes
+        resolved = self.collision_slot_name(slot_name)
+        if not resolved:
+            return self.collision_boxes
+        if create:
+            return self.ani_collision_boxes.setdefault(resolved, [])
+        return self.ani_collision_boxes.get(resolved, [])
+
+    def has_any_collision_boxes(self) -> bool:
+        if any(frame_boxes for frame_boxes in self.collision_boxes):
+            return True
+        return any(
+            frame_boxes
+            for frames in self.ani_collision_boxes.values()
+            for frame_boxes in frames
+        )
+
+    def sync_collision_frames(self, frame_count_override: int = 0, slot_name: str = ""):
         """Ensure collision_boxes has one entry per frame (at least 1 for static objects).
 
         frame_count_override: if > 0, use this instead of len(self.frames).
@@ -670,13 +908,14 @@ class ObjectDefinition:
         we only grow the list — never shrink it — to avoid silently discarding
         collision data for Animation objects whose frame count isn't knowable here.
         """
+        frames = self.collision_frames(slot_name, create=True)
         target = frame_count_override if frame_count_override > 0 else max(len(self.frames), 1)
-        while len(self.collision_boxes) < target:
-            self.collision_boxes.append([])
+        while len(frames) < target:
+            frames.append([])
         # Only trim when the caller explicitly provided the real frame count.
         # Without an override we can't know the true count for Animation objects.
-        if frame_count_override > 0 and len(self.collision_boxes) > target:
-            self.collision_boxes = self.collision_boxes[:target]
+        if frame_count_override > 0 and len(frames) > target:
+            del frames[target:]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -708,7 +947,10 @@ class PlacedObject:
     hud_mode: bool = False             # True = screen-space HUD image, not a billboard
     hud_x: int = 10                    # screen pixel X (960×544)
     hud_y: int = 10                    # screen pixel Y
-    hud_anchor: str = "top_left"       # top_left | top_right | bottom_left | bottom_right | center
+    hud_anchor: str = "top_left"       # top_left | top_right | bottom_left | bottom_right | center | bottom_center
+    interact_range: int = 80            # pixel radius for RayCast3D.registerObject; ~1.25 tiles at default tile_size
+    tile_link_tag: str = ""             # matches a Trigger/Switch tile tag so emit_signal(tag) targets this object
+    actor_patrol_path_id: str = ""      # SceneComponent.id of the default 3D patrol path for this placed actor
 
     # ── Parenting ────────────────────────────────────────────
     parent_id: str = ""                # instance_id of parent PlacedObject ("" = no parent)
@@ -742,6 +984,9 @@ class PlacedObject:
             "hud_x": self.hud_x,
             "hud_y": self.hud_y,
             "hud_anchor": self.hud_anchor,
+            "interact_range": self.interact_range,
+            "tile_link_tag": self.tile_link_tag,
+            "actor_patrol_path_id": self.actor_patrol_path_id,
             "parent_id": self.parent_id,
             "inherit_position": self.inherit_position,
             "inherit_rotation": self.inherit_rotation,
@@ -775,6 +1020,9 @@ class PlacedObject:
         obj.hud_x = d.get("hud_x", 10)
         obj.hud_y = d.get("hud_y", 10)
         obj.hud_anchor = d.get("hud_anchor", "top_left")
+        obj.interact_range = int(d.get("interact_range", 80))
+        obj.tile_link_tag = d.get("tile_link_tag", "")
+        obj.actor_patrol_path_id = d.get("actor_patrol_path_id", "")
         obj.parent_id = d.get("parent_id", "")
         obj.inherit_position = d.get("inherit_position", True)
         obj.inherit_rotation = d.get("inherit_rotation", False)
@@ -782,6 +1030,39 @@ class PlacedObject:
         obj.destroy_with_parent = d.get("destroy_with_parent", False)
         obj.rotation_offset = float(d.get("rotation_offset", 0.0))
         return obj
+
+
+def clone_behaviors(behaviors: list[Behavior]) -> list[Behavior]:
+    return [Behavior.from_dict(copy.deepcopy(b.to_dict())) for b in behaviors]
+
+
+def seed_instance_behaviors_from_definition(
+    instance: PlacedObject | None,
+    object_def: ObjectDefinition | None,
+) -> bool:
+    if instance is None or object_def is None:
+        return False
+    if getattr(instance, "instance_behaviors", None):
+        return False
+    if not getattr(object_def, "behaviors", None):
+        return False
+    instance.instance_behaviors = clone_behaviors(object_def.behaviors)
+    if not getattr(instance, "instance_node_groups", None):
+        node_groups = getattr(object_def, "node_groups", None)
+        if isinstance(node_groups, dict):
+            setattr(instance, "instance_node_groups", copy.deepcopy(node_groups))
+    return True
+
+
+def effective_placed_behaviors(
+    instance: PlacedObject | None,
+    object_def: ObjectDefinition | None,
+) -> list[Behavior]:
+    if instance is not None and getattr(instance, "instance_behaviors", None):
+        return list(instance.instance_behaviors)
+    if object_def is not None and getattr(object_def, "behaviors", None):
+        return list(object_def.behaviors)
+    return []
 
 
 # ─────────────────────────────────────────────────────────────
@@ -841,6 +1122,7 @@ class BlinkConfig:
     interval_min: float = 2.0               # seconds between blinks (lower bound)
     interval_max: float = 5.0               # seconds between blinks (upper bound)
     blink_duration: float = 0.15            # seconds the alt image stays visible
+    node_hook_mode: str = "builtin"         # builtin | supplement | replace
 
     def to_dict(self):
         return {
@@ -850,6 +1132,7 @@ class BlinkConfig:
             "interval_min": self.interval_min,
             "interval_max": self.interval_max,
             "blink_duration": self.blink_duration,
+            "node_hook_mode": self.node_hook_mode,
         }
 
     @classmethod
@@ -861,6 +1144,7 @@ class BlinkConfig:
             interval_min=float(d.get("interval_min", 2.0)),
             interval_max=float(d.get("interval_max", 5.0)),
             blink_duration=float(d.get("blink_duration", 0.15)),
+            node_hook_mode=d.get("node_hook_mode", "builtin"),
         )
 
 
@@ -870,23 +1154,35 @@ class MouthConfig:
     enabled: bool = False
     layer_id: str = ""                      # which PaperDollLayer gets swapped
     alt_image_id: Optional[str] = None      # RegisteredImage.id for open-mouth frame
+    image_ids: list[str] = field(default_factory=list)  # ordered extra mouth shapes
     cycle_speed: float = 0.12               # seconds per open/close cycle
+    node_hook_mode: str = "builtin"         # builtin | supplement | replace
 
     def to_dict(self):
+        image_ids = [img_id for img_id in self.image_ids if img_id]
+        first_image_id = image_ids[0] if image_ids else self.alt_image_id
         return {
             "enabled": self.enabled,
             "layer_id": self.layer_id,
-            "alt_image_id": self.alt_image_id,
+            "alt_image_id": first_image_id,
+            "image_ids": image_ids,
             "cycle_speed": self.cycle_speed,
+            "node_hook_mode": self.node_hook_mode,
         }
 
     @classmethod
     def from_dict(cls, d):
+        image_ids = [str(img_id) for img_id in d.get("image_ids", []) if img_id]
+        legacy_alt = d.get("alt_image_id")
+        if not image_ids and legacy_alt:
+            image_ids = [legacy_alt]
         return cls(
             enabled=d.get("enabled", False),
             layer_id=d.get("layer_id", ""),
-            alt_image_id=d.get("alt_image_id"),
+            alt_image_id=image_ids[0] if image_ids else legacy_alt,
+            image_ids=image_ids,
             cycle_speed=float(d.get("cycle_speed", 0.12)),
+            node_hook_mode=d.get("node_hook_mode", "builtin"),
         )
 
 
@@ -898,6 +1194,7 @@ class IdleBreathingConfig:
     scale_amount: float = 0.02              # ±percentage (0.02 = ±2%)
     speed: float = 3.0                      # full cycle duration in seconds
     affect_children: bool = True            # if False, only the target layer scales
+    node_hook_mode: str = "builtin"         # builtin | supplement | replace
 
     def to_dict(self):
         return {
@@ -906,6 +1203,7 @@ class IdleBreathingConfig:
             "scale_amount": self.scale_amount,
             "speed": self.speed,
             "affect_children": self.affect_children,
+            "node_hook_mode": self.node_hook_mode,
         }
 
     @classmethod
@@ -916,6 +1214,7 @@ class IdleBreathingConfig:
             scale_amount=float(d.get("scale_amount", 0.02)),
             speed=float(d.get("speed", 3.0)),
             affect_children=d.get("affect_children", True),
+            node_hook_mode=d.get("node_hook_mode", "builtin"),
         )
 
 
@@ -1036,6 +1335,8 @@ COMPONENT_TYPES = [
     "Layer",
     "TileLayer",
     "CollisionLayer",
+    "LightmapLayer",
+    "Raycast3DConfig",
     "Music",
     "VNDialogBox",
     "ChoiceMenu",
@@ -1047,6 +1348,7 @@ COMPONENT_TYPES = [
     "Gravity",
     "LayerAnimation",
     "Grid",
+    "SaveGame",
 ]
 
 COMPONENT_DEFAULTS: dict[str, dict] = {
@@ -1084,6 +1386,43 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
         "map_width": 30,
         "map_height": 17,
         "tiles": [],             # flat int array, len = map_width * map_height, 0 = empty, 1 = solid
+    },
+    "LightmapLayer": {
+        "layer_name": "New Lightmap",
+        "layer": 99,             # drawn as an overlay after world rendering
+        "tile_size": 32,         # light grid cell size in pixels
+        "map_width": 30,
+        "map_height": 17,
+        "cells": [],             # flat int array, len = map_width * map_height, 0..255 darkness
+        "visible": True,
+        "opacity": 255,          # master alpha multiplier for the whole layer
+        "blend_color": "#000000",
+        "paint_value": 192,      # default brush darkness in the editor
+        "brush_mode": "set",     # set | add | subtract
+        "brush_radius": 0,       # radius in cells; 0 = single-cell stamp
+        "brush_strength": 48,    # per-stamp delta for add/subtract/soft set
+    },
+    "Raycast3DConfig": {
+        "movement_mode": "grid",         # free | grid | rail
+        "control_profile": "grid_strafe",# grid_classic | grid_strafe | free_modern
+        "turn_mode": "smooth",           # smooth | step
+        "rail_mode": "path",             # path | locked_forward
+        "move_speed": 5.0,               # free movement step per frame
+        "turn_speed": 5.0,               # smooth turn degrees per frame
+        "grid_step_distance": 64,        # pixels advanced per grid step
+        "grid_step_duration": 0.15,      # seconds per grid move
+        "turn_step_angle": 90,           # degrees per turn in step mode
+        "turn_duration": 0.12,           # seconds per step turn
+        "allow_strafe": False,
+        "allow_backstep": True,
+        "interact_distance": 80,         # pixel range for tile/object interact tests
+        "lock_input_while_moving": True,
+        "collision_behavior": "stop",    # stop | slide
+        "camera_pitch_enabled": False,
+        "controller_scheme": "standard", # legacy reserved field; superseded by control_profile
+        "default_object_interact_distance": 80,
+        "render_view_size": 60,
+        "rail_path_name": "",
     },
     "Music": {
         "action": "keep",       # keep | change | stop
@@ -1138,6 +1477,34 @@ COMPONENT_DEFAULTS: dict[str, dict] = {
         "cell_height": 32,             # pixel height of each cell
         "origin_x": 0,                 # pixel X offset of grid top-left in scene
         "origin_y": 0,                 # pixel Y offset of grid top-left in scene
+    },
+    "SaveGame": {
+        "title_text": "SAVE / LOAD",
+        "slot_prefix": "Slot",
+        "help_text": "Cross: Save Triangle: Load Circle: Back",
+        "empty_slot_text": "Empty",
+        "saved_text": "Saved.",
+        "no_save_text": "No save in this slot.",
+        "font_id": "",
+        "title_font_size": 24,
+        "slot_font_size": 18,
+        "message_font_size": 18,
+        "help_font_size": 16,
+        "bg_color": "#000000",
+        "title_color": "#FFFFFF",
+        "slot_color": "#B4B4B4",
+        "selected_slot_color": "#FFFF64",
+        "empty_slot_color": "#787878",
+        "message_color": "#FFFFFF",
+        "help_color": "#C8C8C8",
+        "background_use_image": False,
+        "background_image_id": None,
+        "layout_preset": "center",
+        "slot_spacing": 60,
+        "show_help_text": True,
+        "use_panel": False,
+        "panel_color": "#101018",
+        "panel_opacity": 180,
     },
 }
 
@@ -1198,9 +1565,80 @@ def make_component(component_type: str) -> SceneComponent:
     )
 
 
+def ensure_raycast3d_config(scene: "Scene") -> SceneComponent:
+    """Ensure every 3D scene owns exactly one Raycast3D config component."""
+    existing = [c for c in scene.components if c.component_type == "Raycast3DConfig"]
+    if existing:
+        primary = existing[0]
+        defaults = COMPONENT_DEFAULTS.get("Raycast3DConfig", {})
+        import copy
+        for k, v in defaults.items():
+            if k not in primary.config:
+                primary.config[k] = copy.deepcopy(v)
+        if "control_profile" not in primary.config:
+            _mode = primary.config.get("movement_mode", getattr(scene, "movement_mode", "grid"))
+            primary.config["control_profile"] = "free_modern" if _mode == "free" else "grid_strafe"
+        for extra in existing[1:]:
+            scene.components.remove(extra)
+        return primary
+
+    comp = make_component("Raycast3DConfig")
+    comp.config["movement_mode"] = getattr(scene, "movement_mode", comp.config["movement_mode"])
+    comp.config["control_profile"] = "free_modern" if comp.config["movement_mode"] == "free" else "grid_strafe"
+    comp.config["move_speed"] = float(getattr(scene, "move_speed", comp.config["move_speed"]))
+    comp.config["turn_speed"] = float(getattr(scene, "turn_speed", comp.config["turn_speed"]))
+    scene.components.insert(0, comp)
+    return comp
+
+
 # ─────────────────────────────────────────────────────────────
 #  MAP DATA  (3D scene map, owned by Scene)
 # ─────────────────────────────────────────────────────────────
+
+# TileMetaType constants — valid values for TileMeta.type
+TILE_META_DOOR    = "door"
+TILE_META_EXIT    = "exit"
+TILE_META_TRIGGER = "trigger"
+TILE_META_SWITCH  = "switch"
+
+
+@dataclass
+class TileMeta:
+    """Metadata attached to a single map tile. Sparse — only exists where painted.
+    Keyed in MapData.tile_meta by the string "col,row".
+
+    type:         one of the TILE_META_* constants
+    state:        runtime-mutable state string  ("open"/"closed" for doors,
+                  "on"/"off" for switches, "" for triggers/exits)
+    target_scene: scene index to load (exit tiles only; matches Scene index in project)
+    tag:          arbitrary string identifier used by trigger/switch tiles to
+                  link to behavior dispatch
+    """
+    type:         str = TILE_META_DOOR
+    state:        str = "closed"
+    target_scene: int = 0
+    tag:          str = ""
+    texture_image_id: str = ""  # door-only: registered image id used for the closed door surface
+
+    def to_dict(self):
+        return {
+            "type":         self.type,
+            "state":        self.state,
+            "target_scene": self.target_scene,
+            "tag":          self.tag,
+            "texture_image_id": self.texture_image_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TileMeta":
+        return cls(
+            type=d.get("type", TILE_META_DOOR),
+            state=d.get("state", "closed"),
+            target_scene=int(d.get("target_scene", 0)),
+            tag=d.get("tag", ""),
+            texture_image_id=d.get("texture_image_id", ""),
+        )
+
 
 @dataclass
 class MapData:
@@ -1220,6 +1658,7 @@ class MapData:
     sky_on:       bool  = False
     skybox_image_id: str = ""          # registered image ID for skybox background (empty = use fillRect)
     accuracy:     int   = 3            # raycaster column stride (1=best quality, 7=fastest)
+    tile_meta:    dict  = field(default_factory=dict)  # sparse {"{col},{row}": TileMeta}
 
     def get(self, col: int, row: int) -> int:
         if 0 <= col < self.width and 0 <= row < self.height:
@@ -1273,6 +1712,7 @@ class MapData:
             "sky_on":      self.sky_on,
             "skybox_image_id": self.skybox_image_id,
             "accuracy":    self.accuracy,
+            "tile_meta":   {k: v.to_dict() for k, v in self.tile_meta.items()},
         }
 
     @classmethod
@@ -1294,6 +1734,8 @@ class MapData:
         m.sky_on      = d.get("sky_on",      False)
         m.skybox_image_id = d.get("skybox_image_id", "")
         m.accuracy    = d.get("accuracy",    3)
+        raw_meta = d.get("tile_meta", {})
+        m.tile_meta = {k: TileMeta.from_dict(v) for k, v in raw_meta.items()}
         return m
 
 
@@ -1338,10 +1780,10 @@ def _make_scene_components(template: str) -> list[SceneComponent]:
 SCENE_TEMPLATES = [
     ("Blank",        "BLANK"),
     ("VN Scene",     "VN_SCENE"),
-    ("Choice Scene", "CHOICE_SCENE"),
-    ("Start Screen", "START_SCREEN"),
-    ("End Scene",    "END_SCENE"),
-    ("Cutscene",     "CUTSCENE"),
+    #("Choice Scene", "CHOICE_SCENE"),#
+    #("Start Screen", "START_SCREEN"),#
+    #("End Scene",    "END_SCENE"),#
+    #("Cutscene",     "CUTSCENE"),#
     ("3D Scene",     "3D_SCENE"),
 ]
 
@@ -1373,6 +1815,10 @@ class Scene:
 
     def get_component(self, component_type: str) -> Optional[SceneComponent]:
         return next((c for c in self.components if c.component_type == component_type), None)
+
+    def ensure_required_components(self):
+        if self.scene_type == "3d":
+            ensure_raycast3d_config(self)
 
     def get_summary(self) -> str:
         if self.role == "start":
@@ -1419,6 +1865,7 @@ class Scene:
         s.move_speed    = d.get("move_speed",    5)
         s.turn_speed    = d.get("turn_speed",    50)
         s.map_data      = MapData.from_dict(d["map_data"]) if "map_data" in d else MapData()
+        s.ensure_required_components()
         return s
 
     @classmethod
@@ -1432,7 +1879,9 @@ class Scene:
             s.role = "end"
         elif template == "3D_SCENE":
             s.scene_type = "3d"
+            s.movement_mode = "grid"
             s.map_data   = MapData()
+        s.ensure_required_components()
         return s
 
 
@@ -1476,6 +1925,10 @@ class InputAction:
     button: str = "cross"
     event: str = "pressed"
     hold_duration: float = 2.0  # seconds; only used when event == "hold_for"
+    source_type: str = "button"
+    stick: str = "left"
+    direction: str = "up"
+    deadzone: int = 32
 
     def to_dict(self):
         return {
@@ -1484,6 +1937,10 @@ class InputAction:
             "button": self.button,
             "event": self.event,
             "hold_duration": self.hold_duration,
+            "source_type": self.source_type,
+            "stick": self.stick,
+            "direction": self.direction,
+            "deadzone": self.deadzone,
         }
 
     @classmethod
@@ -1494,6 +1951,10 @@ class InputAction:
         obj.button = d.get("button", obj.button)
         obj.event = d.get("event", obj.event)
         obj.hold_duration = float(d.get("hold_duration", 2.0))
+        obj.source_type = d.get("source_type", "button")
+        obj.stick = d.get("stick", "left")
+        obj.direction = d.get("direction", "up")
+        obj.deadzone = int(d.get("deadzone", 32))
         return obj
 
 
@@ -1521,9 +1982,10 @@ class GameData:
     signals: list[GameSignal] = field(default_factory=list)
     inventory_enabled: bool = False
     inventory_max: int = 20
-    save_enabled: bool = True
     volume_default: int = 100
     fps_cap_enabled: bool = True
+    dpad_mirror_stick: str = "none"
+    dpad_mirror_deadzone: int = 32
 
     def to_dict(self):
         return {
@@ -1533,9 +1995,10 @@ class GameData:
             "signals": [s.to_dict() for s in self.signals],
             "inventory_enabled": self.inventory_enabled,
             "inventory_max": self.inventory_max,
-            "save_enabled": self.save_enabled,
             "volume_default": self.volume_default,
             "fps_cap_enabled": self.fps_cap_enabled,
+            "dpad_mirror_stick": self.dpad_mirror_stick,
+            "dpad_mirror_deadzone": self.dpad_mirror_deadzone,
         }
 
     @classmethod
@@ -1547,9 +2010,10 @@ class GameData:
         gd.signals = [GameSignal.from_dict(s) for s in d.get("signals", [])]
         gd.inventory_enabled = d.get("inventory_enabled", False)
         gd.inventory_max = d.get("inventory_max", 20)
-        gd.save_enabled = d.get("save_enabled", True)
         gd.volume_default = d.get("volume_default", 100)
         gd.fps_cap_enabled = d.get("fps_cap_enabled", True)
+        gd.dpad_mirror_stick = d.get("dpad_mirror_stick", "none")
+        gd.dpad_mirror_deadzone = int(d.get("dpad_mirror_deadzone", 32))
         return gd
 
 
@@ -1576,6 +2040,7 @@ class Project:
     animation_exports: list[AnimationExport] = field(default_factory=list)
     transition_exports: list[TransitionExport] = field(default_factory=list)
     paper_dolls: list[PaperDollAsset] = field(default_factory=list)
+    plugin_registry: Any = field(default=None, repr=False, compare=False)
 
     # ── Lookup helpers ──────────────────────────────────────
 
@@ -1632,6 +2097,8 @@ class Project:
 
     @classmethod
     def load(cls, path: str | Path) -> "Project":
+        from plugin_registry import scan_plugins
+
         path = Path(path)
         with open(path, "r", encoding="utf-8") as f:
             d = json.load(f)
@@ -1641,6 +2108,7 @@ class Project:
         p.author = d.get("author", "")
         p.version = d.get("version", "1.0")
         p.project_folder = str(path.parent)
+        p.plugin_registry = scan_plugins(path.parent)
         p.images = [RegisteredImage.from_dict(i) for i in d.get("images", [])]
         p.audio = [RegisteredAudio.from_dict(a) for a in d.get("audio", [])]
         p.fonts = [RegisteredFont.from_dict(f) for f in d.get("fonts", [])]
@@ -1657,7 +2125,11 @@ class Project:
 
     @classmethod
     def new(cls) -> "Project":
+        from plugin_registry import scan_plugins
+
         p = cls()
+        p.project_folder = str(Path.cwd())
+        p.plugin_registry = scan_plugins(p.project_folder)
         p.scenes = [
             Scene.from_template("BLANK", name="Scene 1"),
         ]

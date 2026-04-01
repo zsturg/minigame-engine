@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QFrame, QScrollArea,
     QDialog, QDialogButtonBox, QCheckBox, QComboBox,
     QSpinBox, QDoubleSpinBox, QSlider, QTabWidget,
-    QLineEdit, QStackedWidget, QSizePolicy, QSplitter,
+    QLineEdit, QStackedWidget, QSizePolicy, QSplitter, QColorDialog,
 )
 from PySide6.QtCore import Qt, Signal, QPoint, QRect
 from PySide6.QtGui import (
@@ -21,9 +21,21 @@ from PySide6.QtGui import (
     QMouseEvent, QPaintEvent, QTransform,
 )
 
-from models import Project, Scene, PlacedObject, Behavior, BehaviorAction, SceneComponent, ObjectDefinition
+from models import (
+    Project,
+    Scene,
+    PlacedObject,
+    Behavior,
+    BehaviorAction,
+    SceneComponent,
+    ObjectDefinition,
+    seed_instance_behaviors_from_definition,
+    effective_placed_behaviors,
+)
+from plugin_registry import build_auto_panel
 from project_explorer import ProjectExplorer
 from tile_palette import TilePalette
+from theme_utils import replace_widget_theme_colors
 
 # ─────────────────────────────────────────────────────────────
 #  COLOURS
@@ -43,8 +55,144 @@ WARNING    = "#facc15"
 DANGER     = "#f87171"
 
 ROLE_COLORS = {"start": SUCCESS, "end": DANGER, "": TEXT_DIM}
+
+# Mutable theme snapshot — updated by EditorTab.restyle() so helpers always
+# read the current accent/border/etc. without needing to re-construct widgets.
+_current_theme: dict = {
+    "DARK": DARK, "PANEL": PANEL, "SURFACE": SURFACE, "SURFACE2": SURFACE2,
+    "BORDER": BORDER, "ACCENT": ACCENT,
+    "TEXT": TEXT, "TEXT_DIM": TEXT_DIM, "TEXT_MUTED": TEXT_MUTED,
+    "SUCCESS": SUCCESS, "WARNING": WARNING, "DANGER": DANGER,
+}
+# Every accent QPushButton created by _small_btn is registered here so
+# restyle() can update them all — they are built once at construction time.
+_accent_buttons: list = []
 VITA_W = 960
 VITA_H = 544
+
+_BUILTIN_EDITOR_TOOLS: dict[str, list[dict]] = {
+    "CollisionLayer": [
+        {
+            "kind": "grid_map",
+            "data_key": "tiles",
+            "width_key": "map_width",
+            "height_key": "map_height",
+            "cell_size_key": "tile_size",
+            "mode": "binary",
+            "default_cell": 0,
+            "active_value": 1,
+            "overlay_color": "#ff5050",
+            "paint_label": "Paint",
+            "erase_label": "Erase",
+        }
+    ],
+    "LightmapLayer": [
+        {
+            "kind": "grid_map",
+            "data_key": "cells",
+            "width_key": "map_width",
+            "height_key": "map_height",
+            "cell_size_key": "tile_size",
+            "mode": "scalar",
+            "default_cell": 0,
+            "paint_value_key": "paint_value",
+            "brush_mode_key": "brush_mode",
+            "brush_radius_key": "brush_radius",
+            "brush_strength_key": "brush_strength",
+            "overlay_color_key": "blend_color",
+            "opacity_key": "opacity",
+            "paint_label": "Paint",
+            "erase_label": "Erase",
+        }
+    ],
+    "Path": [
+        {
+            "kind": "path",
+            "points_key": "points",
+            "closed_key": "closed",
+            "name_key": "path_name",
+            "draw_label": "Draw Path",
+            "supports_bezier": True,
+        }
+    ],
+}
+
+
+def _project_registry(project: Project | None):
+    return getattr(project, "plugin_registry", None) if project is not None else None
+
+
+def _component_descriptor(project: Project | None, component_type: str) -> dict | None:
+    registry = _project_registry(project)
+    return registry.get_component_descriptor(component_type) if registry else None
+
+
+def _component_editor_tools(project: Project | None, component_or_type) -> list[dict]:
+    component_type = (
+        component_or_type.component_type
+        if hasattr(component_or_type, "component_type")
+        else str(component_or_type)
+    )
+    descriptor = _component_descriptor(project, component_type)
+    if descriptor:
+        return copy.deepcopy(descriptor.get("editor_tools", []) or [])
+    return copy.deepcopy(_BUILTIN_EDITOR_TOOLS.get(component_type, []))
+
+
+def _component_editor_tool(project: Project | None, component, kind: str) -> dict | None:
+    for tool in _component_editor_tools(project, component):
+        if str(tool.get("kind", "")) == kind:
+            return tool
+    return None
+
+
+class _PlacedObjectBehaviorTarget:
+    def __init__(self, instance: PlacedObject, object_def: ObjectDefinition | None):
+        self._instance = instance
+        self._object_def = object_def
+
+    @property
+    def name(self) -> str:
+        base_name = self._object_def.name if self._object_def else "Object"
+        instance_id = getattr(self._instance, "instance_id", "")
+        return f"{base_name} [{instance_id}]" if instance_id else base_name
+
+    @property
+    def instance_id(self) -> str:
+        return getattr(self._instance, "instance_id", "")
+
+    @property
+    def behaviors(self) -> list[Behavior]:
+        return self._instance.instance_behaviors
+
+    @behaviors.setter
+    def behaviors(self, value: list[Behavior]) -> None:
+        self._instance.instance_behaviors = list(value)
+
+    @property
+    def node_groups(self):
+        return getattr(self._instance, "instance_node_groups", None)
+
+    @node_groups.setter
+    def node_groups(self, value) -> None:
+        setattr(self._instance, "instance_node_groups", copy.deepcopy(value) if isinstance(value, dict) else value)
+
+
+def _theme_snapshot() -> dict:
+    return {
+        "DARK": DARK,
+        "PANEL": PANEL,
+        "SURFACE": SURFACE,
+        "SURFACE2": SURFACE2,
+        "BORDER": BORDER,
+        "ACCENT": ACCENT,
+        "TEXT": TEXT,
+        "TEXT_DIM": TEXT_DIM,
+        "TEXT_MUTED": TEXT_MUTED,
+        "SUCCESS": SUCCESS,
+        "WARNING": WARNING,
+        "DANGER": DANGER,
+    }
 
 # ─────────────────────────────────────────────────────────────
 #  ACTION PALETTE DATA
@@ -67,6 +215,9 @@ OBJECT_TRIGGERS = [
     ("on_overlap",         "On Zone Overlap",         "Zone",     "Fires every frame while a target overlaps this zone."),
     ("on_interact_zone",   "On Interact in Zone",     "Zone",     "Player presses interact while inside this zone."),
     ("on_signal",          "On Signal",               "Signal",   "Fires when a named signal is emitted anywhere in the scene."),
+    ("on_layer_anim_blink", "On Puppet Blink",        "Puppet Animation", "Fires when this LayerAnimation object produces a blink hook event."),
+    ("on_layer_anim_talk_step", "On Puppet Talk Step", "Puppet Animation", "Fires when this LayerAnimation object advances to the next talk-step hook event."),
+    ("on_layer_anim_idle_cycle", "On Puppet Idle Cycle", "Puppet Animation", "Fires when this LayerAnimation object completes an idle-breathing cycle hook event."),
 ]
 
 SCENE_TRIGGERS = [
@@ -148,6 +299,7 @@ ACTION_PALETTE = {
     "Variables & Flags": [
         ("set_variable",    "Set Variable",          "Set a game variable to a specific value."),
         ("change_variable", "Change Variable",       "Add, subtract, multiply, or divide a variable by a value."),
+        ("increment_var",   "Increment Variable",    "Add a value to a variable using the common counter pattern."),
         ("set_flag",        "Set Flag",              "Set a boolean flag to true or false."),
         ("toggle_flag",     "Toggle Flag",           "Flip a boolean flag from its current state."),
         ("if_variable",     "If Variable",           "Branch: run different actions based on a variable's value."),
@@ -169,12 +321,22 @@ ACTION_PALETTE = {
     "Signals": [
         ("emit_signal",    "Emit Signal",           "Broadcast a named signal to any on_signal behaviors in this scene."),
     ],
+    "Input": [
+        ("if_button_pressed",  "If Button Pressed",  "Branch: run actions when a specific button is pressed this frame."),
+        ("if_button_held",     "If Button Held",     "Branch: run actions while a specific button is held."),
+        ("if_button_released", "If Button Released", "Branch: run actions when a specific button is released this frame."),
+    ],
     "Movement": [
         ("four_way_movement",         "4-Way Movement",           "Move this object with the d-pad. No input setup required — just set speed and drop it on any object."),
         ("four_way_movement_collide", "4-Way Movement (Collide)", "Move with d-pad, blocked by a CollisionLayer. Set speed, player size, and pick the collision layer."),
         ("two_way_movement",          "2-Way Movement",           "Move left/right OR up/down with the d-pad. Choose axis and speed."),
         ("two_way_movement_collide",  "2-Way Movement (Collide)", "2-way d-pad movement blocked by a CollisionLayer. Choose axis, speed, player size, and collision layer."),
         ("fire_bullet",               "Fire Bullet",              "Move this object as a projectile each frame. Set direction and speed. Pair with Create Object to spawn it."),
+    ],
+    "Collision": [
+        ("collision_set_cell",    "Set Collision Cell",    "Set a CollisionLayer cell to empty or solid at runtime."),
+        ("collision_toggle_cell", "Toggle Collision Cell", "Flip a CollisionLayer cell between empty and solid at runtime."),
+        ("collision_get_cell",    "Get Collision Cell",    "Read a CollisionLayer cell into a variable at runtime."),
     ],
     "Objects": [
         ("show_object",     "Show Object",           "Make a placed object visible."),
@@ -183,6 +345,7 @@ ACTION_PALETTE = {
         ("fade_in_object",  "Fade Object In",        "Gradually fade an object to fully visible over N seconds."),
         ("fade_out_object", "Fade Object Out",       "Gradually fade an object to invisible over N seconds."),
         ("move_to",         "Move To Position",      "Instantly place an object at a specific X, Y coordinate."),
+        ("move_to_variable","Move To Variables",     "Move an object to X and Y values read from variables."),
         ("move_by",         "Move By Offset",        "Instantly shift an object by X, Y pixels from its current position."),
         ("slide_to",        "Slide To Position",     "Smoothly move an object to X, Y over N seconds."),
         ("slide_by",        "Slide By Offset",       "Smoothly move an object by X, Y pixels over N seconds."),
@@ -260,6 +423,8 @@ ACTION_FIELDS = {
     "change_variable":   [("var_name",           "Variable",        "text",     {}),
                           ("var_operator",       "Operation",       "combo",    {"options":["add","subtract","multiply","divide"]}),
                           ("var_value",          "Amount",          "text",     {})],
+    "increment_var":     [("var_name",           "Variable",        "text",     {}),
+                          ("var_value",          "Amount",          "text",     {})],
     "set_flag":          [("bool_name",          "Flag",            "text",     {}),
                           ("bool_value",         "Value",           "check",    {})],
     "toggle_flag":       [("bool_name",          "Flag",            "text",     {})],
@@ -282,6 +447,9 @@ ACTION_FIELDS = {
     "move_to":           [("object_def_id",      "Object",          "object",   {}),
                           ("target_x",           "X",               "spin",     {"min":-999,"max":9999}),
                           ("target_y",           "Y",               "spin",     {"min":-999,"max":9999})],
+    "move_to_variable":  [("object_def_id",      "Object",          "object",   {}),
+                          ("var_name",           "X Variable",      "text",     {}),
+                          ("var_source",         "Y Variable",      "text",     {})],
     "move_by":           [("object_def_id",      "Object",          "object",   {}),
                           ("offset_x",           "Offset X",        "spin",     {"min":-9999,"max":9999}),
                           ("offset_y",           "Offset Y",        "spin",     {"min":-9999,"max":9999})],
@@ -370,6 +538,29 @@ ACTION_FIELDS = {
         ("bullet_direction", "Direction",        "combo", {"options":["right","left","up","down"]}),
         ("bullet_speed",     "Speed (px/frame)", "spin",  {"min":1,"max":40}),
     ],
+    "collision_set_cell": [
+        ("collision_layer_id", "Collision Layer",  "collision_layer", {}),
+        ("grid_col",           "Column",           "spin",            {"min":0,"max":999}),
+        ("grid_row",           "Row",              "spin",            {"min":0,"max":999}),
+        ("grid_col_var",       "Col Variable",     "text",            {}),
+        ("grid_row_var",       "Row Variable",     "text",            {}),
+        ("collision_value",    "Value (0-1)",      "spin",            {"min":0,"max":1}),
+    ],
+    "collision_toggle_cell": [
+        ("collision_layer_id", "Collision Layer",  "collision_layer", {}),
+        ("grid_col",           "Column",           "spin",            {"min":0,"max":999}),
+        ("grid_row",           "Row",              "spin",            {"min":0,"max":999}),
+        ("grid_col_var",       "Col Variable",     "text",            {}),
+        ("grid_row_var",       "Row Variable",     "text",            {}),
+    ],
+    "collision_get_cell": [
+        ("collision_layer_id", "Collision Layer",  "collision_layer", {}),
+        ("grid_col",           "Column",           "spin",            {"min":0,"max":999}),
+        ("grid_row",           "Row",              "spin",            {"min":0,"max":999}),
+        ("grid_col_var",       "Col Variable",     "text",            {}),
+        ("grid_row_var",       "Row Variable",     "text",            {}),
+        ("grid_result_var",    "Store in Variable","text",            {}),
+    ],
     "camera_move_to":    [("camera_target_x","Target X","spin",{"min":-9999,"max":9999}),("camera_target_y","Target Y","spin",{"min":-9999,"max":9999}),("camera_duration","Duration (sec)","dspin",{"min":0.0,"max":30.0,"step":0.1}),("camera_easing","Easing","combo",{"options":["linear","ease_in","ease_out","ease_in_out"]})],
     "camera_offset":     [("camera_offset_x","Offset X","spin",{"min":-9999,"max":9999}),("camera_offset_y","Offset Y","spin",{"min":-9999,"max":9999}),("camera_duration","Duration (sec)","dspin",{"min":0.0,"max":30.0,"step":0.1}),("camera_easing","Easing","combo",{"options":["linear","ease_in","ease_out","ease_in_out"]})],
     "camera_follow":     [("camera_follow_target_def_id","Object to Follow","object",{}),("camera_follow_offset_x","Offset X","spin",{"min":-999,"max":999}),("camera_follow_offset_y","Offset Y","spin",{"min":-999,"max":999})],
@@ -384,6 +575,9 @@ ACTION_FIELDS = {
     "ani_set_frame":     [("object_def_id","Target Object","object",{}),("ani_target_frame","Frame","spin",{"min":0,"max":9999})],
     "ani_set_speed":     [("object_def_id","Target Object","object",{}),("ani_fps","FPS","spin",{"min":1,"max":120})],
     "emit_signal":       [("signal_name",        "Signal",          "signal",   {})],
+    "if_button_pressed": [("button",             "Button",          "combo",    {"options":["cross","circle","square","triangle","dpad_up","dpad_down","dpad_left","dpad_right","l","r","start","select","left_stick_up","left_stick_down","left_stick_left","left_stick_right","right_stick_up","right_stick_down","right_stick_left","right_stick_right"]})],
+    "if_button_held":    [("button",             "Button",          "combo",    {"options":["cross","circle","square","triangle","dpad_up","dpad_down","dpad_left","dpad_right","l","r","start","select","left_stick_up","left_stick_down","left_stick_left","left_stick_right","right_stick_up","right_stick_down","right_stick_left","right_stick_right"]})],
+    "if_button_released":[("button",             "Button",          "combo",    {"options":["cross","circle","square","triangle","dpad_up","dpad_down","dpad_left","dpad_right","l","r","start","select","left_stick_up","left_stick_down","left_stick_left","left_stick_right","right_stick_up","right_stick_down","right_stick_left","right_stick_right"]})],
     "add_to_group": [
         ("object_def_id", "Object",     "object", {}),
         ("group_name",    "Group Name", "text",   {}),
@@ -440,6 +634,7 @@ def _action_summary(action: BehaviorAction) -> str:
         "set_dialogue_line": f"#{action.dialogue_line_index}: {action.dialogue_text[:18]}",
         "set_variable":      f"{action.var_name} = {action.var_value}",
         "change_variable":   f"{action.var_name} {action.var_operator} {action.var_value}",
+        "increment_var":     f"{action.var_name} += {action.var_value or 1}",
         "set_flag":          f"{action.bool_name} = {action.bool_value}",
         "toggle_flag":       action.bool_name,
         "if_variable":       f"{action.var_name} {action.var_compare} {action.var_value}",
@@ -453,6 +648,7 @@ def _action_summary(action: BehaviorAction) -> str:
         "layer_hide":        action.layer_name or "?",
         "layer_set_image":   f"{action.layer_name or '?'} → img",
         "move_to":           f"({action.target_x},{action.target_y})",
+        "move_to_variable":  f"({action.var_name or 'x'},{action.var_source or 'y'})",
         "slide_to":          f"({action.target_x},{action.target_y}) {action.duration}s",
         "move_by":           f"({action.offset_x},{action.offset_y})",
         "slide_by":          f"({action.offset_x},{action.offset_y}) {action.duration}s",
@@ -475,6 +671,9 @@ def _action_summary(action: BehaviorAction) -> str:
         "two_way_movement":          f"{getattr(action,'two_way_axis','horizontal')}  speed {getattr(action,'movement_speed',4)}px",
         "two_way_movement_collide":  f"{getattr(action,'two_way_axis','horizontal')}  speed {getattr(action,'movement_speed',4)}px  collide",
         "fire_bullet":               f"→ {getattr(action,'bullet_direction','right')}  {getattr(action,'bullet_speed',6)}px/f",
+        "collision_set_cell":        f"cell ({getattr(action,'grid_col',0)},{getattr(action,'grid_row',0)}) = {getattr(action,'collision_value',1)}",
+        "collision_toggle_cell":     f"toggle ({getattr(action,'grid_col',0)},{getattr(action,'grid_row',0)})",
+        "collision_get_cell":        f"({getattr(action,'grid_col',0)},{getattr(action,'grid_row',0)}) → {getattr(action,'grid_result_var','value') or 'value'}",
         "camera_move_to":    f"({getattr(action, 'camera_target_x', 0)},{getattr(action, 'camera_target_y', 0)})",
         "camera_offset":     f"({getattr(action, 'camera_offset_x', 0)},{getattr(action, 'camera_offset_y', 0)})",
         "camera_follow":     getattr(action, 'camera_follow_target_def_id', '') or "?",
@@ -489,6 +688,9 @@ def _action_summary(action: BehaviorAction) -> str:
         "ani_set_frame":     f"{getattr(action, 'object_def_id', '') or 'self'} → {getattr(action, 'ani_target_frame', 0)}",
         "ani_set_speed":     f"{getattr(action, 'object_def_id', '') or 'self'} → {getattr(action, 'ani_fps', 12)} fps",
         "emit_signal":       f"📡 {getattr(action, 'signal_name', '?')}",
+        "if_button_pressed": f"{getattr(action, 'button', '?')}",
+        "if_button_held":    f"{getattr(action, 'button', '?')}",
+        "if_button_released":f"{getattr(action, 'button', '?')}",
         "add_to_group":         f"{action.object_def_id or '?'} → group '{action.group_name}'",
         "remove_from_group":    f"{action.object_def_id or '?'} ← group '{action.group_name}'",
         "call_action_on_group": f"group '{action.group_name}' → {action.group_action_type}",
@@ -574,9 +776,10 @@ def _small_btn(label: str, tooltip: str = "", accent: bool = False, danger: bool
     
     # We use background-color specifically to ensure it overrides the generic stylesheet
     if accent:
+        _ac = _current_theme["ACCENT"]
         b.setStyleSheet(f"""
             QPushButton {{ 
-                background-color: {ACCENT}; 
+                background-color: {_ac}; 
                 color: white; 
                 border: none;
                 border-radius: 4px; 
@@ -584,8 +787,9 @@ def _small_btn(label: str, tooltip: str = "", accent: bool = False, danger: bool
                 font-weight: 700; 
                 padding: 0;
             }}
-            QPushButton:hover {{ background-color: #6a59ef; }}
+            QPushButton:hover {{ background-color: {_ac}cc; }}
         """)
+        _accent_buttons.append(b)
     elif danger:
         b.setStyleSheet(f"""
             QPushButton {{ 
@@ -911,7 +1115,15 @@ class ActionPickerDialog(QDialog):
 #  BRANCH EDITOR  (mini action list for true/false branches)
 # ─────────────────────────────────────────────────────────────
 
-BRANCH_TYPES = {"if_variable", "if_flag", "if_has_item", "if_save_exists"}
+BRANCH_TYPES = {
+    "if_variable",
+    "if_flag",
+    "if_has_item",
+    "if_save_exists",
+    "if_button_pressed",
+    "if_button_held",
+    "if_button_released",
+}
 SIGNAL_TRIGGER = "on_signal"
 SIGNAL_ACTION  = "emit_signal"
 
@@ -1259,14 +1471,16 @@ class ActionDetailPanel(QWidget):
 
 class SceneComponentsPanel(QWidget):
     changed = Signal()
-    tile_layer_selected = Signal(str)  # emits tileset_id (or "" if none)
-    path_draw_requested = Signal(str)  # emits component id of the Path to draw
+    tile_layer_selected = Signal(str)  # emits "__tilelayer__:{comp_id}:{tileset_id}" and generic editor-tool tokens
+    path_draw_requested = Signal(str)  # emits component id of the path-backed component to draw
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scene:   Scene   | None = None
         self._project: Project | None = None
         self._suppress = False
+        self._active_path_component_id: str | None = None
+        self._grid_tool_shapes: dict[tuple[str, str], tuple[int, int]] = {}
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(0, 0, 0, 0)
         self._root.setSpacing(3)
@@ -1282,6 +1496,179 @@ class SceneComponentsPanel(QWidget):
     def clear(self):
         self._scene = None
         self._rebuild()
+
+    def set_active_path_component_id(self, component_id: str | None):
+        if self._active_path_component_id == component_id:
+            return
+        self._active_path_component_id = component_id
+        if self._scene is not None:
+            self._rebuild()
+
+    def _sync_tool_shape_cache(self):
+        self._grid_tool_shapes = {}
+        if self._scene is None:
+            return
+        for comp in self._scene.components:
+            tool = _component_editor_tool(self._project, comp, "grid_map")
+            if not tool:
+                continue
+            width_key = str(tool.get("width_key", "map_width"))
+            height_key = str(tool.get("height_key", "map_height"))
+            data_key = str(tool.get("data_key", "tiles"))
+            width = max(1, int(comp.config.get(width_key, 1) or 1))
+            height = max(1, int(comp.config.get(height_key, 1) or 1))
+            self._grid_tool_shapes[(comp.id, data_key)] = (width, height)
+
+    def _resize_grid_tool_data(self, comp: SceneComponent, tool: dict, old_width: int, old_height: int):
+        data_key = str(tool.get("data_key", "tiles"))
+        width_key = str(tool.get("width_key", "map_width"))
+        height_key = str(tool.get("height_key", "map_height"))
+        new_width = max(1, int(comp.config.get(width_key, old_width) or old_width or 1))
+        new_height = max(1, int(comp.config.get(height_key, old_height) or old_height or 1))
+        old_width = max(1, int(old_width or 1))
+        old_height = max(1, int(old_height or 1))
+        old_values = list(comp.config.get(data_key, []) or [])
+        default_cell = tool.get("default_cell", 0)
+        new_values = []
+        for row in range(new_height):
+            for col in range(new_width):
+                if row < old_height and col < old_width:
+                    old_idx = row * old_width + col
+                    if old_idx < len(old_values):
+                        new_values.append(old_values[old_idx])
+                        continue
+                new_values.append(default_cell)
+        comp.config[data_key] = new_values
+        self._grid_tool_shapes[(comp.id, data_key)] = (new_width, new_height)
+
+    def _grid_tool_info_text(self, comp: SceneComponent, tool: dict) -> str:
+        data_key = str(tool.get("data_key", "tiles"))
+        width_key = str(tool.get("width_key", "map_width"))
+        height_key = str(tool.get("height_key", "map_height"))
+        cell_size_key = str(tool.get("cell_size_key", "tile_size"))
+        width = max(1, int(comp.config.get(width_key, 1) or 1))
+        height = max(1, int(comp.config.get(height_key, 1) or 1))
+        cell_size = max(1, int(comp.config.get(cell_size_key, 1) or 1))
+        values = list(comp.config.get(data_key, []) or [])
+        if str(tool.get("mode", "binary")) == "binary":
+            active_value = tool.get("active_value", 1)
+            painted = sum(1 for value in values if value == active_value)
+            return f"{width}x{height} cells  •  cell {cell_size}px  •  {painted} solid"
+        painted = sum(1 for value in values if int(value or 0) > 0)
+        avg_value = int(sum(int(value or 0) for value in values) / painted) if painted else 0
+        return f"{width}x{height} cells  •  cell {cell_size}px  •  {painted} painted  •  avg {avg_value}"
+
+    def _on_plugin_field_changed(self, comp: SceneComponent, descriptor: dict, field_key: str):
+        for tool in descriptor.get("editor_tools", []) or []:
+            if str(tool.get("kind", "")) != "grid_map":
+                continue
+            width_key = str(tool.get("width_key", "map_width"))
+            height_key = str(tool.get("height_key", "map_height"))
+            data_key = str(tool.get("data_key", "tiles"))
+            if field_key not in {width_key, height_key}:
+                continue
+            old_width, old_height = self._grid_tool_shapes.get(
+                (comp.id, data_key),
+                (
+                    max(1, int(comp.config.get(width_key, 1) or 1)),
+                    max(1, int(comp.config.get(height_key, 1) or 1)),
+                ),
+            )
+            self._resize_grid_tool_data(comp, tool, old_width, old_height)
+
+    def _emit_grid_tool_request(self, comp: SceneComponent, mode: str):
+        self.tile_layer_selected.emit(f"__gridtool__:{comp.id}:{mode}")
+
+    def _add_grid_tool_buttons(self, comp: SceneComponent, tool: dict, *, accent_color: str | None = None):
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        btn_row.setContentsMargins(0, 4, 0, 6)
+
+        paint_label = str(tool.get("paint_label", "Paint"))
+        erase_label = str(tool.get("erase_label", "Erase"))
+        color = accent_color or str(tool.get("overlay_color", "") or "#c0392b")
+        hover = color + "cc" if color.startswith("#") and len(color) == 7 else color
+
+        paint_btn = QPushButton(paint_label)
+        paint_btn.setStyleSheet(f"""
+            QPushButton {{ background: {color}; color: white; border: none;
+                border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: 600; }}
+            QPushButton:hover {{ background: {hover}; }}
+        """)
+        paint_btn.clicked.connect(lambda _, c=comp: self._emit_grid_tool_request(c, "paint"))
+
+        erase_btn = QPushButton(erase_label)
+        erase_btn.setStyleSheet(f"""
+            QPushButton {{ background: {SURFACE2}; color: {TEXT}; border: 1px solid {BORDER};
+                border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: 600; }}
+            QPushButton:hover {{ background: {BORDER}; }}
+        """)
+        erase_btn.clicked.connect(lambda _, c=comp: self._emit_grid_tool_request(c, "erase"))
+
+        btn_row.addWidget(paint_btn)
+        btn_row.addWidget(erase_btn)
+        self._root.addLayout(btn_row)
+
+    def _add_path_tool_controls(self, comp: SceneComponent, tool: dict):
+        name_key = str(tool.get("name_key", "path_name"))
+        closed_key = str(tool.get("closed_key", "closed"))
+        points_key = str(tool.get("points_key", "points"))
+
+        lbl = QLabel("Path Name:")
+        lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+        self._root.addWidget(lbl)
+        name_edit = QLineEdit(comp.config.get(name_key, "New Path"))
+        name_edit.setStyleSheet(_field_style())
+        name_edit.setPlaceholderText("Path name…")
+        name_edit.textChanged.connect(lambda v, c=comp, k=name_key: self._cfg(c, k, v))
+        self._root.addWidget(name_edit)
+
+        closed_chk = QCheckBox("Closed Loop")
+        closed_chk.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
+        closed_chk.setChecked(bool(comp.config.get(closed_key, False)))
+        closed_chk.toggled.connect(lambda v, c=comp, k=closed_key: self._cfg(c, k, v))
+        self._root.addWidget(closed_chk)
+
+        pts = comp.config.get(points_key, []) or []
+        pt_lbl = QLabel(f"{len(pts)} point{'s' if len(pts) != 1 else ''}")
+        pt_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; background: transparent;")
+        self._root.addWidget(pt_lbl)
+
+        draw_btn = QPushButton(f"✏  {tool.get('draw_label', 'Draw Path')}")
+        draw_btn.setStyleSheet(f"""
+            QPushButton {{ background: #06b6d4; color: white; border: none;
+                border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 600; }}
+            QPushButton:hover {{ background: #0891b2; }}
+        """)
+        draw_btn.clicked.connect(lambda _, c=comp: self.path_draw_requested.emit(c.id))
+        self._root.addWidget(draw_btn)
+
+        if self._active_path_component_id == comp.id:
+            hint = QLabel("Shift-drag a point to create curve handles.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; background: transparent;")
+            self._root.addWidget(hint)
+
+    def _render_plugin_component(self, comp: SceneComponent, descriptor: dict):
+        panel = build_auto_panel(
+            descriptor.get("fields", []),
+            comp,
+            self._project,
+            changed_callback=lambda: self.changed.emit(),
+            field_changed_callback=lambda field_key, c=comp, d=descriptor: self._on_plugin_field_changed(c, d, field_key),
+        )
+        panel.setStyleSheet("background: transparent;")
+        self._root.addWidget(panel)
+
+        for tool in descriptor.get("editor_tools", []) or []:
+            kind = str(tool.get("kind", ""))
+            if kind == "grid_map":
+                info_lbl = QLabel(self._grid_tool_info_text(comp, tool))
+                info_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; background: transparent;")
+                self._root.addWidget(info_lbl)
+                self._add_grid_tool_buttons(comp, tool)
+            elif kind == "path":
+                self._add_path_tool_controls(comp, tool)
 
     def _rebuild(self):
         # Clear existing
@@ -1299,12 +1686,14 @@ class SceneComponentsPanel(QWidget):
 
         fs = _field_style()
         self._suppress = True
+        self._sync_tool_shape_cache()
 
         # Save the real main layout
         real_root = self._root
 
         for comp in self._scene.components:
             ct = comp.component_type
+            descriptor = _component_descriptor(self._project, ct)
             
             # Create a box for this component
             if ct == "Layer":
@@ -1312,7 +1701,7 @@ class SceneComponentsPanel(QWidget):
                 lnum  = comp.config.get("layer", 0)
                 header = f"LAYER [{lnum}]  {lname}".strip() if lname else f"LAYER [{lnum}]"
             else:
-                header = ct.upper()
+                header = str((descriptor or {}).get("label", ct)).upper()
             box = CollapsibleBox(header)
             real_root.addWidget(box)
             
@@ -1426,10 +1815,11 @@ class SceneComponentsPanel(QWidget):
 
                 add_sel_btn = QPushButton("+ Add")
                 add_sel_btn.setFixedHeight(28)
+                _ac = _current_theme["ACCENT"]
                 add_sel_btn.setStyleSheet(f"""
-                    QPushButton {{ background: {ACCENT}; color: white; border: none;
+                    QPushButton {{ background: {_ac}; color: white; border: none;
                         border-radius: 4px; padding: 0 10px; font-size: 12px; font-weight: 600; }}
-                    QPushButton:hover {{ background: #6a59ef; }}
+                    QPushButton:hover {{ background: {_ac}cc; }}
                 """)
                 add_sel_btn.clicked.connect(lambda _, c=comp, sl=sel_list: self._add_selectable(c, sl))
                 btn_row.addWidget(add_sel_btn)
@@ -1543,6 +1933,7 @@ class SceneComponentsPanel(QWidget):
                 self._root.addWidget(dir_cb)
 
             elif ct == "CollisionLayer":
+                grid_tool = _component_editor_tool(self._project, comp, "grid_map") or {}
                 # Layer name
                 lbl_nm = QLabel("Name:")
                 lbl_nm.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
@@ -1600,46 +1991,160 @@ class SceneComponentsPanel(QWidget):
                     lambda v, c=comp: self._on_collayer_size_changed(c, "map_height", v))
                 self._root.addWidget(mh_spin)
 
-                # Info
-                tiles   = comp.config.get("tiles", [])
-                solid   = sum(1 for t in tiles if t == 1)
-                mw      = comp.config.get("map_width",  30)
-                mh_val  = comp.config.get("map_height", 17)
-                tsz     = comp.config.get("tile_size",  32)
-                info_lbl = QLabel(
-                    f"{mw}×{mh_val} cells  •  cell {tsz}px  •  {solid} solid"
-                )
+                info_lbl = QLabel(self._grid_tool_info_text(comp, grid_tool))
                 info_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; background: transparent;")
                 self._root.addWidget(info_lbl)
+                self._add_grid_tool_buttons(comp, grid_tool, accent_color="#c0392b")
 
-                # Paint / Erase buttons row
-                btn_row = QHBoxLayout()
-                btn_row.setSpacing(6)
-                btn_row.setContentsMargins(0, 4, 0, 6)
+            elif ct == "LightmapLayer":
+                grid_tool = _component_editor_tool(self._project, comp, "grid_map") or {}
+                lbl_nm = QLabel("Name:")
+                lbl_nm.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_nm)
+                name_edit = QLineEdit(comp.config.get("layer_name", ""))
+                name_edit.setStyleSheet(fs)
+                name_edit.setPlaceholderText("e.g. Indoor Darkness, Night Fog...")
+                name_edit.textChanged.connect(lambda v, c=comp: self._cfg(c, "layer_name", v))
+                self._root.addWidget(name_edit)
 
-                paint_btn = QPushButton("✏ Paint")
-                paint_btn.setStyleSheet(f"""
-                    QPushButton {{ background: #c0392b; color: white; border: none;
-                        border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: 600; }}
-                    QPushButton:hover {{ background: #e74c3c; }}
-                """)
-                paint_btn.setToolTip("LMB to paint solid cells — RMB also erases while in paint mode")
-                paint_btn.clicked.connect(
-                    lambda _, c=comp: self.tile_layer_selected.emit("__collision__:" + c.id))
+                lbl_l = QLabel("Layer (overlay order):")
+                lbl_l.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_l)
+                layer_spin = QSpinBox()
+                layer_spin.setStyleSheet(fs)
+                layer_spin.setRange(0, 99)
+                layer_spin.setValue(comp.config.get("layer", 99))
+                layer_spin.setToolTip("Reserved for future multi-lightmap ordering; v1 draws all lightmaps after the world")
+                layer_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "layer", v))
+                self._root.addWidget(layer_spin)
 
-                erase_btn = QPushButton("✕ Erase")
-                erase_btn.setStyleSheet(f"""
-                    QPushButton {{ background: {SURFACE2}; color: {TEXT}; border: 1px solid {BORDER};
-                        border-radius: 4px; padding: 6px 10px; font-size: 11px; font-weight: 600; }}
-                    QPushButton:hover {{ background: {BORDER}; }}
-                """)
-                erase_btn.setToolTip("Enter erase mode — click cells to remove collision")
-                erase_btn.clicked.connect(
-                    lambda _, c=comp: self.tile_layer_selected.emit("__collision_erase__:" + c.id))
+                lbl_ts = QLabel("Cell size (px):")
+                lbl_ts.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_ts)
+                ts_spin = QSpinBox()
+                ts_spin.setStyleSheet(fs)
+                ts_spin.setRange(4, 512)
+                ts_spin.setValue(comp.config.get("tile_size", 32))
+                ts_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "tile_size", v))
+                self._root.addWidget(ts_spin)
 
-                btn_row.addWidget(paint_btn)
-                btn_row.addWidget(erase_btn)
-                self._root.addLayout(btn_row)
+                lbl_mw = QLabel("Map width (cells):")
+                lbl_mw.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_mw)
+                mw_spin = QSpinBox()
+                mw_spin.setStyleSheet(fs)
+                mw_spin.setRange(1, 500)
+                mw_spin.setValue(comp.config.get("map_width", 30))
+                mw_spin.valueChanged.connect(
+                    lambda v, c=comp: self._on_lightmap_size_changed(c, "map_width", v))
+                self._root.addWidget(mw_spin)
+
+                lbl_mh = QLabel("Map height (cells):")
+                lbl_mh.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_mh)
+                mh_spin = QSpinBox()
+                mh_spin.setStyleSheet(fs)
+                mh_spin.setRange(1, 500)
+                mh_spin.setValue(comp.config.get("map_height", 17))
+                mh_spin.valueChanged.connect(
+                    lambda v, c=comp: self._on_lightmap_size_changed(c, "map_height", v))
+                self._root.addWidget(mh_spin)
+
+                visible_check = QCheckBox("Visible")
+                visible_check.setChecked(comp.config.get("visible", True))
+                visible_check.setStyleSheet(f"color: {TEXT};")
+                visible_check.toggled.connect(lambda v, c=comp: self._cfg(c, "visible", bool(v)))
+                self._root.addWidget(visible_check)
+
+                lbl_op = QLabel("Layer opacity:")
+                lbl_op.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_op)
+                op_spin = QSpinBox()
+                op_spin.setStyleSheet(fs)
+                op_spin.setRange(0, 255)
+                op_spin.setValue(comp.config.get("opacity", 255))
+                op_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "opacity", v))
+                self._root.addWidget(op_spin)
+
+                lbl_col = QLabel("Blend color:")
+                lbl_col.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_col)
+                col_val = comp.config.get("blend_color", "#000000")
+                col_btn = QPushButton(col_val)
+                col_btn.setStyleSheet(
+                    f"background: {col_val}; color: white; border: 1px solid {BORDER}; "
+                    f"border-radius: 4px; padding: 6px;"
+                )
+                def _pick_lightmap_color(*_, c=comp, btn=col_btn):
+                    picked = QColorDialog.getColor(QColor(c.config.get("blend_color", "#000000")), self)
+                    if not picked.isValid():
+                        return
+                    value = picked.name()
+                    btn.setText(value)
+                    btn.setStyleSheet(
+                        f"background: {value}; color: white; border: 1px solid {BORDER}; "
+                        f"border-radius: 4px; padding: 6px;"
+                    )
+                    self._cfg(c, "blend_color", value)
+                col_btn.clicked.connect(_pick_lightmap_color)
+                self._root.addWidget(col_btn)
+
+                info_lbl = QLabel(self._grid_tool_info_text(comp, grid_tool))
+                info_lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 10px; background: transparent;")
+                self._root.addWidget(info_lbl)
+                self._add_grid_tool_buttons(comp, grid_tool, accent_color="#d97706")
+
+                lbl_brush = QLabel("Brush darkness:")
+                lbl_brush.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_brush)
+                brush_spin = QSpinBox()
+                brush_spin.setStyleSheet(fs)
+                brush_spin.setRange(0, 255)
+                brush_spin.setValue(comp.config.get("paint_value", 192))
+                brush_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "paint_value", v))
+                self._root.addWidget(brush_spin)
+
+                preset_row = QHBoxLayout()
+                preset_row.setSpacing(4)
+                for preset in (0, 64, 128, 192, 255):
+                    btn = QPushButton(str(preset))
+                    btn.setStyleSheet(
+                        f"background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER}; "
+                        f"border-radius: 4px; padding: 4px 6px;"
+                    )
+                    btn.clicked.connect(lambda _, v=preset, c=comp, s=brush_spin: (s.setValue(v), self._cfg(c, "paint_value", v)))
+                    preset_row.addWidget(btn)
+                self._root.addLayout(preset_row)
+
+                lbl_mode = QLabel("Brush mode:")
+                lbl_mode.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_mode)
+                mode_combo = QComboBox()
+                mode_combo.setStyleSheet(fs)
+                mode_combo.addItems(["set", "add", "subtract"])
+                mode_combo.setCurrentText(comp.config.get("brush_mode", "set"))
+                mode_combo.currentTextChanged.connect(lambda v, c=comp: self._cfg(c, "brush_mode", v))
+                self._root.addWidget(mode_combo)
+
+                lbl_radius = QLabel("Brush radius (cells):")
+                lbl_radius.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_radius)
+                radius_spin = QSpinBox()
+                radius_spin.setStyleSheet(fs)
+                radius_spin.setRange(0, 6)
+                radius_spin.setValue(comp.config.get("brush_radius", 0))
+                radius_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "brush_radius", v))
+                self._root.addWidget(radius_spin)
+
+                lbl_strength = QLabel("Brush strength:")
+                lbl_strength.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
+                self._root.addWidget(lbl_strength)
+                strength_spin = QSpinBox()
+                strength_spin.setStyleSheet(fs)
+                strength_spin.setRange(1, 255)
+                strength_spin.setValue(comp.config.get("brush_strength", 48))
+                strength_spin.valueChanged.connect(lambda v, c=comp: self._cfg(c, "brush_strength", v))
+                self._root.addWidget(strength_spin)
 
             elif ct == "TileLayer":
                 # Tileset selector
@@ -1712,13 +2217,16 @@ class SceneComponentsPanel(QWidget):
 
                 # Open palette button
                 palette_btn = QPushButton("Open Tile Palette ↓")
+                _ac = _current_theme["ACCENT"]
                 palette_btn.setStyleSheet(f"""
-                    QPushButton {{ background: {ACCENT}; color: white; border: none;
+                    QPushButton {{ background: {_ac}; color: white; border: none;
                         border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 600; }}
-                    QPushButton:hover {{ background: #6a59ef; }}
+                    QPushButton:hover {{ background: {_ac}cc; }}
                 """)
                 palette_btn.clicked.connect(
-                    lambda _, c=comp: self.tile_layer_selected.emit(c.config.get("tileset_id") or ""))
+                    lambda _, c=comp: self.tile_layer_selected.emit(
+                        f"__tilelayer__:{c.id}:{c.config.get('tileset_id') or ''}"
+                    ))
                 self._root.addWidget(palette_btn)
 
             elif ct == "LayerAnimation":
@@ -1763,34 +2271,11 @@ class SceneComponentsPanel(QWidget):
                 self._root.addWidget(note)
 
             elif ct == "Path":
-                lbl = QLabel("Path Name:")
-                lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px; background: transparent;")
-                self._root.addWidget(lbl)
-                name_edit = QLineEdit(comp.config.get("path_name", "New Path"))
-                name_edit.setStyleSheet(fs)
-                name_edit.setPlaceholderText("Path name…")
-                name_edit.textChanged.connect(lambda v, c=comp: self._cfg(c, "path_name", v))
-                self._root.addWidget(name_edit)
+                path_tool = _component_editor_tool(self._project, comp, "path") or {}
+                self._add_path_tool_controls(comp, path_tool)
 
-                closed_chk = QCheckBox("Closed Loop")
-                closed_chk.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
-                closed_chk.setChecked(comp.config.get("closed", False))
-                closed_chk.toggled.connect(lambda v, c=comp: self._cfg(c, "closed", v))
-                self._root.addWidget(closed_chk)
-
-                pts = comp.config.get("points", [])
-                pt_lbl = QLabel(f"{len(pts)} point{'s' if len(pts) != 1 else ''}")
-                pt_lbl.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 10px; background: transparent;")
-                self._root.addWidget(pt_lbl)
-
-                draw_btn = QPushButton("✏  Draw Path")
-                draw_btn.setStyleSheet(f"""
-                    QPushButton {{ background: #06b6d4; color: white; border: none;
-                        border-radius: 4px; padding: 5px 10px; font-size: 11px; font-weight: 600; }}
-                    QPushButton:hover {{ background: #0891b2; }}
-                """)
-                draw_btn.clicked.connect(lambda _, c=comp: self.path_draw_requested.emit(c.id))
-                self._root.addWidget(draw_btn)
+            elif descriptor:
+                self._render_plugin_component(comp, descriptor)
 
         # Restore real root
         self._root = real_root
@@ -1894,7 +2379,7 @@ class SceneComponentsPanel(QWidget):
         ts_id = combo.currentData()
         comp.config["tileset_id"] = ts_id
         self.changed.emit()
-        self.tile_layer_selected.emit(ts_id or "")
+        self.tile_layer_selected.emit(f"__tilelayer__:{comp.id}:{ts_id or ''}")
 
     def _on_tilelayer_size_changed(self, comp, key, value):
         if self._suppress:
@@ -1920,20 +2405,33 @@ class SceneComponentsPanel(QWidget):
     def _on_collayer_size_changed(self, comp, key, value):
         if self._suppress:
             return
+        tool = _component_editor_tool(self._project, comp, "grid_map") or {}
+        data_key = str(tool.get("data_key", "tiles"))
+        old_width, old_height = self._grid_tool_shapes.get(
+            (comp.id, data_key),
+            (
+                max(1, int(comp.config.get(str(tool.get("width_key", "map_width")), 1) or 1)),
+                max(1, int(comp.config.get(str(tool.get("height_key", "map_height")), 1) or 1)),
+            ),
+        )
         comp.config[key] = value
-        mw = comp.config.get("map_width", 30)
-        mh = comp.config.get("map_height", 17)
-        old_tiles = comp.config.get("tiles", [])
-        old_w = comp.config.get("map_width", mw) if key == "map_height" else (len(old_tiles) // mh if mh else mw)
-        new_tiles = []
-        for row in range(mh):
-            for col in range(mw):
-                old_idx = row * old_w + col
-                if old_idx < len(old_tiles) and col < old_w:
-                    new_tiles.append(old_tiles[old_idx])
-                else:
-                    new_tiles.append(0)
-        comp.config["tiles"] = new_tiles
+        self._resize_grid_tool_data(comp, tool, old_width, old_height)
+        self.changed.emit()
+
+    def _on_lightmap_size_changed(self, comp, key, value):
+        if self._suppress:
+            return
+        tool = _component_editor_tool(self._project, comp, "grid_map") or {}
+        data_key = str(tool.get("data_key", "cells"))
+        old_width, old_height = self._grid_tool_shapes.get(
+            (comp.id, data_key),
+            (
+                max(1, int(comp.config.get(str(tool.get("width_key", "map_width")), 1) or 1)),
+                max(1, int(comp.config.get(str(tool.get("height_key", "map_height")), 1) or 1)),
+            ),
+        )
+        comp.config[key] = value
+        self._resize_grid_tool_data(comp, tool, old_width, old_height)
         self.changed.emit()
 
     def _cfg(self, comp, key, value):
@@ -2187,7 +2685,15 @@ class TabbedInspector(QWidget):
         """)
         self._obj_body.setStyleSheet(f"background: {c['DARK']};")
         self._scene_body.setStyleSheet(f"background: {c['DARK']};")
-
+        # Restyle the one-off accent button that was built at construction time
+        self._beh_edit_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {c['SURFACE2']}; color: {c['ACCENT']};
+                border: 1px solid {c['ACCENT']}; border-radius: 4px;
+                padding: 5px 12px; font-size: 11px;
+            }}
+            QPushButton:hover {{ background: {c['ACCENT']}; color: white; }}
+        """)
     def _on_opacity(self, value: int):
         self.opacity_lbl.setText(f"{value}%")
         self._emit_transform()
@@ -2215,18 +2721,28 @@ class TabbedInspector(QWidget):
         od = self._project.get_object_def(self._instance.object_def_id)
         if od is None:
             return
+        from plugin_registry import sync_runtime_modules
         from behavior_node_graph import BehaviorGraphDialog
-        dlg = BehaviorGraphDialog(od, parent=self, scene=self._scene, project=self._project)
+        sync_runtime_modules(getattr(self._project, "plugin_registry", None))
+        seed_instance_behaviors_from_definition(self._instance, od)
+        dlg = BehaviorGraphDialog(
+            _PlacedObjectBehaviorTarget(self._instance, od),
+            parent=self,
+            scene=self._scene,
+            project=self._project,
+        )
         if dlg.exec() == dlg.DialogCode.Accepted:
-            self._refresh_beh_summary(od)
+            self._refresh_beh_summary()
             self.changed.emit()
 
-    def _refresh_beh_summary(self, od):
-        if not od or not od.behaviors:
+    def _refresh_beh_summary(self):
+        od = self._project.get_object_def(self._instance.object_def_id) if self._instance and self._project else None
+        behaviors = effective_placed_behaviors(self._instance, od)
+        if not behaviors:
             self._beh_summary.setText("No behaviors.")
             return
         lines = []
-        for b in od.behaviors:
+        for b in behaviors:
             lines.append(f"• {b.trigger}  ({len(b.actions)} actions)")
         self._beh_summary.setText("\n".join(lines))
 
@@ -2273,7 +2789,7 @@ class TabbedInspector(QWidget):
         # Only show draw_layer spin when no layer component is assigned
         self.draw_layer_spin.setVisible(current_layer_id == "")
 
-        self._refresh_beh_summary(od)
+        self._refresh_beh_summary()
         self._obj_body.setEnabled(True)
         self._suppress = False
 
@@ -2281,7 +2797,11 @@ class TabbedInspector(QWidget):
         self._scene   = scene
         self._project = project
         self._scene_body.setEnabled(True)
+        self.comps_panel.set_active_path_component_id(None)
         self.comps_panel.load(scene, project)
+
+    def set_active_path_component_id(self, component_id: str | None):
+        self.comps_panel.set_active_path_component_id(component_id)
 
     def sync_position(self, x: int, y: int):
         self._suppress = True
@@ -2298,6 +2818,7 @@ class TabbedInspector(QWidget):
         self.clear_object()
         self._scene = None
         self._scene_body.setEnabled(False)
+        self.comps_panel.set_active_path_component_id(None)
         self.comps_panel.clear()
 
 
@@ -2308,6 +2829,8 @@ class TabbedInspector(QWidget):
 class VitaCanvas(QWidget):
     object_moved    = Signal(str, int, int)
     object_selected = Signal(int)
+    scene_changed   = Signal()
+    path_mode_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2330,11 +2853,14 @@ class VitaCanvas(QWidget):
         self._tile_tileset:     object           | None = None   # RegisteredTileset
         self._tile_palette_ref: object           | None = None   # TilePalette
         self._tile_painting:    bool             = False         # mouse held
-        self._collision_mode:   bool             = False         # painting a CollisionLayer
-        self._collision_paint_value: int          = 1              # 1=solid, 0=erase
+        self._grid_paint_mode:  bool             = False
+        self._grid_tool_comp:   SceneComponent   | None = None
+        self._grid_tool:        dict | None      = None
+        self._grid_erase_mode:  bool             = False
         # Path draw mode
         self._path_draw_mode:   bool             = False
         self._path_draw_comp:   SceneComponent   | None = None   # which Path component
+        self._path_draw_tool:   dict | None      = None
         self._path_drag_idx:    int              = -1             # index of point being dragged
         self._path_drag_handle: str              = ""             # "" | "anchor" | "cx1" | "cx2"
         # Camera / world pan
@@ -2352,7 +2878,11 @@ class VitaCanvas(QWidget):
         # Exit any active draw modes
         self._path_draw_mode = False
         self._path_draw_comp = None
+        self._path_draw_tool = None
         self._tile_paint_mode = False
+        self._grid_paint_mode = False
+        self._grid_tool_comp = None
+        self._grid_tool = None
         self.update()
 
     def set_selected_row(self, row):
@@ -2367,15 +2897,37 @@ class VitaCanvas(QWidget):
         self._grid_size = s
         self.update()
 
-    def set_tile_paint_mode(self, active: bool, tile_layer_comp, tileset, palette_ref, collision_mode: bool = False, erase_mode: bool = False):
+    def set_tile_paint_mode(self, active: bool, tile_layer_comp, tileset, palette_ref):
         self._tile_paint_mode  = active
         self._tile_layer_comp  = tile_layer_comp
         self._tile_tileset     = tileset
         self._tile_palette_ref = palette_ref
-        self._collision_mode   = collision_mode
-        if collision_mode:
-            self._collision_paint_value = 0 if erase_mode else 1
         if active:
+            self._grid_paint_mode = False
+            self._grid_tool_comp = None
+            self._grid_tool = None
+            self._path_draw_mode = False
+            self._path_draw_comp = None
+            self._path_draw_tool = None
+        if active:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_grid_paint_mode(self, active: bool, component: SceneComponent | None, tool: dict | None, *, erase_mode: bool = False):
+        self._grid_paint_mode = active
+        self._grid_tool_comp = component
+        self._grid_tool = copy.deepcopy(tool) if tool else None
+        self._grid_erase_mode = bool(erase_mode)
+        if active:
+            self._tile_paint_mode = False
+            self._tile_layer_comp = None
+            self._tile_tileset = None
+            self._tile_palette_ref = None
+            self._path_draw_mode = False
+            self._path_draw_comp = None
+            self._path_draw_tool = None
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -2384,23 +2936,30 @@ class VitaCanvas(QWidget):
     def set_paint_tile(self, index: int):
         self.update()
 
-    def enter_path_draw(self, comp: SceneComponent):
-        """Enter path-draw mode for the given Path component."""
+    def enter_path_draw(self, comp: SceneComponent, tool: dict):
+        """Enter path-draw mode for the given path-backed component."""
         self._path_draw_mode  = True
         self._path_draw_comp  = comp
+        self._path_draw_tool  = copy.deepcopy(tool)
         self._path_drag_idx   = -1
         self._path_drag_handle = ""
-        self._tile_paint_mode = False          # exit tile paint if active
+        self._tile_paint_mode = False
+        self._grid_paint_mode = False
+        self._grid_tool_comp = None
+        self._grid_tool = None
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.path_mode_changed.emit(comp.id)
         self.update()
 
     def exit_path_draw(self):
         """Leave path-draw mode."""
         self._path_draw_mode  = False
         self._path_draw_comp  = None
+        self._path_draw_tool  = None
         self._path_drag_idx   = -1
         self._path_drag_handle = ""
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.path_mode_changed.emit("")
         self.update()
 
     def _path_hit_test(self, wx, wy, radius=8):
@@ -2408,7 +2967,8 @@ class VitaCanvas(QWidget):
         handle_type is 'anchor', 'cx1', or 'cx2'."""
         if not self._path_draw_comp:
             return -1, ""
-        pts = self._path_draw_comp.config.get("points", [])
+        points_key = str((self._path_draw_tool or {}).get("points_key", "points"))
+        pts = self._path_draw_comp.config.get(points_key, [])
         for i, pt in enumerate(pts):
             # Check control handles first (smaller targets drawn on top)
             for hk_x, hk_y, name in (("cx1","cy1","cx1"), ("cx2","cy2","cx2")):
@@ -2423,30 +2983,47 @@ class VitaCanvas(QWidget):
         return -1, ""
 
     def _paint_tile_at(self, canvas_x: int, canvas_y: int):
-        if self._tile_layer_comp is None:
-            return
-        comp = self._tile_layer_comp
-
-        if self._collision_mode:
-            # CollisionLayer: no tileset needed, paint 1 (solid) or 0 (erase)
-            tile_size = comp.config.get("tile_size", 32)
-            map_w     = comp.config.get("map_width", 30)
-            map_h     = comp.config.get("map_height", 17)
+        if self._grid_paint_mode and self._grid_tool_comp is not None and self._grid_tool:
+            comp = self._grid_tool_comp
+            tool = self._grid_tool
+            data_key = str(tool.get("data_key", "tiles"))
+            width_key = str(tool.get("width_key", "map_width"))
+            height_key = str(tool.get("height_key", "map_height"))
+            cell_size_key = str(tool.get("cell_size_key", "tile_size"))
+            default_cell = tool.get("default_cell", 0)
+            tile_size = max(1, int(comp.config.get(cell_size_key, 32) or 32))
+            map_w = max(1, int(comp.config.get(width_key, 1) or 1))
+            map_h = max(1, int(comp.config.get(height_key, 1) or 1))
             col = canvas_x // tile_size
             row = canvas_y // tile_size
             if col < 0 or col >= map_w or row < 0 or row >= map_h:
                 return
-            tiles  = comp.config.get("tiles", [])
+            values = comp.config.get(data_key, [])
             needed = map_w * map_h
-            if len(tiles) < needed:
-                tiles.extend([0] * (needed - len(tiles)))
-                comp.config["tiles"] = tiles
-            flat_idx  = row * map_w + col
-            new_val   = self._collision_paint_value
-            if tiles[flat_idx] != new_val:
-                tiles[flat_idx] = new_val
+            if len(values) < needed:
+                values.extend([default_cell] * (needed - len(values)))
+                comp.config[data_key] = values
+            if str(tool.get("mode", "binary")) == "binary":
+                flat_idx = row * map_w + col
+                new_val = default_cell if self._grid_erase_mode else tool.get("active_value", 1)
+                if values[flat_idx] != new_val:
+                    values[flat_idx] = new_val
+                    self.scene_changed.emit()
+                    self.update()
+                return
+            paint_key = str(tool.get("paint_value_key", "paint_value"))
+            paint_value = int(default_cell) if self._grid_erase_mode else max(
+                0,
+                min(255, int(comp.config.get(paint_key, default_cell) or default_cell)),
+            )
+            if self._apply_scalar_grid_brush(comp, tool, values, map_w, map_h, col, row, paint_value):
+                self.scene_changed.emit()
                 self.update()
             return
+
+        if self._tile_layer_comp is None:
+            return
+        comp = self._tile_layer_comp
 
         if self._tile_tileset is None or self._tile_palette_ref is None:
             return
@@ -2467,7 +3044,70 @@ class VitaCanvas(QWidget):
         tile_index = self._tile_palette_ref.selected_tile()
         if tiles[flat_idx] != tile_index:
             tiles[flat_idx] = tile_index
+            self.scene_changed.emit()
             self.update()
+
+    def _apply_scalar_grid_brush(
+        self,
+        comp,
+        tool: dict,
+        cells: list[int],
+        map_w: int,
+        map_h: int,
+        center_col: int,
+        center_row: int,
+        paint_value: int,
+    ) -> bool:
+        brush_mode = str(comp.config.get(str(tool.get("brush_mode_key", "brush_mode")), "set") or "set")
+        radius = max(0, int(comp.config.get(str(tool.get("brush_radius_key", "brush_radius")), 0) or 0))
+        strength = max(1, min(255, int(comp.config.get(str(tool.get("brush_strength_key", "brush_strength")), 48) or 48)))
+        paint_value = max(0, min(255, int(paint_value)))
+        changed = False
+
+        def _apply_at(c: int, r: int, falloff: float):
+            nonlocal changed
+            if c < 0 or c >= map_w or r < 0 or r >= map_h:
+                return
+            idx = r * map_w + c
+            current = max(0, min(255, int(cells[idx] or 0)))
+            if brush_mode == "add":
+                delta = max(1, int(round(strength * falloff)))
+                new_val = min(255, current + delta)
+            elif brush_mode == "subtract":
+                delta = max(1, int(round(strength * falloff)))
+                new_val = max(0, current - delta)
+            else:
+                if radius <= 0:
+                    new_val = paint_value
+                else:
+                    target = int(round(paint_value * falloff))
+                    blend = max(1, int(round(strength * falloff)))
+                    if current < target:
+                        new_val = min(target, current + blend)
+                    else:
+                        new_val = max(target, current - blend)
+            if new_val != current:
+                cells[idx] = new_val
+                changed = True
+
+        if radius <= 0:
+            _apply_at(center_col, center_row, 1.0)
+            return changed
+
+        radius_sq = radius * radius
+        for r in range(center_row - radius, center_row + radius + 1):
+            for c in range(center_col - radius, center_col + radius + 1):
+                dc = c - center_col
+                dr = r - center_row
+                dist_sq = dc * dc + dr * dr
+                if dist_sq > radius_sq:
+                    continue
+                dist = dist_sq ** 0.5
+                falloff = max(0.0, 1.0 - (dist / (radius + 0.001)))
+                if falloff <= 0.0:
+                    continue
+                _apply_at(c, r, falloff)
+        return changed
 
     def _world_size(self) -> tuple[int, int]:
         """Return (world_w, world_h) in pixels from TileLayers or Camera object bounds."""
@@ -2505,6 +3145,13 @@ class VitaCanvas(QWidget):
         self._scene = None
         self._project = None
         self._selected_row = -1
+        self._tile_paint_mode = False
+        self._grid_paint_mode = False
+        self._grid_tool_comp = None
+        self._grid_tool = None
+        self._path_draw_mode = False
+        self._path_draw_comp = None
+        self._path_draw_tool = None
         self.update()
 
     def _load_pixmap(self, path):
@@ -2783,28 +3430,55 @@ class VitaCanvas(QWidget):
                         p.drawPixmap(po.x, po.y, w, h, px)
                     p.restore()
 
-        # CollisionLayer components — always drawn on top as an editor overlay
+        # Grid-map editor tools — always drawn on top as editor overlays
         for comp in self._scene.components:
-            if comp.component_type != "CollisionLayer":
+            tool = _component_editor_tool(self._project, comp, "grid_map")
+            if not tool:
                 continue
-            tile_size = comp.config.get("tile_size", 32)
-            map_w     = comp.config.get("map_width",  30)
-            map_h     = comp.config.get("map_height", 17)
-            tiles     = comp.config.get("tiles", [])
-            # Always show grid lines for collision layers
+            if "visible" in comp.config and not comp.config.get("visible", True):
+                continue
+            data_key = str(tool.get("data_key", "tiles"))
+            width_key = str(tool.get("width_key", "map_width"))
+            height_key = str(tool.get("height_key", "map_height"))
+            cell_size_key = str(tool.get("cell_size_key", "tile_size"))
+            tile_size = max(1, int(comp.config.get(cell_size_key, 32) or 32))
+            map_w = max(1, int(comp.config.get(width_key, 1) or 1))
+            map_h = max(1, int(comp.config.get(height_key, 1) or 1))
+            values = comp.config.get(data_key, []) or []
+            mode = str(tool.get("mode", "binary"))
+            base_color = str(tool.get("overlay_color", "") or "").strip()
+            color_key = str(tool.get("overlay_color_key", "") or "").strip()
+            if color_key:
+                base_color = str(comp.config.get(color_key, base_color or "#ff5050"))
+            if not base_color:
+                base_color = "#ff5050"
+            color = QColor(base_color)
+            is_active = self._grid_paint_mode and self._grid_tool_comp is comp
             p.save()
-            is_active = self._tile_paint_mode and self._collision_mode and self._tile_layer_comp is comp
-            # Draw solid cells
             p.setPen(Qt.PenStyle.NoPen)
             for row in range(map_h):
                 for col in range(map_w):
                     flat = row * map_w + col
-                    if flat < len(tiles) and tiles[flat] == 1:
-                        p.setBrush(QBrush(QColor(255, 80, 80, 100)))
-                        p.drawRect(col * tile_size, row * tile_size, tile_size, tile_size)
-            # Grid lines — dimmer when not active, brighter when painting
-            grid_alpha = "99" if is_active else "44"
-            p.setPen(QPen(QColor("#ff5050" + grid_alpha), 1))
+                    if flat >= len(values):
+                        continue
+                    fill = QColor(color)
+                    if mode == "binary":
+                        active_value = tool.get("active_value", 1)
+                        if values[flat] != active_value:
+                            continue
+                        fill.setAlpha(120 if is_active else 100)
+                    else:
+                        opacity_key = str(tool.get("opacity_key", "") or "").strip()
+                        layer_opacity = max(0, min(255, int(comp.config.get(opacity_key, 255) if opacity_key else 255)))
+                        dark = max(0, min(255, int(values[flat] or 0)))
+                        if dark <= 0:
+                            continue
+                        fill.setAlpha(max(12, min(220, (dark * layer_opacity) // 255)))
+                    p.setBrush(QBrush(fill))
+                    p.drawRect(col * tile_size, row * tile_size, tile_size, tile_size)
+            grid_color = QColor(color)
+            grid_color.setAlpha(120 if is_active else 68)
+            p.setPen(QPen(grid_color, 1))
             for col in range(map_w + 1):
                 x = col * tile_size
                 p.drawLine(x, 0, x, map_h * tile_size)
@@ -2907,9 +3581,12 @@ class VitaCanvas(QWidget):
         if self._scene:
             from PySide6.QtGui import QPainterPath as QPPath
             for comp in self._scene.components:
-                if comp.component_type != "Path":
+                tool = _component_editor_tool(self._project, comp, "path")
+                if not tool:
                     continue
-                pts = comp.config.get("points", [])
+                points_key = str(tool.get("points_key", "points"))
+                closed_key = str(tool.get("closed_key", "closed"))
+                pts = comp.config.get(points_key, [])
                 if len(pts) < 1:
                     continue
                 is_active = (self._path_draw_mode and self._path_draw_comp
@@ -2923,7 +3600,7 @@ class VitaCanvas(QWidget):
                     p0 = pts[0]
                     pp.moveTo(p0["x"] - self._cam_x, p0["y"] - self._cam_y)
                     n = len(pts)
-                    count = n if comp.config.get("closed", False) else n - 1
+                    count = n if comp.config.get(closed_key, False) else n - 1
                     for si in range(count):
                         a = pts[si]
                         b = pts[(si + 1) % n]
@@ -2978,12 +3655,14 @@ class VitaCanvas(QWidget):
 
         # ── Path draw mode ──────────────────────────────────────
         if self._path_draw_mode and self._path_draw_comp:
-            pts = self._path_draw_comp.config.setdefault("points", [])
+            points_key = str((self._path_draw_tool or {}).get("points_key", "points"))
+            pts = self._path_draw_comp.config.setdefault(points_key, [])
             if event.button() == Qt.MouseButton.RightButton:
                 # Right-click: delete nearest point
                 idx, _ = self._path_hit_test(wx, wy, radius=12)
                 if idx >= 0:
                     pts.pop(idx)
+                    self.scene_changed.emit()
                 self.update()
                 return
             if event.button() != Qt.MouseButton.LeftButton:
@@ -2999,16 +3678,16 @@ class VitaCanvas(QWidget):
                 pts.append(new_pt)
                 self._path_drag_idx    = len(pts) - 1
                 self._path_drag_handle = "anchor"
+                self.scene_changed.emit()
             self.update()
             return
 
-        if self._tile_paint_mode:
+        if self._grid_paint_mode or self._tile_paint_mode:
             if event.button() not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
                 return
             self._tile_painting = True
-            # RMB erases in collision mode, LMB paints solid
-            if self._collision_mode:
-                self._collision_paint_value = 0 if event.button() == Qt.MouseButton.RightButton else 1
+            if self._grid_paint_mode:
+                self._grid_erase_mode = event.button() == Qt.MouseButton.RightButton
             world_x = pos.x() + self._cam_x
             world_y = pos.y() + self._cam_y
             self._paint_tile_at(world_x, world_y)
@@ -3041,25 +3720,35 @@ class VitaCanvas(QWidget):
             return
         # ── Path draw drag ──────────────────────────────────────
         if self._path_draw_mode and self._path_draw_comp and self._path_drag_idx >= 0:
-            pts = self._path_draw_comp.config.get("points", [])
+            points_key = str((self._path_draw_tool or {}).get("points_key", "points"))
+            pts = self._path_draw_comp.config.get(points_key, [])
             if self._path_drag_idx < len(pts):
                 pt = pts[self._path_drag_idx]
                 wx = pos.x() + self._cam_x
                 wy = pos.y() + self._cam_y
                 if self._path_drag_handle == "anchor":
-                    pt["x"] = wx
-                    pt["y"] = wy
+                    if bool((self._path_draw_tool or {}).get("supports_bezier")) and bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                        dx = wx - pt["x"]
+                        dy = wy - pt["y"]
+                        pt["cx2"] = dx
+                        pt["cy2"] = dy
+                        pt["cx1"] = -dx
+                        pt["cy1"] = -dy
+                    else:
+                        pt["x"] = wx
+                        pt["y"] = wy
                 elif self._path_drag_handle == "cx1":
                     pt["cx1"] = wx - pt["x"]
                     pt["cy1"] = wy - pt["y"]
                 elif self._path_drag_handle == "cx2":
                     pt["cx2"] = wx - pt["x"]
                     pt["cy2"] = wy - pt["y"]
+                self.scene_changed.emit()
                 self.update()
             return
         if self._path_draw_mode:
             return
-        if self._tile_paint_mode:
+        if self._grid_paint_mode or self._tile_paint_mode:
             if self._tile_painting:
                 self._paint_tile_at(pos.x() + self._cam_x, pos.y() + self._cam_y)
             return
@@ -3079,7 +3768,7 @@ class VitaCanvas(QWidget):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
             self.setCursor(
-                Qt.CursorShape.CrossCursor if (self._tile_paint_mode or self._path_draw_mode)
+                Qt.CursorShape.CrossCursor if (self._tile_paint_mode or self._grid_paint_mode or self._path_draw_mode)
                 else Qt.CursorShape.ArrowCursor
             )
             return
@@ -3089,7 +3778,7 @@ class VitaCanvas(QWidget):
                 self._path_drag_idx    = -1
                 self._path_drag_handle = ""
             return
-        if self._tile_paint_mode:
+        if self._grid_paint_mode or self._tile_paint_mode:
             if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
                 self._tile_painting = False
             return
@@ -3228,7 +3917,8 @@ class EditorTab(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        self._active_collision_comp_id: str | None = None
+        self._active_grid_comp_id: str | None = None
+        self._active_tile_layer_comp_id: str | None = None
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -3370,6 +4060,7 @@ class EditorTab(QWidget):
         self.canvas = VitaCanvas()
         self.canvas.object_moved.connect(self._on_obj_moved)
         self.canvas.object_selected.connect(self._on_canvas_selected)
+        self.canvas.scene_changed.connect(self._on_canvas_scene_changed)
         _orig = self.canvas.mouseMoveEvent
         def _mm(event, _o=_orig):
             pos = event.position().toPoint()
@@ -3421,6 +4112,7 @@ class EditorTab(QWidget):
         self.inspector.changed.connect(self._on_inspector_changed)
         self.inspector.tile_layer_selected.connect(self._on_tile_layer_selected)
         self.inspector.path_draw_requested.connect(self._on_path_draw_requested)
+        self.canvas.path_mode_changed.connect(self.inspector.set_active_path_component_id)
         root.addWidget(self.inspector)
         self._left_panel = left
         self._tb_widget = tb_widget
@@ -3444,45 +4136,60 @@ class EditorTab(QWidget):
         self._bottom_stack.setFixedHeight(150)
         self._bottom_stack.setCurrentIndex(0)
 
-    def _show_collision_painter(self, comp_id: str, erase: bool = False):
-        """Activate collision paint mode for the CollisionLayer with the given component id."""
+    def _show_grid_tool_painter(self, comp_id: str, erase: bool = False):
+        """Activate grid-map paint mode for the given grid-backed component id."""
         if self._scene is None:
             return
         comp = next((c for c in self._scene.components if c.id == comp_id), None)
         if comp is None:
             return
-        # Switch to tile palette panel (reuse it as a toolbar for paint/erase hint)
+        tool = _component_editor_tool(self._project, comp, "grid_map")
+        if not tool:
+            return
         if self._project:
             self.tile_palette.load_project(self._project)
-        self.tile_palette.load_for_component(None)  # no tileset needed
+        self.tile_palette.load_for_component(None)
         self._bottom_stack.setFixedHeight(60)
         self._bottom_stack.setCurrentIndex(1)
-        # Activate paint mode on canvas in collision mode
-        self.canvas.set_tile_paint_mode(True, comp, None, None, collision_mode=True, erase_mode=erase)
+        self.canvas.set_grid_paint_mode(True, comp, tool, erase_mode=erase)
 
     def _on_tile_layer_selected(self, tileset_id: str):
-        """Called when a TileLayer or CollisionLayer palette/paint button is clicked."""
-        if tileset_id.startswith("__collision_erase__:"):
-            comp_id = tileset_id[len("__collision_erase__:"):]
-            self._active_collision_comp_id = comp_id
-            self._show_collision_painter(comp_id, erase=True)
-        elif tileset_id.startswith("__collision__:"):
-            comp_id = tileset_id[len("__collision__:"):]
-            self._active_collision_comp_id = comp_id
-            self._show_collision_painter(comp_id)
+        """Called when a tile layer or declarative editor tool button is clicked."""
+        if tileset_id.startswith("__gridtool__:"):
+            payload = tileset_id[len("__gridtool__:"):]
+            comp_id, _, mode = payload.partition(":")
+            self._active_grid_comp_id = comp_id or None
+            self._active_tile_layer_comp_id = None
+            self._show_grid_tool_painter(comp_id, erase=(mode == "erase"))
+        elif tileset_id.startswith("__tilelayer__:"):
+            payload = tileset_id[len("__tilelayer__:"):]
+            comp_id, _, selected_tileset_id = payload.partition(":")
+            self._active_grid_comp_id = None
+            self._active_tile_layer_comp_id = comp_id or None
+            self.canvas.set_grid_paint_mode(False, None, None)
+            if self.canvas._path_draw_mode:
+                self.canvas.exit_path_draw()
+            self._show_tile_palette(selected_tileset_id or None)
+            if self.tile_palette.is_paint_mode():
+                tile_layer = self._get_active_tile_layer()
+                ts = self.tile_palette.current_tileset()
+                if tile_layer and ts:
+                    self.canvas.set_tile_paint_mode(True, tile_layer, ts, self.tile_palette)
         elif tileset_id:
-            self._active_collision_comp_id = None
+            self._active_grid_comp_id = None
+            self._active_tile_layer_comp_id = None
+            self.canvas.set_grid_paint_mode(False, None, None)
             self._show_tile_palette(tileset_id)
         else:
-            self._active_collision_comp_id = None
+            self._active_grid_comp_id = None
+            self._active_tile_layer_comp_id = None
+            self.canvas.set_grid_paint_mode(False, None, None)
             self._show_project_explorer()
 
     def _on_paint_mode_changed(self, active: bool):
         """Toggle tile paint mode on the canvas."""
         if active:
-            # Check if we're in collision mode
-            if getattr(self, "_active_collision_comp_id", None):
-                # Already activated by _show_collision_painter — nothing to do
+            if getattr(self, "_active_grid_comp_id", None):
                 return
             # Find the active TileLayer component
             tile_layer = self._get_active_tile_layer()
@@ -3493,13 +4200,18 @@ class EditorTab(QWidget):
                 # No valid layer — turn button back off
                 self.tile_palette.paint_btn.setChecked(False)
         else:
-            self._active_collision_comp_id = None
+            self._active_grid_comp_id = None
             self.canvas.set_tile_paint_mode(False, None, None, None)
 
     def _get_active_tile_layer(self):
-        """Return the first TileLayer SceneComponent in the current scene, or None."""
+        """Return the TileLayer currently being edited, falling back to the first."""
         if self._scene is None:
             return None
+        active_id = getattr(self, "_active_tile_layer_comp_id", None)
+        if active_id:
+            for comp in self._scene.components:
+                if comp.id == active_id and comp.component_type == "TileLayer":
+                    return comp
         for comp in self._scene.components:
             if comp.component_type == "TileLayer":
                 return comp
@@ -3518,16 +4230,52 @@ class EditorTab(QWidget):
                 and self.canvas._path_draw_comp.id == comp_id):
             self.canvas.exit_path_draw()
             return
-        # Find the Path component by id
+        # Find the path-backed component by id
         for comp in self._scene.components:
-            if comp.id == comp_id and comp.component_type == "Path":
+            tool = _component_editor_tool(self._project, comp, "path")
+            if comp.id == comp_id and tool:
                 # Exit tile paint if active
                 self.canvas.set_tile_paint_mode(False, None, None, None)
-                self.canvas.enter_path_draw(comp)
+                self.canvas.set_grid_paint_mode(False, None, None)
+                self.canvas.enter_path_draw(comp, tool)
                 self.canvas.setFocus()       # grab keyboard for Escape
                 return
 
     def restyle(self, c: dict):
+        global DARK, PANEL, SURFACE, SURFACE2, BORDER, ACCENT, TEXT, TEXT_DIM, TEXT_MUTED, SUCCESS, WARNING, DANGER
+        old = _theme_snapshot()
+        DARK = c.get("DARK", DARK)
+        PANEL = c.get("PANEL", PANEL)
+        SURFACE = c.get("SURFACE", SURFACE)
+        SURFACE2 = c.get("SURFACE2", SURFACE2)
+        BORDER = c.get("BORDER", BORDER)
+        ACCENT = c.get("ACCENT", ACCENT)
+        TEXT = c.get("TEXT", TEXT)
+        TEXT_DIM = c.get("TEXT_DIM", TEXT_DIM)
+        TEXT_MUTED = c.get("TEXT_MUTED", TEXT_MUTED)
+        SUCCESS = c.get("SUCCESS", SUCCESS)
+        WARNING = c.get("WARNING", WARNING)
+        DANGER = c.get("DANGER", DANGER)
+        ROLE_COLORS.update({"start": SUCCESS, "end": DANGER, "": TEXT_DIM})
+
+        # Push new colours into the module-level snapshot so all helpers and
+        # dynamically-rebuilt widgets (_rebuild, _small_btn, etc.) use them.
+        _current_theme.update(_theme_snapshot())
+        _current_theme.update(c)
+        replace_widget_theme_colors(self, old, _current_theme)
+
+        # Re-apply stylesheet to every accent button built at construction time
+        _ac = c["ACCENT"]
+        _btn_ss = f"""
+            QPushButton {{
+                background-color: {_ac}; color: white; border: none;
+                border-radius: 4px; font-size: 13px; font-weight: 700; padding: 0;
+            }}
+            QPushButton:hover {{ background-color: {_ac}cc; }}
+        """
+        for _b in _accent_buttons:
+            _b.setStyleSheet(_btn_ss)
+
         self._left_panel.setStyleSheet(f"background: {c['PANEL']}; border-right: 1px solid {c['BORDER']};")
         self._tb_widget.setStyleSheet(f"background: {c['PANEL']}; border-bottom: 1px solid {c['BORDER']};")
         self._ib_widget.setStyleSheet(f"background: {c['PANEL']}; border-top: 1px solid {c['BORDER']};")
@@ -3651,8 +4399,7 @@ class EditorTab(QWidget):
         po.object_def_id = selected_id
         po.x, po.y = 400, 200
         od = self._project.get_object_def(po.object_def_id)
-        if od and od.behaviors:
-            po.instance_behaviors = [Behavior.from_dict(json.loads(json.dumps(b.to_dict()))) for b in od.behaviors]
+        seed_instance_behaviors_from_definition(po, od)
         if od and not od.visible_default:
             po.visible = False
         self._scene.placed_objects.append(po)
@@ -3754,6 +4501,12 @@ class EditorTab(QWidget):
         self._refresh_objs()
         self.instance_changed.emit()
 
+    def _on_canvas_scene_changed(self):
+        self._refresh_objs()
+        if self._scene is not None and self._project is not None:
+            self.inspector.load_scene(self._scene, self._project)
+        self.instance_changed.emit()
+
     def _on_inspector_changed(self):
         self._refresh_objs()
         self.canvas.update()
@@ -3774,6 +4527,8 @@ class EditorTab(QWidget):
             self.tile_palette.load_project(project)
 
         if current_index < 0 or current_index >= len(project.scenes):
+            self._active_grid_comp_id = None
+            self._active_tile_layer_comp_id = None
             self.canvas.clear()
             self._scene = None
             self.objects_list.clear()
@@ -3781,6 +4536,8 @@ class EditorTab(QWidget):
             return
 
         scene = project.scenes[current_index]
+        self._active_grid_comp_id = None
+        self._active_tile_layer_comp_id = None
         self._scene = scene
         self.canvas.load(scene, project)
         self._refresh_objs()

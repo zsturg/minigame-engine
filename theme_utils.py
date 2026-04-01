@@ -5,7 +5,10 @@
 Standalone theme utilities.
 """
 
+import re
 from typing import Dict
+
+from PySide6.QtWidgets import QWidget
 
 def get_default_theme() -> Dict:
     """Returns the default color scheme."""
@@ -170,3 +173,39 @@ def theme_to_stylesheet(theme: Dict) -> str:
         margin: 4px 8px;
     }}
     """
+
+
+def replace_widget_theme_colors(root: QWidget, old_colors: Dict[str, str], new_colors: Dict[str, str]) -> None:
+    """Replace inline stylesheet colors on an existing widget tree."""
+    if root is None:
+        return
+
+    replacements: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for key, old in old_colors.items():
+        new = new_colors.get(key)
+        if not (isinstance(old, str) and isinstance(new, str)):
+            continue
+        if not (old.startswith("#") and new.startswith("#")):
+            continue
+        if old.lower() == new.lower():
+            continue
+        pair = (old.lower(), new.lower())
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        replacements.append((old, new))
+
+    if not replacements:
+        return
+
+    widgets = [root, *root.findChildren(QWidget)]
+    for widget in widgets:
+        stylesheet = widget.styleSheet()
+        if not stylesheet:
+            continue
+        updated = stylesheet
+        for old, new in replacements:
+            updated = re.sub(re.escape(old), new, updated, flags=re.IGNORECASE)
+        if updated != stylesheet:
+            widget.setStyleSheet(updated)

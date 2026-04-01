@@ -4,9 +4,13 @@ Hierarchy-based sprite rigging with auto-behaviors (blink, mouth, idle breathing
 and user-defined keyframed macros.
 """
 
+import io
+import json
 import os
 import math
 import random
+import numpy as np
+from PIL import Image as PILImage
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTreeWidget, QTreeWidgetItem, QFrame,
@@ -16,16 +20,18 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox, QSpinBox, QCheckBox, QFileDialog,
     QInputDialog, QMessageBox, QSizePolicy, QScrollArea,
     QFormLayout, QGroupBox, QDialog, QDialogButtonBox,
+    QListWidget,
 )
-from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QTimer
+from PySide6.QtCore import Qt, Signal, QPointF, QRectF, QTimer, QByteArray, QBuffer, QIODevice
 from PySide6.QtGui import (
-    QColor, QPainter, QPixmap, QPen, QBrush, QTransform,
+    QColor, QPainter, QPixmap, QPen, QBrush, QTransform, QImage,
 )
 from models import (
     Project, PaperDollAsset, PaperDollLayer, PaperDollMacro,
     PaperDollKeyframe, BlinkConfig, MouthConfig, IdleBreathingConfig,
-    RegisteredImage,
+    RegisteredImage, AnimationExport,
 )
+from theme_utils import replace_widget_theme_colors
 
 # ── Aesthetic Constants ────────────────────────────────────────
 DARK    = "#0f0f12"
@@ -36,6 +42,25 @@ BORDER  = "#2e2e42"
 ACCENT  = "#7c6aff"
 TEXT    = "#e8e6f0"
 DIM     = "#7a7890"
+
+HOOK_MODE_OPTIONS = [
+    ("Built-in only", "builtin"),
+    ("Built-in + Nodes", "supplement"),
+    ("Nodes only", "replace"),
+]
+
+
+def _theme_snapshot():
+    return {
+        "DARK": DARK,
+        "PANEL": PANEL,
+        "SURFACE": SURFACE,
+        "SURF2": SURF2,
+        "BORDER": BORDER,
+        "ACCENT": ACCENT,
+        "TEXT": TEXT,
+        "DIM": DIM,
+    }
 
 
 # ── Shared Helpers ─────────────────────────────────────────────
@@ -383,7 +408,7 @@ class TimelinePanel(QFrame):
 
 # ── Behavior Config Dialog ─────────────────────────────────────
 
-class BehaviorConfigDialog(QDialog):
+class _LegacyBehaviorConfigDialog(QDialog):
     """Popup dialog for configuring blink, mouth, or idle breathing."""
 
     def __init__(self, asset: PaperDollAsset, mode: str, project: Project, parent=None):
@@ -555,6 +580,325 @@ class BehaviorConfigDialog(QDialog):
 
 # ── Main Tab Widget ────────────────────────────────────────────
 
+class BehaviorConfigDialog(QDialog):
+    """Popup dialog for configuring blink, mouth, or idle breathing."""
+
+    def __init__(self, asset: PaperDollAsset, mode: str, project: Project, parent=None):
+        super().__init__(parent)
+        self.asset = asset
+        self.project = project
+        self.mode = mode          # "blink" | "mouth" | "idle"
+        self.setWindowTitle(f"Configure {mode.title()}")
+        self.setModal(True)
+        self.setFixedWidth(420)
+        self.setStyleSheet(f"background: {PANEL}; color: {TEXT};")
+        self._alt_image_id: str | None = None
+        self._mouth_image_ids: list[str] = []
+        self._build_ui()
+
+    def _collect_layers(self, layers, depth=0):
+        result = []
+        for l in layers:
+            result.append((l.id, "  " * depth + l.name))
+            result += self._collect_layers(l.children, depth + 1)
+        return result
+
+    def _make_hook_mode_combo(self, current_mode: str) -> QComboBox:
+        combo = QComboBox()
+        for label, value in HOOK_MODE_OPTIONS:
+            combo.addItem(label, value)
+        idx = combo.findData(current_mode or "builtin")
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        return combo
+
+    def _make_single_image_row(self, current_image_id: str | None):
+        container = QWidget()
+        h = QHBoxLayout(container)
+        h.setContentsMargins(0, 0, 0, 0)
+        self._alt_image_label = QLabel("(none)")
+        self._alt_image_label.setStyleSheet(
+            f"color: {TEXT}; padding: 2px 6px; background: {SURF2}; border: 1px solid {BORDER};"
+        )
+        self._alt_image_label.setMinimumWidth(160)
+        self._alt_image_id = current_image_id
+        self._refresh_alt_image_label()
+        browse_btn = _btn("Browse...")
+        browse_btn.clicked.connect(self._browse_alt_image)
+        pick_btn = _btn("Pick...")
+        pick_btn.clicked.connect(self._pick_alt_image)
+        h.addWidget(self._alt_image_label, stretch=1)
+        h.addWidget(pick_btn)
+        h.addWidget(browse_btn)
+        return container
+
+    def _make_mouth_images_row(self, current_image_ids: list[str]):
+        container = QWidget()
+        v = QVBoxLayout(container)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+
+        self._mouth_image_ids = [img_id for img_id in current_image_ids if img_id]
+        self._mouth_image_list = QListWidget()
+        self._mouth_image_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._mouth_image_list.setStyleSheet(
+            f"color: {TEXT}; background: {SURF2}; border: 1px solid {BORDER};"
+        )
+        self._mouth_image_list.setMinimumHeight(110)
+        v.addWidget(self._mouth_image_list)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(6)
+        pick_btn = _btn("Add Existing")
+        pick_btn.clicked.connect(self._pick_mouth_image)
+        browse_btn = _btn("Browse...")
+        browse_btn.clicked.connect(self._browse_mouth_image)
+        remove_btn = _btn("Remove")
+        remove_btn.clicked.connect(self._remove_mouth_image)
+        btn_row.addWidget(pick_btn)
+        btn_row.addWidget(browse_btn)
+        btn_row.addWidget(remove_btn)
+        v.addLayout(btn_row)
+
+        hint = QLabel("Cycles as: base -> shape 1 -> base -> shape 2 -> ...")
+        hint.setStyleSheet(f"color: {DIM}; font-size: 10px;")
+        v.addWidget(hint)
+
+        self._refresh_mouth_image_list()
+        return container
+
+    def _register_image_path(self, path: str) -> RegisteredImage:
+        name = os.path.splitext(os.path.basename(path))[0]
+        img = RegisteredImage(name=name, path=path, category="character")
+        self.project.images.append(img)
+        return img
+
+    def _image_choice_entries(self) -> list[tuple[str, RegisteredImage]]:
+        entries: list[tuple[str, RegisteredImage]] = []
+        for img in self.project.images:
+            suffix = os.path.basename(img.path) if img.path else img.id
+            entries.append((f"{img.name} [{suffix}]", img))
+        return entries
+
+    def _pick_project_image(self, title: str) -> RegisteredImage | None:
+        entries = self._image_choice_entries()
+        choices = [label for label, _img in entries]
+        choice, ok = QInputDialog.getItem(self, title, "Select image:", choices, 0, False)
+        if not ok:
+            return None
+        for label, img in entries:
+            if label == choice:
+                return img
+        return None
+
+    def _refresh_alt_image_label(self):
+        if not hasattr(self, "_alt_image_label"):
+            return
+        if self._alt_image_id:
+            img = self.project.get_image(self._alt_image_id)
+            self._alt_image_label.setText(img.name if img else f"(missing) {self._alt_image_id}")
+        else:
+            self._alt_image_label.setText("(none)")
+
+    def _refresh_mouth_image_list(self):
+        if not hasattr(self, "_mouth_image_list"):
+            return
+        self._mouth_image_list.clear()
+        for idx, image_id in enumerate(self._mouth_image_ids):
+            img = self.project.get_image(image_id)
+            label = img.name if img else f"(missing) {image_id}"
+            self._mouth_image_list.addItem(f"{idx + 1}. {label}")
+
+    def _browse_alt_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Alternate Image", "", "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not path:
+            return
+        img = self._register_image_path(path)
+        self._alt_image_id = img.id
+        self._refresh_alt_image_label()
+
+    def _pick_alt_image(self):
+        if not self.project.images:
+            QMessageBox.information(self, "No Images", "No registered images yet. Use Browse to add one.")
+            return
+        img = self._pick_project_image("Pick Image")
+        if not img:
+            return
+        self._alt_image_id = img.id
+        self._refresh_alt_image_label()
+
+    def _browse_mouth_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Mouth Shape", "", "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if not path:
+            return
+        img = self._register_image_path(path)
+        self._mouth_image_ids.append(img.id)
+        self._refresh_mouth_image_list()
+        self._mouth_image_list.setCurrentRow(len(self._mouth_image_ids) - 1)
+
+    def _pick_mouth_image(self):
+        if not self.project.images:
+            QMessageBox.information(self, "No Images", "No registered images yet. Use Browse to add one.")
+            return
+        img = self._pick_project_image("Pick Mouth Shape")
+        if not img:
+            return
+        self._mouth_image_ids.append(img.id)
+        self._refresh_mouth_image_list()
+        self._mouth_image_list.setCurrentRow(len(self._mouth_image_ids) - 1)
+
+    def _remove_mouth_image(self):
+        if not hasattr(self, "_mouth_image_list"):
+            return
+        row = self._mouth_image_list.currentRow()
+        if row < 0 or row >= len(self._mouth_image_ids):
+            return
+        self._mouth_image_ids.pop(row)
+        self._refresh_mouth_image_list()
+        if self._mouth_image_ids:
+            self._mouth_image_list.setCurrentRow(min(row, len(self._mouth_image_ids) - 1))
+
+    def _build_ui(self):
+        layout = QFormLayout(self)
+        layout.setSpacing(8)
+        all_layers = self._collect_layers(self.asset.root_layers)
+
+        if self.mode == "blink":
+            cfg = self.asset.blink
+            self.enabled_cb = QCheckBox("Enabled")
+            self.enabled_cb.setChecked(cfg.enabled)
+            layout.addRow(self.enabled_cb)
+
+            self.layer_combo = QComboBox()
+            for lid, lname in all_layers:
+                self.layer_combo.addItem(lname, lid)
+            idx = self.layer_combo.findData(cfg.layer_id)
+            if idx >= 0:
+                self.layer_combo.setCurrentIndex(idx)
+            layout.addRow("Target Layer:", self.layer_combo)
+            layout.addRow("Alt Image (closed):", self._make_single_image_row(cfg.alt_image_id))
+
+            self.interval_min_spin = _make_spin(cfg.interval_min, 0.1, 30.0, 0.1)
+            layout.addRow("Interval Min (s):", self.interval_min_spin)
+            self.interval_max_spin = _make_spin(cfg.interval_max, 0.1, 30.0, 0.1)
+            layout.addRow("Interval Max (s):", self.interval_max_spin)
+            self.duration_spin = _make_spin(cfg.blink_duration, 0.01, 2.0, 0.01, 2)
+            layout.addRow("Blink Duration (s):", self.duration_spin)
+            self.hook_mode_combo = self._make_hook_mode_combo(getattr(cfg, "node_hook_mode", "builtin"))
+            layout.addRow("Hook Mode:", self.hook_mode_combo)
+
+        elif self.mode == "mouth":
+            cfg = self.asset.mouth
+            self.enabled_cb = QCheckBox("Enabled")
+            self.enabled_cb.setChecked(cfg.enabled)
+            layout.addRow(self.enabled_cb)
+
+            self.layer_combo = QComboBox()
+            for lid, lname in all_layers:
+                self.layer_combo.addItem(lname, lid)
+            idx = self.layer_combo.findData(cfg.layer_id)
+            if idx >= 0:
+                self.layer_combo.setCurrentIndex(idx)
+            layout.addRow("Target Layer:", self.layer_combo)
+
+            current_image_ids = cfg.image_ids or ([cfg.alt_image_id] if cfg.alt_image_id else [])
+            layout.addRow("Mouth Shapes:", self._make_mouth_images_row(current_image_ids))
+            self.cycle_spin = _make_spin(cfg.cycle_speed, 0.01, 2.0, 0.01, 2)
+            layout.addRow("Cycle Speed (s):", self.cycle_spin)
+            self.hook_mode_combo = self._make_hook_mode_combo(getattr(cfg, "node_hook_mode", "builtin"))
+            layout.addRow("Hook Mode:", self.hook_mode_combo)
+
+        elif self.mode == "idle":
+            cfg = self.asset.idle_breathing
+            self.enabled_cb = QCheckBox("Enabled")
+            self.enabled_cb.setChecked(cfg.enabled)
+            layout.addRow(self.enabled_cb)
+
+            self.layer_combo = QComboBox()
+            self.layer_combo.addItem("(Root - all layers)", "")
+            for lid, lname in all_layers:
+                self.layer_combo.addItem(lname, lid)
+            idx = self.layer_combo.findData(cfg.layer_id)
+            if idx >= 0:
+                self.layer_combo.setCurrentIndex(idx)
+            layout.addRow("Target Layer:", self.layer_combo)
+
+            self.scale_spin = _make_spin(cfg.scale_amount, 0.001, 0.5, 0.005, 3)
+            layout.addRow("Scale Amount:", self.scale_spin)
+            self.speed_spin = _make_spin(cfg.speed, 0.5, 20.0, 0.5)
+            layout.addRow("Cycle Speed (s):", self.speed_spin)
+            self.children_cb = QCheckBox("Affect Children")
+            self.children_cb.setChecked(cfg.affect_children)
+            layout.addRow(self.children_cb)
+            self.hook_mode_combo = self._make_hook_mode_combo(getattr(cfg, "node_hook_mode", "builtin"))
+            layout.addRow("Hook Mode:", self.hook_mode_combo)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    def apply(self):
+        if self.mode == "blink":
+            cfg = self.asset.blink
+            cfg.enabled = self.enabled_cb.isChecked()
+            cfg.layer_id = self.layer_combo.currentData() or ""
+            cfg.alt_image_id = self._alt_image_id
+            cfg.interval_min = self.interval_min_spin.value()
+            cfg.interval_max = self.interval_max_spin.value()
+            cfg.blink_duration = self.duration_spin.value()
+            cfg.node_hook_mode = self.hook_mode_combo.currentData() or "builtin"
+        elif self.mode == "mouth":
+            cfg = self.asset.mouth
+            cfg.enabled = self.enabled_cb.isChecked()
+            cfg.layer_id = self.layer_combo.currentData() or ""
+            cfg.image_ids = [img_id for img_id in self._mouth_image_ids if img_id]
+            cfg.alt_image_id = cfg.image_ids[0] if cfg.image_ids else None
+            cfg.cycle_speed = self.cycle_spin.value()
+            cfg.node_hook_mode = self.hook_mode_combo.currentData() or "builtin"
+        elif self.mode == "idle":
+            cfg = self.asset.idle_breathing
+            cfg.enabled = self.enabled_cb.isChecked()
+            cfg.layer_id = self.layer_combo.currentData() or ""
+            cfg.scale_amount = self.scale_spin.value()
+            cfg.speed = self.speed_spin.value()
+            cfg.affect_children = self.children_cb.isChecked()
+            cfg.node_hook_mode = self.hook_mode_combo.currentData() or "builtin"
+
+
+class MacroExportDialog(QDialog):
+    """Prompt for export name and playback FPS."""
+
+    def __init__(self, default_name: str, default_fps: int = 12, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export .ani Spritesheet")
+        layout = QFormLayout(self)
+
+        self.name_edit = QLineEdit(default_name)
+        self.name_edit.selectAll()
+        layout.addRow("Export Name:", self.name_edit)
+
+        self.fps_spin = QSpinBox()
+        self.fps_spin.setRange(1, 60)
+        self.fps_spin.setValue(default_fps)
+        layout.addRow("FPS:", self.fps_spin)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    def values(self) -> tuple[str, int]:
+        return self.name_edit.text().strip(), self.fps_spin.value()
+
+
 class PaperDollTab(QWidget):
     """Paper Doll editor tab, integrates into the main app tab bar."""
 
@@ -587,6 +931,7 @@ class PaperDollTab(QWidget):
         # Mouth state
         self._mouth_open: bool = False
         self._mouth_next_toggle: float = 0.0
+        self._mouth_shape_index: int = 0
         # Track temp image swaps so canvas can apply them
         self._preview_image_swaps: dict[str, str] = {}  # layer_id -> temp image_id
         # Track temp scale offsets for breathing
@@ -605,6 +950,27 @@ class PaperDollTab(QWidget):
         else:
             self._current_asset = None
         self._refresh_all()
+
+    def restyle(self, c: dict):
+        global DARK, PANEL, SURFACE, SURF2, BORDER, ACCENT, TEXT, DIM
+        old = _theme_snapshot()
+        DARK = c.get("DARK", DARK)
+        PANEL = c.get("PANEL", PANEL)
+        SURFACE = c.get("SURFACE", SURFACE)
+        SURF2 = c.get("SURFACE2", SURF2)
+        BORDER = c.get("BORDER", BORDER)
+        ACCENT = c.get("ACCENT", ACCENT)
+        TEXT = c.get("TEXT", TEXT)
+        DIM = c.get("TEXT_DIM", DIM)
+        replace_widget_theme_colors(self, old, _theme_snapshot())
+
+        self.canvas.setBackgroundBrush(QColor(DARK))
+        self.canvas.setStyleSheet(f"border: none; background: {DARK};")
+        self.timeline.setStyleSheet(f"background: {PANEL}; border-top: 2px solid {BORDER};")
+        self.timeline.keyframe_track.update()
+        self.timeline.update()
+        self.canvas.viewport().update()
+        self.update()
 
     # ── UI Build ───────────────────────────────────────────────
 
@@ -685,13 +1051,14 @@ class PaperDollTab(QWidget):
 
         # RIGHT: Properties & Macros (scrollable)
         right_scroll = QScrollArea()
-        right_scroll.setFixedWidth(290)
+        right_scroll.setFixedWidth(360)
+        right_scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         right_scroll.setWidgetResizable(True)
         right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         right_scroll.setStyleSheet(f"background: {PANEL}; border-left: 1px solid {BORDER};")
         right_panel = QWidget()
         right_vbox = QVBoxLayout(right_panel)
-        right_vbox.setContentsMargins(8, 8, 8, 8)
+        right_vbox.setContentsMargins(6, 8, 6, 8)
 
         # -- Layer name --
         right_vbox.addWidget(_section("Selected Layer"))
@@ -758,8 +1125,10 @@ class PaperDollTab(QWidget):
         self.btn_preview_blink = _btn("▶ Preview", icon_style=True)
         self.btn_preview_blink.setCheckable(True)
         self.btn_preview_blink.toggled.connect(self._toggle_preview_blink)
-        blink_row.addWidget(self.btn_config_blink)
-        blink_row.addWidget(self.btn_preview_blink)
+        self.btn_config_blink.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_preview_blink.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        blink_row.addWidget(self.btn_config_blink, 1)
+        blink_row.addWidget(self.btn_preview_blink, 1)
         right_vbox.addLayout(blink_row)
 
         mouth_row = QHBoxLayout()
@@ -769,8 +1138,10 @@ class PaperDollTab(QWidget):
         self.btn_preview_talk = _btn("▶ Preview", icon_style=True)
         self.btn_preview_talk.setCheckable(True)
         self.btn_preview_talk.toggled.connect(self._toggle_preview_talk)
-        mouth_row.addWidget(self.btn_config_mouth)
-        mouth_row.addWidget(self.btn_preview_talk)
+        self.btn_config_mouth.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_preview_talk.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        mouth_row.addWidget(self.btn_config_mouth, 1)
+        mouth_row.addWidget(self.btn_preview_talk, 1)
         right_vbox.addLayout(mouth_row)
 
         idle_row = QHBoxLayout()
@@ -780,8 +1151,10 @@ class PaperDollTab(QWidget):
         self.btn_preview_idle = _btn("▶ Preview", icon_style=True)
         self.btn_preview_idle.setCheckable(True)
         self.btn_preview_idle.toggled.connect(self._toggle_preview_idle)
-        idle_row.addWidget(self.btn_config_idle)
-        idle_row.addWidget(self.btn_preview_idle)
+        self.btn_config_idle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_preview_idle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        idle_row.addWidget(self.btn_config_idle, 1)
+        idle_row.addWidget(self.btn_preview_idle, 1)
         right_vbox.addLayout(idle_row)
 
         # -- Macros --
@@ -800,10 +1173,18 @@ class PaperDollTab(QWidget):
         self.btn_rename_macro.clicked.connect(self._rename_macro)
         self.btn_delete_macro = _btn("Delete")
         self.btn_delete_macro.clicked.connect(self._delete_macro)
-        macro_btns.addWidget(self.btn_new_macro)
-        macro_btns.addWidget(self.btn_rename_macro)
-        macro_btns.addWidget(self.btn_delete_macro)
+        self.btn_new_macro.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_rename_macro.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_delete_macro.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        macro_btns.addWidget(self.btn_new_macro, 2)
+        macro_btns.addWidget(self.btn_rename_macro, 1)
+        macro_btns.addWidget(self.btn_delete_macro, 1)
         right_vbox.addLayout(macro_btns)
+
+        self.btn_export_macro_ani = _btn("Export .ani Spritesheet")
+        self.btn_export_macro_ani.clicked.connect(self._export_current_macro_ani)
+        self.btn_export_macro_ani.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        right_vbox.addWidget(self.btn_export_macro_ani)
 
         # Macro duration
         dur_row = QHBoxLayout()
@@ -1258,6 +1639,7 @@ class PaperDollTab(QWidget):
         self._preview_talk = checked
         if checked:
             self._mouth_open = False
+            self._mouth_shape_index = 0
             self._mouth_next_toggle = self._preview_time
         else:
             if self._current_asset and self._current_asset.mouth.layer_id:
@@ -1274,7 +1656,7 @@ class PaperDollTab(QWidget):
         # ── Idle breathing ──
         if self._preview_idle:
             cfg = self._current_asset.idle_breathing
-            if cfg.enabled and cfg.speed > 0:
+            if cfg.enabled and cfg.speed > 0 and getattr(cfg, "node_hook_mode", "builtin") != "replace":
                 phase = (self._preview_time / cfg.speed) * math.pi * 2
                 offset = math.sin(phase) * cfg.scale_amount
                 target_id = cfg.layer_id if cfg.layer_id else None
@@ -1291,7 +1673,12 @@ class PaperDollTab(QWidget):
         # ── Blink ──
         if self._preview_blink:
             cfg = self._current_asset.blink
-            if cfg.enabled and cfg.layer_id and cfg.alt_image_id:
+            if (
+                cfg.enabled
+                and getattr(cfg, "node_hook_mode", "builtin") != "replace"
+                and cfg.layer_id
+                and cfg.alt_image_id
+            ):
                 if self._blink_active:
                     if self._preview_time >= self._blink_end:
                         self._blink_active = False
@@ -1307,14 +1694,25 @@ class PaperDollTab(QWidget):
         # ── Mouth ──
         if self._preview_talk:
             cfg = self._current_asset.mouth
-            if cfg.enabled and cfg.layer_id and cfg.alt_image_id:
+            image_ids = [img_id for img_id in getattr(cfg, "image_ids", []) if img_id]
+            if cfg.enabled and cfg.layer_id and cfg.cycle_speed > 0:
                 if self._preview_time >= self._mouth_next_toggle:
-                    self._mouth_open = not self._mouth_open
                     self._mouth_next_toggle = self._preview_time + cfg.cycle_speed
                     if self._mouth_open:
-                        self._preview_image_swaps[cfg.layer_id] = cfg.alt_image_id
-                    else:
+                        self._mouth_open = False
                         self._preview_image_swaps.pop(cfg.layer_id, None)
+                    else:
+                        self._mouth_open = True
+                        if (
+                            image_ids
+                            and getattr(cfg, "node_hook_mode", "builtin") != "replace"
+                        ):
+                            image_id = image_ids[self._mouth_shape_index % len(image_ids)]
+                            self._preview_image_swaps[cfg.layer_id] = image_id
+                        else:
+                            self._preview_image_swaps.pop(cfg.layer_id, None)
+                        if image_ids:
+                            self._mouth_shape_index = (self._mouth_shape_index + 1) % len(image_ids)
 
         self._refresh_canvas_preview()
 
@@ -1540,6 +1938,347 @@ class PaperDollTab(QWidget):
         self._refresh_canvas()
 
     # ── Refresh helpers ────────────────────────────────────────
+
+    def _iter_layers(self, layers: list[PaperDollLayer]):
+        for layer in layers:
+            yield layer
+            yield from self._iter_layers(layer.children)
+
+    def _default_export_name(self) -> str:
+        asset_name = self._current_asset.name.strip() if self._current_asset else "paperdoll"
+        macro_name = self._current_macro.name.strip() if self._current_macro else "macro"
+        return f"{asset_name}_{macro_name}".strip("_")
+
+    def _sample_macro_pose(self, asset: PaperDollAsset, macro: PaperDollMacro, t: float) -> dict[str, dict]:
+        pose: dict[str, dict] = {}
+        for layer in self._iter_layers(asset.root_layers):
+            pose[layer.id] = {
+                "x": layer.x,
+                "y": layer.y,
+                "rotation": layer.rotation,
+                "scale": layer.scale,
+            }
+
+        by_layer: dict[str, list[PaperDollKeyframe]] = {}
+        for kf in macro.keyframes:
+            by_layer.setdefault(kf.layer_id, []).append(kf)
+
+        for lid, kfs in by_layer.items():
+            if lid not in pose:
+                continue
+            kfs_sorted = sorted(kfs, key=lambda k: k.time)
+            before = None
+            after = None
+            for kf in kfs_sorted:
+                if kf.time <= t:
+                    before = kf
+                if kf.time >= t and after is None:
+                    after = kf
+
+            if before and after and before is not after:
+                span = after.time - before.time
+                frac = (t - before.time) / span if span > 0 else 0.0
+                pose[lid]["x"] = before.x + (after.x - before.x) * frac
+                pose[lid]["y"] = before.y + (after.y - before.y) * frac
+                pose[lid]["rotation"] = before.rotation + (after.rotation - before.rotation) * frac
+                pose[lid]["scale"] = before.scale + (after.scale - before.scale) * frac
+            elif before:
+                pose[lid]["x"] = before.x
+                pose[lid]["y"] = before.y
+                pose[lid]["rotation"] = before.rotation
+                pose[lid]["scale"] = before.scale
+            elif after:
+                pose[lid]["x"] = after.x
+                pose[lid]["y"] = after.y
+                pose[lid]["rotation"] = after.rotation
+                pose[lid]["scale"] = after.scale
+
+        return pose
+
+    def _load_export_pixmaps(self, asset: PaperDollAsset) -> tuple[dict[str, QPixmap], int]:
+        pixmaps: dict[str, QPixmap] = {}
+        valid_count = 0
+        if not self.project:
+            return pixmaps, valid_count
+        for layer in self._iter_layers(asset.root_layers):
+            if not layer.image_id or layer.image_id in pixmaps:
+                continue
+            img = self.project.get_image(layer.image_id)
+            if not img or not img.path or not os.path.isfile(img.path):
+                continue
+            pm = QPixmap(img.path)
+            if pm.isNull():
+                continue
+            pixmaps[layer.image_id] = pm
+            valid_count += 1
+        return pixmaps, valid_count
+
+    def _layer_transform(self, layer: PaperDollLayer, pose: dict[str, dict], parent_tf: QTransform) -> QTransform:
+        state = pose.get(layer.id, {})
+        x = state.get("x", layer.x)
+        y = state.get("y", layer.y)
+        rotation = state.get("rotation", layer.rotation)
+        scale = state.get("scale", layer.scale)
+
+        tf = QTransform()
+        tf.translate(x, y)
+        tf.translate(layer.origin_x, layer.origin_y)
+        tf.rotate(rotation)
+        tf.scale(scale, scale)
+        tf.translate(-layer.origin_x, -layer.origin_y)
+        return tf * parent_tf
+
+    def _accumulate_pose_rect(
+        self,
+        layers: list[PaperDollLayer],
+        pose: dict[str, dict],
+        pixmaps: dict[str, QPixmap],
+        parent_tf: QTransform | None = None,
+    ) -> QRectF | None:
+        if parent_tf is None:
+            parent_tf = QTransform()
+        rect = None
+        for layer in layers:
+            composed = self._layer_transform(layer, pose, parent_tf)
+            pm = pixmaps.get(layer.image_id) if layer.image_id else None
+            if pm and not pm.isNull():
+                local_rect = composed.mapRect(QRectF(0, 0, pm.width(), pm.height()))
+                rect = local_rect if rect is None else rect.united(local_rect)
+            child_rect = self._accumulate_pose_rect(layer.children, pose, pixmaps, composed)
+            if child_rect is not None:
+                rect = child_rect if rect is None else rect.united(child_rect)
+        return rect
+
+    def _render_export_layers(
+        self,
+        painter: QPainter,
+        layers: list[PaperDollLayer],
+        pose: dict[str, dict],
+        pixmaps: dict[str, QPixmap],
+        parent_tf: QTransform,
+    ):
+        for layer in layers:
+            composed = self._layer_transform(layer, pose, parent_tf)
+            pm = pixmaps.get(layer.image_id) if layer.image_id else None
+            if pm and not pm.isNull():
+                painter.save()
+                painter.setTransform(composed, False)
+                painter.drawPixmap(0, 0, pm)
+                painter.restore()
+            self._render_export_layers(painter, layer.children, pose, pixmaps, composed)
+
+    def _render_pose_frame(
+        self,
+        asset: PaperDollAsset,
+        pose: dict[str, dict],
+        pixmaps: dict[str, QPixmap],
+        frame_rect: QRectF,
+    ) -> QImage:
+        width = max(1, int(math.ceil(frame_rect.width())))
+        height = max(1, int(math.ceil(frame_rect.height())))
+        image = QImage(width, height, QImage.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+
+        root_tf = QTransform()
+        root_tf.translate(-frame_rect.left(), -frame_rect.top())
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self._render_export_layers(painter, asset.root_layers, pose, pixmaps, root_tf)
+        painter.end()
+        return image
+
+    def _qimage_to_pil_rgba(self, image: QImage) -> PILImage.Image:
+        image = image.convertToFormat(QImage.Format_RGBA8888)
+        byte_array = QByteArray()
+        buffer = QBuffer(byte_array)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        buffer.close()
+        return PILImage.open(io.BytesIO(bytes(byte_array))).convert("RGBA")
+
+    def _save_quantized_png(self, image: QImage, path: str):
+        img_rgba = self._qimage_to_pil_rgba(image)
+        arr = np.array(img_rgba).astype(np.float32)
+        alpha_channel = arr[:, :, 3:4] / 255.0
+        arr[:, :, :3] *= alpha_channel
+        img_rgba = PILImage.fromarray(arr.astype(np.uint8), "RGBA")
+
+        r, g, b, alpha = img_rgba.split()
+        img_rgb = PILImage.merge("RGB", (r, g, b))
+        img_p = img_rgb.quantize(colors=255, method=PILImage.Quantize.MEDIANCUT)
+
+        data = np.array(img_p, dtype=np.uint8) + 1
+        palette_bytes = img_p.getpalette()
+        new_palette = [0, 0, 0] + palette_bytes[:255 * 3]
+        alpha_arr = np.array(alpha, dtype=np.uint8)
+        data[alpha_arr < 128] = 0
+
+        img_out = PILImage.fromarray(data, mode="P")
+        img_out.putpalette(new_palette)
+        img_out.save(path, "PNG", transparency=0)
+
+    def _build_export_sheet(self, frames: list[QImage], frame_width: int, frame_height: int) -> tuple[QImage, int, int]:
+        total = len(frames)
+        cols = max(1, int(math.ceil(math.sqrt(total))))
+        rows = max(1, int(math.ceil(total / cols)))
+        sheet = QImage(cols * frame_width, rows * frame_height, QImage.Format_ARGB32)
+        sheet.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(sheet)
+        for i, frame in enumerate(frames):
+            row = i // cols
+            col = i % cols
+            painter.drawImage(col * frame_width, row * frame_height, frame)
+        painter.end()
+        return sheet, cols * frame_width, rows * frame_height
+
+    def _collect_export_samples(
+        self,
+        asset: PaperDollAsset,
+        macro: PaperDollMacro,
+        fps: int,
+        pixmaps: dict[str, QPixmap],
+    ) -> tuple[list[dict[str, dict]], QRectF]:
+        duration = max(float(macro.duration), 0.0)
+        frame_count = max(1, int(math.ceil(duration * fps)))
+        poses: list[dict[str, dict]] = []
+        export_rect = None
+
+        for i in range(frame_count):
+            if frame_count == 1 or duration <= 0:
+                t = 0.0
+            else:
+                t = (i / (frame_count - 1)) * duration
+            pose = self._sample_macro_pose(asset, macro, t)
+            poses.append(pose)
+            pose_rect = self._accumulate_pose_rect(asset.root_layers, pose, pixmaps)
+            if pose_rect is not None:
+                export_rect = pose_rect if export_rect is None else export_rect.united(pose_rect)
+
+        if export_rect is None:
+            export_rect = QRectF(0, 0, 1, 1)
+
+        left = math.floor(export_rect.left())
+        top = math.floor(export_rect.top())
+        right = math.ceil(export_rect.right())
+        bottom = math.ceil(export_rect.bottom())
+        aligned = QRectF(left, top, max(1, right - left), max(1, bottom - top))
+        return poses, aligned
+
+    def _refresh_animation_object_editors(self):
+        main_win = self.window()
+        if hasattr(main_win, "obj_tab"):
+            editor = main_win.obj_tab.def_editor
+            if editor._obj is not None:
+                editor.load_object(editor._obj, self.project)
+
+    def _export_current_macro_ani(self):
+        if not self.project or not self._current_asset:
+            QMessageBox.information(self, "No Asset", "Create or select a puppet animation asset first.")
+            return
+        if not self._current_macro:
+            QMessageBox.information(self, "No Macro", "Select a macro to export first.")
+            return
+
+        main_win = self.window()
+        current_project_path = getattr(main_win, "current_project_path", None)
+        if current_project_path is None:
+            QMessageBox.warning(
+                self,
+                "No Project Path",
+                "Please save your game project first before exporting .ani files.",
+            )
+            return
+
+        dlg = MacroExportDialog(self._default_export_name(), default_fps=12, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        export_name, fps = dlg.values()
+        if not export_name:
+            QMessageBox.warning(self, "Missing Name", "Please enter an export name.")
+            return
+        if any(ch in export_name for ch in '<>:"/\\|?*'):
+            QMessageBox.warning(
+                self,
+                "Invalid Name",
+                "Export names cannot contain these characters: <>:\"/\\\\|?*",
+            )
+            return
+
+        pixmaps, valid_count = self._load_export_pixmaps(self._current_asset)
+        if valid_count == 0:
+            QMessageBox.warning(
+                self,
+                "No Images",
+                "The selected puppet asset does not contain any valid source images to export.",
+            )
+            return
+
+        poses, export_rect = self._collect_export_samples(
+            self._current_asset, self._current_macro, fps, pixmaps
+        )
+        frames = [
+            self._render_pose_frame(self._current_asset, pose, pixmaps, export_rect)
+            for pose in poses
+        ]
+
+        project_dir = os.path.dirname(str(current_project_path))
+        anim_dir = os.path.join(project_dir, "animations")
+        os.makedirs(anim_dir, exist_ok=True)
+
+        frame_width = max(1, frames[0].width())
+        frame_height = max(1, frames[0].height())
+        sheet, sheet_width, sheet_height = self._build_export_sheet(frames, frame_width, frame_height)
+
+        sheet_filename = f"{export_name}.png"
+        sheet_path = os.path.join(anim_dir, sheet_filename)
+        self._save_quantized_png(sheet, sheet_path)
+
+        metadata = {
+            "frame_count": len(frames),
+            "frame_width": frame_width,
+            "frame_height": frame_height,
+            "sheet_width": sheet_width,
+            "sheet_height": sheet_height,
+            "fps": fps,
+            "spritesheet_path": sheet_filename,
+            "spritesheet_paths": [sheet_filename],
+            "sheet_count": 1,
+            "frames_per_sheet": len(frames),
+        }
+        meta_path = os.path.join(anim_dir, f"{export_name}.ani")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+
+        self.project.animation_exports = [
+            ani for ani in self.project.animation_exports if ani.name != export_name
+        ]
+        self.project.animation_exports.append(
+            AnimationExport(
+                name=export_name,
+                spritesheet_path=sheet_filename,
+                spritesheet_paths=[sheet_filename],
+                frame_count=len(frames),
+                frame_width=frame_width,
+                frame_height=frame_height,
+                sheet_width=sheet_width,
+                sheet_height=sheet_height,
+                sheet_count=1,
+                frames_per_sheet=len(frames),
+                fps=fps,
+            )
+        )
+
+        self._refresh_animation_object_editors()
+        self._mark_changed()
+
+        QMessageBox.information(
+            self,
+            "Export Complete",
+            f"Exported '{export_name}.ani' to:\n{anim_dir}",
+        )
 
     def _refresh_all(self):
         self._refresh_tree()

@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QMenuBar, QMenu, QDialog, QDialogButtonBox,
     QSpinBox, QCheckBox, QComboBox, QLineEdit, QFormLayout, QGroupBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QColor, QPalette, QAction, QFontDatabase
 from windows_exporter import export_windows_game
 from models import Project, Scene, SCENE_TEMPLATES
@@ -34,6 +34,8 @@ from tab_animation_graph import AnimationGraphTab
 from tab_sfx import TabSfx, SfxPlayer
 from tab_paperdoll import PaperDollTab
 from theme_utils import theme_to_stylesheet, get_default_theme
+from plugin_registry import sync_runtime_modules
+from document_viewer import DocumentViewerDialog
 import json
 from resource_path import resource_path, writable_path
 
@@ -257,7 +259,7 @@ PANEL    = "#16161c"
 SURFACE  = "#1e1e28"
 SURFACE2 = "#26263a"
 BORDER   = "#2e2e42"
-ACCENT   = "#7c6aff"
+ACCENT   = "#4a4860"
 ACCENT2  = "#ff6a9b"
 TEXT     = "#e8e6f0"
 TEXT_DIM  = "#7a7890"
@@ -555,6 +557,8 @@ class MainWindow(QMainWindow):
         self._show_3d_maps = cfg.get("show_3d_maps", False)
         self._show_sfx = cfg.get("show_sfx", False)
         self._show_paperdoll = cfg.get("show_paperdoll", False)
+        self._thumbnail_cache: dict[int, "QPixmap"] = {}
+        self._scene_flow_dialog = None
 
         self.setWindowTitle("MINIGAME ENGINE")
         self.setMinimumSize(1280, 760)
@@ -608,6 +612,10 @@ class MainWindow(QMainWindow):
         theme_action.triggered.connect(self.open_theme_customizer)
         tools_menu.addAction(theme_action)
 
+        flow_action = QAction("Scene Flow…", self)
+        flow_action.triggered.connect(self._open_scene_flow)
+        tools_menu.addAction(flow_action)
+
         # View menu
         view_menu = mb.addMenu("View")
         self.show_explorer_action = QAction("Show Project Explorer", self)
@@ -628,11 +636,27 @@ class MainWindow(QMainWindow):
         self.show_sfx_action.triggered.connect(self._toggle_sfx_tab)
         view_menu.addAction(self.show_sfx_action)
 
-        self.show_paperdoll_action = QAction("Show Layer Animation Tab", self)
+        self.show_paperdoll_action = QAction("Show Puppet Animation Tab", self)
         self.show_paperdoll_action.setCheckable(True)
         self.show_paperdoll_action.setChecked(self._show_paperdoll)
         self.show_paperdoll_action.triggered.connect(self._toggle_paperdoll_tab)
         view_menu.addAction(self.show_paperdoll_action)
+
+        docs_menu = mb.addMenu("Docs")
+        for label, rel_path in [
+            ("Plugin Author Guide", "PLUGIN_AUTHOR_GUIDE.md"),
+            ("Documentation", "DOCUMENTATION.md"),
+            ("Licenses", "LICENSES.md"),
+        ]:
+            action = QAction(label, self)
+            action.triggered.connect(
+                lambda checked=False, t=label, p=rel_path: self._open_bundled_doc(t, p)
+            )
+            docs_menu.addAction(action)
+
+    def _open_bundled_doc(self, title: str, relative_path: str) -> None:
+        dialog = DocumentViewerDialog(title, resource_path(relative_path), self)
+        dialog.exec()
 
     def _toggle_explorer(self, checked: bool):
         """Toggle project explorer visibility."""
@@ -679,7 +703,7 @@ class MainWindow(QMainWindow):
         self._show_paperdoll = checked
         if checked:
             insert_idx = self.tabs.count() - 1
-            self.tabs.insertTab(insert_idx, self.paperdoll_tab, "  Layer Animation")
+            self.tabs.insertTab(insert_idx, self.paperdoll_tab, "  Puppet Animation")
         else:
             idx = self.tabs.indexOf(self.paperdoll_tab)
             if idx >= 0:
@@ -799,7 +823,7 @@ class MainWindow(QMainWindow):
         self.paperdoll_tab = PaperDollTab()
         self.paperdoll_tab.changed.connect(self._mark_unsaved)
         if self._show_paperdoll:
-            self.tabs.addTab(self.paperdoll_tab, "  Layer Animation")
+            self.tabs.addTab(self.paperdoll_tab, "  Puppet Animation")
 
         # Tab 5: Game Data
         self.data_tab = GameDataTab()
@@ -862,6 +886,7 @@ class MainWindow(QMainWindow):
 
     def _reload_project(self):
         """Full reload — called on new/open."""
+        sync_runtime_modules(getattr(self.project, "plugin_registry", None))
         self.data_tab.load_project(self.project)
         self.obj_tab.load_project(self.project)
         self.obj_tab.load_scene(self.project.scenes[0], self.project)
@@ -903,6 +928,57 @@ class MainWindow(QMainWindow):
         elif widget is self.paperdoll_tab:
             self.paperdoll_tab.load_project(self.project)
 
+    def _seed_project_example_plugins(self, project_root: Path) -> None:
+        source_root = Path(__file__).resolve().parent / "plugins"
+        if not source_root.exists():
+            return
+        dest_root = project_root / "plugins"
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+        def _should_refresh_example_file(source_file: Path, dest_file: Path) -> bool:
+            try:
+                src_text = source_file.read_text(encoding="utf-8")
+                dst_text = dest_file.read_text(encoding="utf-8")
+            except Exception:
+                return False
+            if src_text == dst_text:
+                return False
+            if source_file.suffix.lower() == ".md":
+                return True
+            # Upgrade older bundled Calendar example copies without overwriting
+            # unrelated third-party plugins.
+            if source_file.parent.name == "calendar" and source_file.name == "plugin.py":
+                return '"name": "Calendar"' in dst_text
+            return False
+
+        for source_plugin_dir in source_root.iterdir():
+            if not source_plugin_dir.is_dir():
+                continue
+            source_plugin_file = source_plugin_dir / "plugin.py"
+            if not source_plugin_file.is_file():
+                continue
+
+            dest_plugin_dir = dest_root / source_plugin_dir.name
+            dest_plugin_file = dest_plugin_dir / "plugin.py"
+
+            if not dest_plugin_dir.exists():
+                shutil.copytree(source_plugin_dir, dest_plugin_dir)
+                pycache_dir = dest_plugin_dir / "__pycache__"
+                if pycache_dir.exists():
+                    shutil.rmtree(pycache_dir, ignore_errors=True)
+                continue
+
+            dest_plugin_dir.mkdir(parents=True, exist_ok=True)
+            for source_file in source_plugin_dir.iterdir():
+                if not source_file.is_file():
+                    continue
+                dest_file = dest_plugin_dir / source_file.name
+                if not dest_file.exists():
+                    shutil.copy2(source_file, dest_file)
+                    continue
+                if _should_refresh_example_file(source_file, dest_file):
+                    shutil.copy2(source_file, dest_file)
+
     def _set_status(self, msg: str):
         self.status_label.setText(msg)
 
@@ -922,6 +998,29 @@ class MainWindow(QMainWindow):
                 self.maps3d_tab.clear_scene()
             self._refresh()
             self._set_status(f"Scene {index + 1}: {scene.get_summary()}")
+            # Capture thumbnail for scene flow graph after the editor has painted
+            QTimer.singleShot(100, lambda idx=index: self._capture_thumbnail(idx))
+
+    def _capture_thumbnail(self, index: int):
+        """Grab the editor canvas as a thumbnail for the scene flow graph."""
+        try:
+            pixmap = self.editor_tab.grab()
+            thumb = pixmap.scaled(200, 112, Qt.KeepAspectRatioByExpanding,
+                                  Qt.SmoothTransformation)
+            x_off = (thumb.width()  - 200) // 2
+            y_off = (thumb.height() - 112) // 2
+            self._thumbnail_cache[index] = thumb.copy(x_off, y_off, 200, 112)
+        except Exception:
+            pass  # silently fail — placeholder will be shown
+
+    def _open_scene_flow(self):
+        from scene_flow_dialog import SceneFlowDialog
+        if self._scene_flow_dialog is None or not self._scene_flow_dialog.isVisible():
+            self._scene_flow_dialog = SceneFlowDialog(self, self._thumbnail_cache)
+        self._scene_flow_dialog.show()
+        self._scene_flow_dialog.raise_()
+        self._scene_flow_dialog.activateWindow()
+        self._scene_flow_dialog._rebuild()
 
     def _on_scene_tab_selected(self, index: int):
         """Called when the user picks a scene from the Scene Options dropdown.
@@ -1129,6 +1228,8 @@ class MainWindow(QMainWindow):
                     missing_vars.add(a.var_source)
                 if a.bool_name and a.bool_name not in var_names:
                     missing_vars.add(a.bool_name)
+                if getattr(a, "signal_name", "") and getattr(a, "signal_name", "") not in signal_names:
+                    missing_signals.add(getattr(a, "signal_name", ""))
                 _scan_actions(getattr(a, 'sub_actions', []))
                 _scan_actions(getattr(a, 'true_actions', []))
                 _scan_actions(getattr(a, 'false_actions', []))
@@ -1137,6 +1238,8 @@ class MainWindow(QMainWindow):
             for b in behaviors:
                 if b.input_action_name and b.input_action_name not in input_names:
                     missing_inputs.add(b.input_action_name)
+                if b.trigger == "on_signal" and b.bool_var and b.bool_var not in signal_names:
+                    missing_signals.add(b.bool_var)
                 if b.threshold_var and b.threshold_var not in var_names:
                     missing_vars.add(b.threshold_var)
                 if b.timer_var and b.timer_var not in var_names:
@@ -1398,6 +1501,10 @@ class MainWindow(QMainWindow):
             self.current_project_path = Path(path)
             self.unsaved = False
             self._reload_project()
+            plugin_errors = getattr(getattr(self.project, "plugin_registry", None), "errors", [])
+            if plugin_errors:
+                details = "\n".join(f"{plugin_id}: {message}" for plugin_id, message in plugin_errors)
+                QMessageBox.warning(self, "Plugin Warnings", f"Some plugins were skipped:\n\n{details}")
             self._set_status(f"Opened: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Open Failed", f"Could not open project:\n{e}")
@@ -1419,8 +1526,14 @@ class MainWindow(QMainWindow):
 
     def _write_project(self, path: Path) -> bool:
         try:
+            from plugin_registry import scan_plugins
+
+            self._seed_project_example_plugins(path.parent)
+            self.project.project_folder = str(path.parent)
+            self.project.plugin_registry = scan_plugins(path.parent)
             self.project.save(path)
             self.unsaved = False
+            self._reload_project()
             self._refresh()
             self._set_status(f"Saved: {path}")
             return True

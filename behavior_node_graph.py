@@ -6,13 +6,15 @@ from PySide6.QtWidgets import (
     QLabel, QVBoxLayout, QHBoxLayout, QFrame, QSplitter,
     QToolBar, QPushButton, QMenu, QWidget, QScrollArea,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
-    QSizePolicy, QStackedWidget, QInputDialog, QMessageBox,
+    QListWidget, QListWidgetItem,
+    QSizePolicy, QStackedWidget, QInputDialog, QMessageBox, QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, Signal
 from PySide6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont,
     QPainterPath, QPainterPathStroker, QLinearGradient,
 )
+from models import COLLISION_BOX_ROLES, get_behavior_plugin_value, set_behavior_plugin_value
 
 MIN_ZOOM  = 0.25
 MAX_ZOOM  = 3.0
@@ -21,7 +23,7 @@ GRID_SIZE = 20   # snap increment in scene units
 MENU_STYLE = """
     QMenu { background: #1e1e28; color: #e8e6f0; border: 1px solid #2e2e42; font: 11px 'Segoe UI'; }
     QMenu::item { padding: 5px 24px 5px 14px; }
-    QMenu::item:selected { background: #7c6aff; color: #ffffff; }
+    QMenu::item:selected { background: #4a4860; color: #ffffff; }
     QMenu::separator { height: 1px; background: #2e2e42; margin: 3px 0; }
 """
 
@@ -32,12 +34,12 @@ FIELD_STYLE = """
         padding: 3px 6px; font: 11px 'Segoe UI';
     }
     QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-        border-color: #7c6aff;
+        border-color: #4a4860;
     }
     QComboBox::drop-down { border: none; width: 16px; }
     QComboBox QAbstractItemView {
         background: #1e1e28; color: #e8e6f0; border: 1px solid #2e2e42;
-        selection-background-color: #7c6aff;
+        selection-background-color: #4a4860;
     }
     QSpinBox::up-button, QSpinBox::down-button,
     QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
@@ -48,7 +50,7 @@ FIELD_STYLE = """
         width: 13px; height: 13px;
         border: 1px solid #2e2e42; border-radius: 3px; background: #1e1e28;
     }
-    QCheckBox::indicator:checked { background: #7c6aff; border-color: #7c6aff; }
+    QCheckBox::indicator:checked { background: #4a4860; border-color: #4a4860; }
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -71,32 +73,56 @@ OBJECT_TRIGGERS = {
     "on_exit":               "On Zone Exit",
     "on_overlap":            "On Zone Overlap",
     "on_interact_zone":      "On Interact in Zone",
+    "on_object_overlap":     "On Object Overlap",
+    "on_object_overlap_enter":"On Object Overlap Enter",
+    "on_object_overlap_exit": "On Object Overlap Exit",
     "on_signal":             "On Signal",
+    "on_3d_interact":        "On 3D Interact",
     "on_variable_threshold": "On Variable Threshold",
     "on_touch_tap":          "On Touch Tap",
+    "on_touch_swipe":        "On Touch Swipe",
     "on_path_complete":      "On Path Complete",
     "on_animation_finish":   "On Animation Finish",
     "on_animation_frame":    "On Animation Frame",
+    "on_layer_anim_blink":   "On Puppet Blink",
+    "on_layer_anim_talk_step":"On Puppet Talk Step",
+    "on_layer_anim_idle_cycle":"On Puppet Idle Cycle",
+    "on_leave_save_scene":   "On Leave Save Scene",
+    "on_selection":          "On Selection",
+    "on_lua_condition":      "On Lua Condition",
+    "on_keyboard_submit":    "On Keyboard Submit",
+    "on_keyboard_cancel":    "On Keyboard Cancel",
+    "on_confirm_yes":        "On Confirm Yes",
+    "on_confirm_no":         "On Confirm No",
 }
 
 TRIGGER_CATEGORIES = {
     "Input":     ["on_button_pressed","on_button_held","on_button_released","on_input"],
-    "Touch":     ["on_touch_tap"],
+    "Touch":     ["on_touch_tap", "on_touch_swipe"],
     "Timing":    ["on_frame","on_timer","on_timer_variable"],
-    "Scene":     ["on_scene_start","on_scene_end"],
+    "Scene":     ["on_scene_start","on_scene_end","on_leave_save_scene"],
     "Object":    ["on_create","on_destroy"],
     "Zone":      ["on_enter","on_exit","on_overlap","on_interact_zone"],
+    "Collision": ["on_object_overlap","on_object_overlap_enter","on_object_overlap_exit"],
     "Signal":    ["on_signal"],
+    "3D":        ["on_3d_interact"],
     "Variables": ["on_variable_threshold"],
     "Paths":     ["on_path_complete"],
     "Animation": ["on_animation_finish", "on_animation_frame"],
+    "Puppet Animation": ["on_layer_anim_blink", "on_layer_anim_talk_step", "on_layer_anim_idle_cycle"],
+    "Navigation": ["on_selection"],
+    "App Essentials": ["on_keyboard_submit", "on_keyboard_cancel", "on_confirm_yes", "on_confirm_no"],
+    "Advanced":  ["on_lua_condition"],
 }
 
 BUTTON_OPTIONS = ["cross","circle","square","triangle",
                   "dpad_up","dpad_down","dpad_left","dpad_right",
-                  "l","r","start","select"]
+                  "l","r","start","select",
+                  "left_stick_up","left_stick_down","left_stick_left","left_stick_right",
+                  "right_stick_up","right_stick_down","right_stick_left","right_stick_right"]
 
 COMPARE_OPTIONS = ["==","!=",">","<",">=","<="]
+COLLISION_ROLE_OPTIONS = list(COLLISION_BOX_ROLES) + ["Any"]
 
 TRIGGER_FIELDS = {
     "on_button_pressed":     [("button",             "Button",            "combo", {"options": BUTTON_OPTIONS})],
@@ -104,7 +130,7 @@ TRIGGER_FIELDS = {
     "on_button_released":    [("button",             "Button",            "combo", {"options": BUTTON_OPTIONS})],
     "on_timer":              [("interval",           "Interval (frames)", "spin",  {"min":1,"max":9999})],
     "on_timer_variable":     [("timer_var",          "Interval Variable", "text",  {})],
-    "on_signal":             [("signal_name",        "Signal Name",       "text",  {})],
+    "on_signal":             [("signal_name",        "Signal Name",       "signal",  {})],
     "on_input":              [("input_action_name",  "Action Name",       "text",  {})],
     "on_variable_threshold": [("threshold_var",      "Variable",          "text",  {}),
                               ("threshold_compare",  "Condition",         "combo", {"options": COMPARE_OPTIONS}),
@@ -114,29 +140,47 @@ TRIGGER_FIELDS = {
     "on_animation_finish":   [("ani_trigger_object", "Animation Object",  "object", {})],
     "on_animation_frame":    [("ani_trigger_object", "Animation Object",  "object", {}),
                               ("ani_trigger_frame",  "Frame Index",       "spin",   {"min": 0, "max": 9999})],
+    "on_object_overlap":     [("overlap_object_id",  "Target Object",     "object", {}),
+                              ("overlap_source_role","Self Role",         "combo",  {"options": COLLISION_ROLE_OPTIONS, "default": "Hitbox"}),
+                              ("overlap_target_role","Target Role",       "combo",  {"options": COLLISION_ROLE_OPTIONS, "default": "Hurtbox"})],
+    "on_object_overlap_enter":[("overlap_object_id",  "Target Object",     "object", {}),
+                              ("overlap_source_role","Self Role",         "combo",  {"options": COLLISION_ROLE_OPTIONS, "default": "Hitbox"}),
+                              ("overlap_target_role","Target Role",       "combo",  {"options": COLLISION_ROLE_OPTIONS, "default": "Hurtbox"})],
+    "on_object_overlap_exit":[("overlap_object_id",  "Target Object",     "object", {}),
+                              ("overlap_source_role","Self Role",         "combo",  {"options": COLLISION_ROLE_OPTIONS, "default": "Hitbox"}),
+                              ("overlap_target_role","Target Role",       "combo",  {"options": COLLISION_ROLE_OPTIONS, "default": "Hurtbox"})],
+    "on_touch_swipe":        [("swipe_direction",    "Direction",         "combo",  {"options": ["left","right","up","down","any"]}),
+                              ("swipe_min_distance", "Min Distance (px)", "spin",   {"min": 1, "max": 960}),
+                              ("swipe_scope",        "Scope",             "combo",  {"options": ["screen","object"]})],
+    "on_lua_condition":      [("lua_condition",      "Condition (Lua expression — evaluated every frame)", "text", {})],
+    "on_keyboard_submit":    [("request_id",         "Prompt Tag (Optional)", "text",   {})],
+    "on_keyboard_cancel":    [("request_id",         "Prompt Tag (Optional)", "text",   {})],
+    "on_confirm_yes":        [("request_id",         "Prompt Tag (Optional)", "text",   {})],
+    "on_confirm_no":         [("request_id",         "Prompt Tag (Optional)", "text",   {})],
 }
 
 ACTION_PALETTE = {
     "Objects: Visibility":  [("show_object","Show Object"),("hide_object","Hide Object"),("set_opacity","Set Opacity"),("fade_in_object","Fade Object In"),("fade_out_object","Fade Object Out")],
-    "Objects: Transform":   [("move_to","Move To Position"),("move_by","Move By Offset"),("slide_to","Slide To Position"),("slide_by","Slide By Offset"),("return_to_start","Return to Start"),("set_scale","Set Scale"),("scale_to","Scale To"),("set_rotation","Set Rotation"),("rotate_to","Rotate To"),("rotate_by","Rotate By"),("spin","Spin"),("stop_spin","Stop Spinning")],
-    "Objects: Animation":   [("play_anim","Play Animation"),("stop_anim","Stop Animation"),("set_frame","Set Frame"),("set_anim_speed","Set Animation Speed")],
+    "Objects: Transform":   [("move_to","Move To Position"),("move_to_variable","Move To Variables"),("move_by","Move By Offset"),("slide_to","Slide To Position"),("slide_by","Slide By Offset"),("return_to_start","Return to Start"),("set_scale","Set Scale"),("scale_to","Scale To"),("set_rotation","Set Rotation"),("rotate_to","Rotate To"),("rotate_by","Rotate By"),("spin","Spin"),("stop_spin","Stop Spinning")],
+    "Objects: Animation":   [("play_anim","Play Animation"),("stop_anim","Stop Animation"),("set_frame","Set Frame"),("advance_frame","Advance Animation Frame"),("set_anim_speed","Set Animation Speed"),("ani_switch_slot","Switch Animation Slot"),("ani_set_flip","Set Flip")],
     "Objects: Lifecycle":   [("create_object","Create Object"),("destroy_object","Destroy Object"),("destroy_all_type","Destroy All of Type"),("enable_interact","Enable Interaction"),("disable_interact","Disable Interaction"),("attach_to","Attach to Object"),("detach","Detach from Parent")],
     "Objects: Groups":      [("add_to_group","Add Object to Group"),("remove_from_group","Remove Object from Group"),("call_action_on_group","Call Action on Group"),("if_in_group","If Object in Group")],
     "Scene Flow":        [("go_to_scene","Go to Scene"),("go_to_next","Go to Next Scene"),("go_to_prev","Go to Previous Scene"),("go_to_random","Go to Random Scene"),("restart_scene","Restart Scene"),("quit_game","Quit Game")],
     "State Machine":     [("go_to_state","Go to State")],
     "Control Flow":      [("loop","Loop"),("cancel_all","Cancel All Actions")],
+    "Input":             [("if_button_pressed","If Button Pressed"),("if_button_held","If Button Held"),("if_button_released","If Button Released")],
     "Timing":            [("wait","Wait"),("wait_random","Wait Random"),("wait_for_input","Wait for Input")],
     "Screen":            [("fade_in","Fade In"),("fade_out","Fade Out"),("fade_to_color","Fade to Color"),("flash_screen","Flash Screen"),("shake_screen","Shake Screen")],
     "Camera":            [("camera_move_to","Move Camera To"),("camera_offset","Offset Camera"),("camera_follow","Follow Object"),("camera_stop_follow","Stop Following"),("camera_reset","Reset Camera"),("camera_shake","Shake Camera"),("camera_set_zoom","Set Camera Zoom"),("camera_zoom_to","Zoom Camera To")],
-    "Animation":         [("ani_play","Play Animation"),("ani_pause","Pause Animation"),("ani_stop","Stop Animation"),("ani_set_frame","Set Frame"),("ani_set_speed","Set Speed"),("ani_switch_slot","Switch Animation Slot"),("ani_set_flip","Set Flip")],
-    "Background":        [("set_background","Set Background Image"),("scroll_bg","Scroll Background"),("stop_scroll_bg","Stop Background Scroll")],
-    "Layers":            [("layer_show","Show Layer"),("layer_hide","Hide Layer"),("layer_set_image","Set Layer Image")],
+    "Animation":         [("ani_play","Play Animation"),("ani_pause","Pause Animation"),("ani_stop","Stop Animation"),("ani_set_frame","Set Frame"),("ani_advance_frame","Advance Object Frame"),("ani_set_speed","Set Speed")],
+    "Layers":            [("layer_show","Show Layer"),("layer_hide","Hide Layer"),("layer_set_image","Set Layer Image"),("layer_start_scroll","Start Scroll"),("layer_stop_scroll","Stop Scroll")],
     "Music & Sound":     [("play_music","Play Music"),("stop_music","Stop Music"),("pause_music","Pause Music"),("resume_music","Resume Music"),("set_music_volume","Set Music Volume"),("play_sfx","Play Sound Effect"),("stop_all_sounds","Stop All Sounds")],
     "Dialogue":          [("show_dialogue","Show Dialogue Box"),("hide_dialogue","Hide Dialogue Box"),("set_speaker","Set Speaker Name"),("set_speaker_color","Set Speaker Color"),("set_dialogue_line","Set Dialogue Line"),("clear_dialogue","Clear Dialogue"),("wait_for_advance","Wait for Dialogue Advance")],
     "Choice Menu":       [("show_choices","Show Choice Menu"),("hide_choices","Hide Choice Menu"),("set_choice_text","Set Choice Text"),("set_choice_dest","Set Choice Destination")],
     "Variables & Flags": [
         ("set_variable",              "Set Variable"),
         ("change_variable",           "Change Variable"),
+        ("increment_var",             "Increment Variable"),
         ("set_variable_from_variable","Copy Variable"),
         ("change_variable_by_variable","Math with Variable"),
         ("evaluate_expression",       "Evaluate Expression"),
@@ -149,15 +193,208 @@ ACTION_PALETTE = {
         ("random_set",                "Set Variable Random"),
     ],
     "Inventory":         [("add_item","Add Item"),("remove_item","Remove Item"),("if_has_item","If Has Item"),("show_inventory","Show Inventory"),("hide_inventory","Hide Inventory")],
-    "Save & Load":       [("save_game","Save Game"),("load_game","Load Game"),("delete_save","Delete Save"),("if_save_exists","If Save Exists")],
+    "Save & Load":       [("open_save_menu","Open Save Menu"),("auto_save","Auto Save"),("load_save","Load Save Slot")],
     "Signals":           [("emit_signal","Emit Signal")],
     "Movement":          [("four_way_movement","4-Way Movement"),("four_way_movement_collide","4-Way Movement (Collide)"),("eight_way_movement","8-Way Movement"),("eight_way_movement_collide","8-Way Movement (Collide)"),("two_way_movement","2-Way Movement"),("two_way_movement_collide","2-Way Movement (Collide)"),("fire_bullet","Fire Bullet"),("set_velocity","Set Velocity"),("add_velocity","Add Velocity"),("jump","Jump")],
+    "Collision":         [("collision_set_cell","Set Collision Cell"),("collision_toggle_cell","Toggle Collision Cell"),("collision_get_cell","Get Collision Cell"),("if_object_overlap","If Object Overlap"),("get_object_overlap_count","Get Object Overlap Count")],
+    "App Essentials":    [("open_keyboard","Open Keyboard"),("show_confirm","Show Confirm"),("show_message","Show Message"),("store_current_date","Store Current Date"),("store_current_time","Store Current Time")],
     "GUI":               [("set_label_text","Set Label Text"),("set_label_text_var","Set Label Text (Variable)"),("set_label_color","Set Label Color"),("set_label_size","Set Label Font Size")],
-    "Debug":             [("log_message","Log Message"),("show_debug","Show Debug Overlay")],
+    "Debug":             [("log_message","Log Message")],
     "Paths":             [("follow_path","Follow Path"),("stop_path","Stop Following Path"),("resume_path","Resume Following Path"),("set_path_speed","Set Path Speed")],
-    "Layer Animation":   [("layer_anim_play_macro","Play Macro"),("layer_anim_stop_macro","Stop Macro"),("layer_anim_set_blink","Set Blink"),("layer_anim_set_idle","Set Idle Breathing"),("layer_anim_set_talk","Set Talk"),("layer_anim_talk_for","Talk For Duration")],
+    "Puppet Animation":   [("layer_anim_play_macro","Play Macro"),("layer_anim_stop_macro","Stop Macro"),("layer_anim_set_blink","Set Blink"),("layer_anim_set_idle","Set Idle Breathing"),("layer_anim_set_talk","Set Talk"),("layer_anim_talk_for","Talk For Duration"),("vn_dialog_sound","VN Dialog Sound"),("vn_tw_sound","VN Typewriter Sound")],
     "Getters":           [("get_position","Get Object Position"),("get_distance","Get Distance to Object"),("if_distance","If Distance to Object")],
     "Grid":              [("grid_place_at","Place on Grid"),("grid_snap_to","Snap to Grid"),("grid_get_cell","Get Grid Cell"),("grid_get_at","Get Object at Cell"),("grid_is_empty","If Cell is Empty"),("grid_get_neighbors","Get Neighbors"),("grid_for_each","For Each Cell"),("grid_clear_cell","Clear Cell"),("grid_clear_all","Clear Entire Grid"),("grid_move","Grid Move"),("grid_swap","Grid Swap")],
+    "Navigation":        [("set_focus","Set Focus"),("activate_focused_object","Activate Focused Object")],
+    "3D Scene":          [("open_door","Open Door"),("close_door","Close Door"),("toggle_door","Toggle Door"),("move_3d_object","Move 3D Object"),("set_3d_object_visible","Set 3D Object Visible"),("check_player_tile","Check Player Tile")],
+    "3D Actors":         [("actor3d_start_patrol","Start 3D Patrol"),("actor3d_stop_patrol","Stop 3D Patrol"),("actor3d_resume_patrol","Resume 3D Patrol"),("actor3d_set_patrol_enabled","Set 3D Patrol Enabled"),("actor3d_set_state","Set 3D Actor State"),("actor3d_set_angle","Set 3D Actor Angle"),("actor3d_face_player","Face Player"),("actor3d_set_alive","Set 3D Actor Alive"),("actor3d_kill","Kill 3D Actor"),("actor3d_set_blocking","Set 3D Actor Blocking"),("actor3d_set_interactable","Set 3D Actor Interactable")],
+    "3D Queries":        [("actor3d_get_distance_to_player","Get Distance To Player"),("if_actor3d_player_in_range","If Player In Range"),("if_actor3d_player_in_sight","If Player In Sight"),("if_actor3d_alive","If 3D Actor Alive")],
+    "Advanced":          [("lua_code","Lua Code")],
+}
+
+BASE_ACTION_CATEGORY_ORDER = tuple(ACTION_PALETTE.keys())
+
+ACTION_CATEGORY_DISPLAY_NAMES = {
+    "Objects: Lifecycle": "Objects: Management",
+    "Objects: Groups": "Objects: Management",
+    "Timing": "Control Flow",
+    "Signals": "Control Flow",
+    "Getters": "Control Flow",
+    "Debug": "Advanced",
+}
+
+TOP_ACTION_CATEGORY_ORDER = [
+    "Objects: Visibility",
+    "Objects: Transform",
+    "Objects: Animation",
+    "Objects: Management",
+    "App Essentials",
+    "Device",
+    "Storage",
+    "Engine Primitives/Core",
+    "Engine Primitives/World",
+    "Engine Primitives/Combat",
+    "Variables & Flags",
+    "Grid",
+    "Movement",
+    "Puppet Animation",
+    "Camera",
+    "3D Scene",
+    "3D Actors",
+    "3D Queries",
+]
+
+BUILTIN_TRIGGER_HELP = {
+    "on_button_pressed": "Fires once the frame a specific button is first pressed.",
+    "on_button_held": "Fires every frame while a specific button is held down.",
+    "on_button_released": "Fires once the frame a specific button is released.",
+    "on_input": "Fires when a named input action from Game Data triggers.",
+    "on_frame": "Runs every single frame. Use for continuous logic.",
+    "on_timer": "Fires on a repeating interval measured in frames.",
+    "on_timer_variable": "Repeats using the interval stored in the named variable.",
+    "on_scene_start": "Fires once when this scene first loads.",
+    "on_scene_end": "Fires once just before this scene ends.",
+    "on_leave_save_scene": "Fires when the generated save/load scene is closing and gameplay is resuming.",
+    "on_create": "Fires once when this object is spawned into the scene.",
+    "on_destroy": "Fires once just before this object is destroyed.",
+    "on_enter": "Fires once when a target first overlaps this zone.",
+    "on_exit": "Fires once when a target stops overlapping this zone.",
+    "on_overlap": "Fires every frame while a target overlaps this zone.",
+    "on_interact_zone": "Fires when the player presses interact while inside this zone.",
+    "on_object_overlap": "Fires every frame while the chosen overlap target is touching this object.",
+    "on_object_overlap_enter": "Fires once when the chosen overlap target first touches this object.",
+    "on_object_overlap_exit": "Fires once when the chosen overlap target stops touching this object.",
+    "on_signal": "Fires when a named signal is emitted anywhere in the scene.",
+    "on_3d_interact": "Fires when the player interacts with this 3D object.",
+    "on_variable_threshold": "Fires when a variable meets the chosen threshold comparison.",
+    "on_touch_tap": "Fires when the front touchscreen is tapped inside this object's bounds.",
+    "on_touch_swipe": "Fires when a touch gesture ends and qualifies as a swipe.",
+    "on_path_complete": "Fires when an object finishes following the named path.",
+    "on_animation_finish": "Fires once when a non-looping Animation object reaches its last frame.",
+    "on_animation_frame": "Fires each time an Animation object reaches the chosen frame index.",
+    "on_layer_anim_blink": "Fires when this LayerAnimation object produces a blink hook event.",
+    "on_layer_anim_talk_step": "Fires when this LayerAnimation object advances to the next talk-step hook event.",
+    "on_layer_anim_idle_cycle": "Fires when this LayerAnimation object completes an idle-breathing cycle hook event.",
+    "on_selection": "Fires once when this object becomes the focused navigation target.",
+    "on_keyboard_submit": "Fires when the keyboard prompt is submitted. Leave Prompt Tag blank unless you need this trigger to react to one specific keyboard prompt.",
+    "on_keyboard_cancel": "Fires when the keyboard prompt is canceled. Leave Prompt Tag blank unless you need this trigger to react to one specific keyboard prompt.",
+    "on_confirm_yes": "Fires when a YES/NO prompt is answered with YES. Leave Prompt Tag blank unless you need this trigger to react to one specific confirm prompt.",
+    "on_confirm_no": "Fires when a YES/NO prompt is answered with NO or canceled. Leave Prompt Tag blank unless you need this trigger to react to one specific confirm prompt.",
+    "on_lua_condition": "Evaluates the Lua condition every frame and fires when it returns true.",
+}
+
+BUILTIN_ACTION_HELP = {
+    "go_to_scene": "Jump to a specific scene by number.",
+    "go_to_next": "Advance to the next scene in the list.",
+    "go_to_prev": "Go back to the previous scene.",
+    "go_to_random": "Jump to a random scene from a list you specify.",
+    "restart_scene": "Reload and restart the current scene from the beginning.",
+    "quit_game": "Exit the application.",
+    "wait": "Pause execution for N seconds before continuing.",
+    "wait_for_input": "Pause until the player presses any button.",
+    "fade_in": "Fade the screen in from black over N seconds.",
+    "fade_out": "Fade the screen out to black over N seconds.",
+    "fade_to_color": "Fade to a specific color over N seconds.",
+    "flash_screen": "Briefly flash the screen a color.",
+    "shake_screen": "Shake the screen for N seconds with a given intensity.",
+    "camera_move_to": "Move the camera center to an absolute X, Y position.",
+    "camera_offset": "Move the camera relative to its current position.",
+    "camera_follow": "Make the camera follow a specific object.",
+    "camera_stop_follow": "Stop the camera from following any object.",
+    "camera_reset": "Return camera to default center position (480, 272).",
+    "camera_shake": "Shake the screen with a given intensity and duration.",
+    "camera_set_zoom": "Instantly set the camera zoom level (1.0 = normal).",
+    "camera_zoom_to": "Smoothly tween the camera zoom to a target level.",
+    "ani_play": "Start or resume an animation object.",
+    "ani_pause": "Pause an animation object.",
+    "ani_stop": "Stop and reset an animation object to frame 0.",
+    "ani_set_frame": "Jump to a specific frame.",
+    "ani_set_speed": "Change the playback FPS.",
+    "layer_show": "Make a named Layer component visible.",
+    "layer_hide": "Make a named Layer component invisible.",
+    "layer_set_image": "Swap the image displayed on a named Layer component.",
+    "play_music": "Start playing a registered music track.",
+    "stop_music": "Stop the currently playing music.",
+    "pause_music": "Pause the current music track.",
+    "resume_music": "Resume a paused music track.",
+    "set_music_volume": "Set the music volume to a value between 0 and 100.",
+    "play_sfx": "Play a registered sound effect once.",
+    "stop_all_sounds": "Stop all currently playing sound effects.",
+    "show_dialogue": "Make the VN dialogue box visible.",
+    "hide_dialogue": "Hide the VN dialogue box.",
+    "set_speaker": "Set the name displayed in the dialogue name tag.",
+    "set_speaker_color": "Change the color of the speaker name tag.",
+    "set_dialogue_line": "Set the text for a specific dialogue line slot (1-4).",
+    "clear_dialogue": "Clear the dialogue text and speaker name.",
+    "wait_for_advance": "Pause until the player presses the advance button.",
+    "show_choices": "Display the choice menu.",
+    "hide_choices": "Hide the choice menu.",
+    "set_choice_text": "Set the label for a specific choice button.",
+    "set_choice_dest": "Set which scene a specific choice button leads to.",
+    "set_variable": "Set a game variable to a specific value.",
+    "change_variable": "Add, subtract, multiply, or divide a variable by a value.",
+    "increment_var": "Add a value to a variable using the common counter pattern.",
+    "set_flag": "Set a boolean flag to true or false.",
+    "toggle_flag": "Flip a boolean flag from its current state.",
+    "if_variable": "Branch: run different actions based on a variable's value.",
+    "if_flag": "Branch: run different actions based on whether a flag is true.",
+    "add_item": "Give the player a registered inventory item.",
+    "remove_item": "Remove a specific item from the player's inventory.",
+    "if_has_item": "Branch: run actions based on whether the player has an item.",
+    "show_inventory": "Open the inventory overlay.",
+    "hide_inventory": "Close the inventory overlay.",
+    "emit_signal": "Broadcast a named signal to any on_signal behaviors in this scene.",
+    "if_button_pressed": "Branch: run actions when a specific button is pressed this frame.",
+    "if_button_held": "Branch: run actions while a specific button is held.",
+    "if_button_released": "Branch: run actions when a specific button is released this frame.",
+    "four_way_movement": "Move this object with the d-pad. No input setup required; just set speed and drop it on any object.",
+    "four_way_movement_collide": "Move with d-pad, blocked by a CollisionLayer. Set speed, player size, and pick the collision layer.",
+    "two_way_movement": "Move left/right OR up/down with the d-pad. Choose axis and speed.",
+    "two_way_movement_collide": "2-way d-pad movement blocked by a CollisionLayer. Choose axis, speed, player size, and collision layer.",
+    "fire_bullet": "Move this object as a projectile each frame. Set direction and speed. Pair with Create Object to spawn it.",
+    "collision_set_cell": "Set a CollisionLayer cell to empty or solid at runtime.",
+    "collision_toggle_cell": "Flip a CollisionLayer cell between empty and solid at runtime.",
+    "collision_get_cell": "Read a CollisionLayer cell into a variable at runtime.",
+    "show_object": "Make a placed object visible.",
+    "hide_object": "Make a placed object invisible.",
+    "set_opacity": "Set an object's opacity to a value between 0 and 100.",
+    "fade_in_object": "Gradually fade an object to fully visible over N seconds.",
+    "fade_out_object": "Gradually fade an object to invisible over N seconds.",
+    "move_to": "Instantly place an object at a specific X, Y coordinate.",
+    "move_to_variable": "Move an object to X and Y values read from variables.",
+    "move_by": "Instantly shift an object by X, Y pixels from its current position.",
+    "slide_to": "Smoothly move an object to X, Y over N seconds.",
+    "slide_by": "Smoothly move an object by X, Y pixels over N seconds.",
+    "return_to_start": "Move the object back to where it was placed in the editor.",
+    "set_scale": "Instantly set an object's scale to a specific value.",
+    "scale_to": "Smoothly scale an object to a target value over N seconds.",
+    "set_rotation": "Instantly set an object's rotation in degrees.",
+    "rotate_to": "Smoothly rotate an object to a target angle over N seconds.",
+    "rotate_by": "Rotate an object by N degrees from its current angle over N seconds.",
+    "spin": "Continuously rotate an object at N degrees per second.",
+    "stop_spin": "Stop any continuous rotation on an object.",
+    "play_anim": "Start playing the object's animation frames.",
+    "stop_anim": "Freeze the animation on the current frame.",
+    "set_frame": "Jump to a specific animation frame index.",
+    "set_anim_speed": "Change the frames-per-second of the animation.",
+    "create_object": "Create a new instance of an object definition at X, Y.",
+    "destroy_object": "Remove a specific placed object from the scene.",
+    "destroy_all_type": "Remove all instances of a given object definition.",
+    "enable_interact": "Allow the player to interact with this object.",
+    "disable_interact": "Prevent the player from interacting with this object.",
+    "add_to_group": "Add an object to a named group at runtime.",
+    "remove_from_group": "Remove an object from a named group at runtime.",
+    "call_action_on_group": "Broadcast an action to every object currently in a named group.",
+    "if_in_group": "Branch based on whether an object is a member of a named group.",
+    "open_keyboard": "Open the Vita keyboard. Save Text In receives the typed result. Prompt Tag is optional and only helps if you need to tell multiple keyboard prompts apart.",
+    "show_confirm": "Open a YES/NO system prompt. Prompt Tag is optional and only helps if you need different follow-up logic for different confirm prompts.",
+    "show_message": "Open a simple OK message and wait until the player dismisses it.",
+    "store_current_date": "Read the console date and write weekday, day, month, and year into variables you choose.",
+    "store_current_time": "Read the console time and write hour, minute, and second into variables you choose.",
+    "set_label_text": "Replace the full text of a GUI_Label or GUI_Button at runtime.",
+    "set_label_text_var": "Set a GUI_Label or GUI_Button text from the current value of a game variable.",
+    "set_label_color": "Change the text color of a GUI_Label or GUI_Button at runtime.",
+    "set_label_size": "Change the font size of a GUI_Label or GUI_Button at runtime.",
+    "log_message": "Print a message to the debug console. Does nothing in release builds.",
 }
 
 ACTION_NAMES: dict[str, str] = {}
@@ -183,10 +420,11 @@ DEFERRED_ACTIONS = {
     "add_item", "remove_item", "if_has_item", "show_inventory", "hide_inventory",
 }
 
-BRANCH_TYPES = {"if_variable","if_flag","if_has_item","if_save_exists","if_in_group","random_chance","if_distance","grid_is_empty","grid_get_at"}
+BRANCH_TYPES = {"if_variable","if_flag","if_has_item","if_in_group","random_chance","if_distance","if_object_overlap","grid_is_empty","grid_get_at","check_player_tile","if_button_pressed","if_button_held","if_button_released","if_actor3d_player_in_range","if_actor3d_player_in_sight","if_actor3d_alive"}
 LOOP_TYPES   = {"loop","grid_for_each","grid_get_neighbors"}
 
 ACTION_FIELDS = {
+    "load_save":         [("slot_number",          "Slot (1–3)",       "spin",     {"min":1,"max":3})],
     "go_to_scene":       [("target_scene",       "Scene",            "scene_num",{})],
     "go_to_random":      [("random_scenes",       "Scenes (csv)",     "text",     {})],
     "go_to_state":       [("target_state",        "State Name",       "text",     {})],
@@ -223,6 +461,8 @@ ACTION_FIELDS = {
     "ani_stop":          [("object_def_id",       "Object",           "object",   {})],
     "ani_set_frame":     [("object_def_id",       "Object",           "object",   {}),
                           ("ani_target_frame",    "Frame",            "spin",     {"min":0,"max":9999})],
+    "ani_advance_frame": [("object_def_id",       "Object",           "object",   {}),
+                          ("ani_target_frame",    "Step",             "spin",     {"min":-999,"max":999})],
     "ani_set_speed":     [("object_def_id",       "Object",           "object",   {}),
                           ("ani_fps",             "FPS",              "spin",     {"min":1,"max":120})],
     "ani_switch_slot":   [("object_def_id",       "Object",           "object",   {}),
@@ -231,14 +471,12 @@ ACTION_FIELDS = {
                           ("ani_flip_h",          "Flip H",           "check",    {}),
                           ("ani_flip_v",          "Flip V",           "check",    {})],
     "set_background":    [("image_id",            "Image",            "image",    {})],
-    "scroll_bg":         [("layer_name",          "Layer Name",       "text",     {}),
-                          ("scroll_direction",    "Direction",        "combo",    {"options":["horizontal","vertical"]}),
-                          ("scroll_speed",        "Speed (px/f)",     "spin",     {"min":-20,"max":20})],
-    "stop_scroll_bg":    [("layer_name",          "Layer Name",       "text",     {})],
     "layer_show":        [("layer_name",          "Layer Name",       "text",     {})],
     "layer_hide":        [("layer_name",          "Layer Name",       "text",     {})],
     "layer_set_image":   [("layer_name",          "Layer Name",       "text",     {}),
                           ("image_id",            "Image",            "image",    {})],
+    "layer_start_scroll":[("layer_name",          "Layer Name",       "text",     {})],
+    "layer_stop_scroll": [("layer_name",          "Layer Name",       "text",     {})],
     "play_music":        [("audio_id",            "Track",            "audio",    {}),
                           ("audio_loop",          "Loop",             "check",    {})],
     "set_music_volume":  [("volume",              "Volume (0-100)",   "spin",     {"min":0,"max":100})],
@@ -255,6 +493,8 @@ ACTION_FIELDS = {
                           ("var_value",           "Value",            "text",     {})],
     "change_variable":   [("var_name",            "Variable",         "text",     {}),
                           ("var_operator",        "Operation",        "combo",    {"options":["add","subtract","multiply","divide"]}),
+                          ("var_value",           "Amount",           "text",     {})],
+    "increment_var":     [("var_name",            "Variable",         "text",     {}),
                           ("var_value",           "Amount",           "text",     {})],
     "set_variable_from_variable": [
                           ("var_name",            "Target Variable",  "text",     {}),
@@ -279,7 +519,7 @@ ACTION_FIELDS = {
     "add_item":          [("item_name",           "Item",             "text",     {})],
     "remove_item":       [("item_name",           "Item",             "text",     {})],
     "if_has_item":       [("item_name",           "Item",             "text",     {})],
-    "emit_signal":       [("signal_name",         "Signal",           "text",     {})],
+    "emit_signal":       [("signal_name",         "Signal",           "signal",   {})],
     "show_object":       [("object_def_id",       "Object",           "object",   {})],
     "hide_object":       [("object_def_id",       "Object",           "object",   {})],
     "set_opacity":       [("object_def_id",       "Object",           "object",   {}),
@@ -293,6 +533,9 @@ ACTION_FIELDS = {
     "move_to":           [("object_def_id",       "Object",           "object",   {}),
                           ("target_x",            "X",                "spin",     {"min":-999,"max":9999}),
                           ("target_y",            "Y",                "spin",     {"min":-999,"max":9999})],
+    "move_to_variable":  [("object_def_id",       "Object",           "object",   {}),
+                          ("var_name",            "X Variable",       "text",     {}),
+                          ("var_source",          "Y Variable",       "text",     {})],
     "move_by":           [("object_def_id",       "Object",           "object",   {}),
                           ("offset_x",            "Offset X",         "spin",     {"min":-9999,"max":9999}),
                           ("offset_y",            "Offset Y",         "spin",     {"min":-9999,"max":9999})],
@@ -325,14 +568,19 @@ ACTION_FIELDS = {
     "spin":              [("object_def_id",       "Object",           "object",   {}),
                           ("spin_speed",          "Degrees/sec",      "dspin",    {"min":-3600.0,"max":3600.0,"step":10.0})],
     "stop_spin":         [("object_def_id",       "Object",           "object",   {})],
+    "if_button_pressed": [("button",              "Button",           "combo",    {"options": BUTTON_OPTIONS})],
+    "if_button_held":    [("button",              "Button",           "combo",    {"options": BUTTON_OPTIONS})],
+    "if_button_released":[("button",              "Button",           "combo",    {"options": BUTTON_OPTIONS})],
     "play_anim":         [("object_def_id",       "Object",           "object",   {}),
                           ("ani_slot_name",       "Slot (blank=current)", "text", {})],
     "stop_anim":         [("object_def_id",       "Object",           "object",   {})],
     "set_frame":         [("object_def_id",       "Object",           "object",   {}),
                           ("frame_index",         "Frame",            "spin",     {"min":0,"max":999})],
+    "advance_frame":     [("object_def_id",       "Object",           "object",   {}),
+                          ("frame_index",         "Step",             "spin",     {"min":-999,"max":999})],
     "set_anim_speed":    [("object_def_id",       "Object",           "object",   {}),
                           ("anim_fps",            "FPS",              "spin",     {"min":1,"max":60})],
-    "create_object":     [("object_def_id",       "Object",           "object",   {}),
+    "create_object":     [("object_def_id",       "Object Type",      "object_def", {}),
                           ("spawn_at_self",       "Spawn at Self",    "check",    {}),
                           ("target_x",            "X",                "spin",     {"min":0,"max":9999}),
                           ("target_y",            "Y",                "spin",     {"min":0,"max":9999}),
@@ -354,7 +602,7 @@ ACTION_FIELDS = {
                           ("destroy_with_parent", "Destroy w/ Parent","check",    {})],
     "detach":            [],
     "destroy_object":    [("object_def_id",       "Object",           "object",   {})],
-    "destroy_all_type":  [("object_def_id",       "Object Type",      "object",   {})],
+    "destroy_all_type":  [("object_def_id",       "Object Type",      "object_def", {})],
     "enable_interact":   [("object_def_id",       "Object",           "object",   {})],
     "disable_interact":  [("object_def_id",       "Object",           "object",   {})],
     "add_to_group":      [("object_def_id",       "Object",           "object",   {}),
@@ -378,41 +626,62 @@ ACTION_FIELDS = {
                           ("target_rotation",     "Degrees",          "dspin",    {"min":-360.0,"max":360.0,"step":1.0})],
     "if_in_group":       [("object_def_id",       "Object",           "object",   {}),
                           ("group_name",          "Group Name",       "text",     {})],
-    "set_label_text":    [("object_def_id",       "Label Object",     "object",   {}),
+    "open_keyboard":     [("request_id",         "Prompt Tag (Optional)", "text",     {}),
+                          ("title",              "Prompt Title",      "text",     {}),
+                          ("target_var",         "Save Text In",      "text",     {}),
+                          ("initial_text_var",   "Prefill From Variable", "text",  {}),
+                          ("max_length",         "Character Limit",   "spin",     {"min":1,"max":2048})],
+    "show_confirm":      [("request_id",         "Prompt Tag (Optional)", "text",     {}),
+                          ("message_text",       "Prompt Text",       "text",     {})],
+    "show_message":      [("message_text",       "Message Text",      "text",     {})],
+    "store_current_date":[("year_var",           "Year Variable",     "text",     {}),
+                          ("month_var",          "Month Variable",    "text",     {}),
+                          ("day_var",            "Day Variable",      "text",     {}),
+                          ("weekday_var",        "Weekday Variable",  "text",     {})],
+    "store_current_time":[("hour_var",           "Hour Variable",     "text",     {}),
+                          ("minute_var",         "Minute Variable",   "text",     {}),
+                          ("second_var",         "Second Variable",   "text",     {})],
+    "set_label_text":    [("object_def_id",       "Label/Button Object","object",   {}),
                           ("dialogue_text",       "New Text",         "text",     {})],
-    "set_label_text_var":[("object_def_id",       "Label Object",     "object",   {}),
+    "set_label_text_var":[("object_def_id",       "Label/Button Object","object",   {}),
                           ("var_name",            "Variable",         "text",     {})],
-    "set_label_color":   [("object_def_id",       "Label Object",     "object",   {}),
+    "set_label_color":   [("object_def_id",       "Label/Button Object","object",   {}),
                           ("color",               "Color (#rrggbb)",  "text",     {})],
-    "set_label_size":    [("object_def_id",       "Label Object",     "object",   {}),
+    "set_label_size":    [("object_def_id",       "Label/Button Object","object",   {}),
                           ("frame_index",         "Size (px)",        "spin",     {"min":4,"max":128})],
     "log_message":       [("log_message",         "Message",          "text",     {})],
     "four_way_movement": [("movement_speed",      "Speed (px/f)",     "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
-                          ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]})],
+                          ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]}),
+                          ("movement_input",      "Input",            "combo",    {"options":["dpad","left_stick","right_stick","dpad_and_left_stick","dpad_and_right_stick"]})],
     "four_way_movement_collide": [
                           ("movement_speed",      "Speed (px/f)",     "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
                           ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]}),
+                          ("movement_input",      "Input",            "combo",    {"options":["dpad","left_stick","right_stick","dpad_and_left_stick","dpad_and_right_stick"]}),
                           ("collision_layer_id",  "Collision Layer",  "collision_layer",{}),
                           ("player_width",        "Player W (px)",    "spin",     {"min":1,"max":512}),
                           ("player_height",       "Player H (px)",    "spin",     {"min":1,"max":512})],
     "eight_way_movement": [
                           ("movement_speed",          "Speed (px/f)",       "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
                           ("rotation_mode",           "Rotation",           "combo",    {"options":["instant","tween"]}),
-                          ("rotation_tween_duration", "Tween Duration (s)", "dspin",    {"min":0.05,"max":5.0,"step":0.05})],
+                          ("rotation_tween_duration", "Tween Duration (s)", "dspin",    {"min":0.05,"max":5.0,"step":0.05}),
+                          ("movement_input",          "Input",              "combo",    {"options":["dpad","left_stick","right_stick","dpad_and_left_stick","dpad_and_right_stick"]})],
     "eight_way_movement_collide": [
                           ("movement_speed",          "Speed (px/f)",       "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
                           ("rotation_mode",           "Rotation",           "combo",    {"options":["instant","tween"]}),
                           ("rotation_tween_duration", "Tween Duration (s)", "dspin",    {"min":0.05,"max":5.0,"step":0.05}),
+                          ("movement_input",          "Input",              "combo",    {"options":["dpad","left_stick","right_stick","dpad_and_left_stick","dpad_and_right_stick"]}),
                           ("collision_layer_id",      "Collision Layer",    "collision_layer",{}),
                           ("player_width",            "Player W (px)",      "spin",     {"min":1,"max":512}),
                           ("player_height",           "Player H (px)",      "spin",     {"min":1,"max":512})],
     "two_way_movement":  [("movement_speed",      "Speed (px/f)",     "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
                           ("two_way_axis",        "Axis",             "combo",    {"options":["horizontal","vertical"]}),
-                          ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]})],
+                          ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]}),
+                          ("movement_input",      "Input",            "combo",    {"options":["dpad","left_stick","right_stick","dpad_and_left_stick","dpad_and_right_stick"]})],
     "two_way_movement_collide": [
                           ("movement_speed",      "Speed (px/f)",     "dspin",    {"min":0.1,"max":20.0,"step":0.1}),
                           ("two_way_axis",        "Axis",             "combo",    {"options":["horizontal","vertical"]}),
                           ("movement_style",      "Style",            "combo",    {"options":["instant","slide"]}),
+                          ("movement_input",      "Input",            "combo",    {"options":["dpad","left_stick","right_stick","dpad_and_left_stick","dpad_and_right_stick"]}),
                           ("collision_layer_id",  "Collision Layer",  "collision_layer",{}),
                           ("player_width",        "Player W (px)",    "spin",     {"min":1,"max":512}),
                           ("player_height",       "Player H (px)",    "spin",     {"min":1,"max":512})],
@@ -472,6 +741,15 @@ ACTION_FIELDS = {
     "layer_anim_talk_for":   [
                           ("layer_anim_id",        "Layer Animation",  "paper_doll",{}),
                           ("layer_anim_talk_duration","Duration (s)",  "dspin",    {"min":0.1,"max":60.0,"step":0.1})],
+    "vn_dialog_sound":   [
+                          ("vn_dialog_sound_id",   "Sound File",       "audio",    {}),
+                          ("vn_dialog_sound_mode", "Mode",             "combo",    {"options":["play_once","loop","repeat_on_cycle"]})],
+    "vn_tw_sound":       [
+                          ("vn_tw_sound_id_0",     "Sound 1",          "audio",    {}),
+                          ("vn_tw_sound_id_1",     "Sound 2 (opt)",    "audio",    {}),
+                          ("vn_tw_sound_id_2",     "Sound 3 (opt)",    "audio",    {}),
+                          ("vn_tw_sound_id_3",     "Sound 4 (opt)",    "audio",    {}),
+                          ("vn_tw_sound_interval", "Every N Chars",    "spin",     {"min":1,"max":10})],
     # ── New nodes ─────────────────────────────────────────────
     "wait_random":       [("duration",            "Min Seconds",      "dspin",    {"min":0.0,"max":999.0,"step":0.1}),
                           ("wait_max",            "Max Seconds",      "dspin",    {"min":0.0,"max":999.0,"step":0.1})],
@@ -488,6 +766,30 @@ ACTION_FIELDS = {
     "get_distance":      [("object_def_id",       "Target Object",    "object",   {}),
                           ("var_name",            "Store in Variable","text",     {})],
     "cancel_all":        [("object_def_id",       "Object (empty=self)","object", {})],
+    "collision_set_cell":[("collision_layer_id",  "Collision Layer",  "collision_layer", {}),
+                          ("grid_col",            "Column",           "spin",     {"min":0,"max":999}),
+                          ("grid_row",            "Row",              "spin",     {"min":0,"max":999}),
+                          ("grid_col_var",        "Col Variable",     "text",     {}),
+                          ("grid_row_var",        "Row Variable",     "text",     {}),
+                          ("collision_value",     "Value (0-1)",      "spin",     {"min":0,"max":1})],
+    "collision_toggle_cell":[("collision_layer_id","Collision Layer",  "collision_layer", {}),
+                          ("grid_col",            "Column",           "spin",     {"min":0,"max":999}),
+                          ("grid_row",            "Row",              "spin",     {"min":0,"max":999}),
+                          ("grid_col_var",        "Col Variable",     "text",     {}),
+                          ("grid_row_var",        "Row Variable",     "text",     {})],
+    "collision_get_cell":[("collision_layer_id",  "Collision Layer",  "collision_layer", {}),
+                          ("grid_col",            "Column",           "spin",     {"min":0,"max":999}),
+                          ("grid_row",            "Row",              "spin",     {"min":0,"max":999}),
+                          ("grid_col_var",        "Col Variable",     "text",     {}),
+                          ("grid_row_var",        "Row Variable",     "text",     {}),
+                          ("grid_result_var",     "Store in Variable","text",     {})],
+    "if_object_overlap":[("object_def_id",         "Target Object",    "object",   {}),
+                         ("collision_source_role", "Self Role",        "combo",    {"options": COLLISION_ROLE_OPTIONS, "default": "Hitbox"}),
+                         ("collision_target_role", "Target Role",      "combo",    {"options": COLLISION_ROLE_OPTIONS, "default": "Hurtbox"})],
+    "get_object_overlap_count":[("object_def_id",         "Target Object",    "object",   {}),
+                                ("collision_source_role", "Self Role",        "combo",    {"options": COLLISION_ROLE_OPTIONS, "default": "Hitbox"}),
+                                ("collision_target_role", "Target Role",      "combo",    {"options": COLLISION_ROLE_OPTIONS, "default": "Hurtbox"}),
+                                ("var_name",              "Store in Variable","text",     {})],
     # ── Grid actions ─────────────────────────────────────────
     "grid_place_at":     [("grid_name",            "Grid Name",        "text",     {}),
                           ("object_def_id",         "Object",           "object",   {}),
@@ -541,29 +843,627 @@ ACTION_FIELDS = {
                           ("grid_row_var",          "Row 1 Variable",   "text",     {}),
                           ("grid_col2_var",         "Col 2 Variable",   "text",     {}),
                           ("grid_row2_var",         "Row 2 Variable",   "text",     {})],
+    "set_focus":              [("focus_target_object_id", "Object",       "object",   {})],
+    "activate_focused_object": [],
+    "lua_code":               [("lua_snippet", "Lua Code", "multiline_text", {})],
+    # ── 3D Scene actions ─────────────────────────────────────────────────────
+    "open_door":         [("door_target_mode",   "Target By",        "combo",    {"options": ["coords", "tag"]}),
+                          ("door_col",           "Column",           "spin",     {"min": 0, "max": 999}),
+                          ("door_row",           "Row",              "spin",     {"min": 0, "max": 999}),
+                          ("door_tag",           "Tag",              "text",     {})],
+    "close_door":        [("door_target_mode",   "Target By",        "combo",    {"options": ["coords", "tag"]}),
+                          ("door_col",           "Column",           "spin",     {"min": 0, "max": 999}),
+                          ("door_row",           "Row",              "spin",     {"min": 0, "max": 999}),
+                          ("door_tag",           "Tag",              "text",     {})],
+    "toggle_door":       [("door_target_mode",   "Target By",        "combo",    {"options": ["coords", "tag"]}),
+                          ("door_col",           "Column",           "spin",     {"min": 0, "max": 999}),
+                          ("door_row",           "Row",              "spin",     {"min": 0, "max": 999}),
+                          ("door_tag",           "Tag",              "text",     {})],
+    "move_3d_object":    [("obj_3d_id",          "Object ID",        "text",     {}),
+                          ("obj_3d_wx",          "World X",          "dspin",    {"min": 0.0, "max": 9999.0, "step": 1.0}),
+                          ("obj_3d_wy",          "World Y",          "dspin",    {"min": 0.0, "max": 9999.0, "step": 1.0})],
+    "set_3d_object_visible": [("obj_3d_id",      "Object ID",        "text",     {}),
+                              ("obj_3d_visible",  "Visible",          "check",    {})],
+    "check_player_tile": [("player_tile_where",  "Check",            "combo",    {"options": ["under_player", "facing_tile"]}),
+                          ("player_tile_type",   "Tile Type",        "combo",    {"options": ["empty", "wall", "door", "exit", "trigger", "switch"]})],
+    "actor3d_start_patrol": [("object_def_id",   "Actor",            "object",   {}),
+                             ("path_name",       "Path Name",        "text",     {}),
+                             ("path_speed",      "Speed (px/f)",     "dspin",    {"min":0.1,"max":40.0,"step":0.1}),
+                             ("path_loop",       "Loop",             "check",    {})],
+    "actor3d_stop_patrol": [("object_def_id",    "Actor",            "object",   {})],
+    "actor3d_resume_patrol": [("object_def_id",  "Actor",            "object",   {})],
+    "actor3d_set_patrol_enabled": [("object_def_id", "Actor",        "object",   {}),
+                                   ("actor_3d_patrol_enabled", "Enabled", "check", {})],
+    "actor3d_set_state":  [("object_def_id",     "Actor",            "object",   {}),
+                           ("actor_3d_state",    "State",            "text",     {})],
+    "actor3d_set_angle":  [("object_def_id",     "Actor",            "object",   {}),
+                           ("actor_3d_angle",    "Angle",            "dspin",    {"min":-360.0,"max":360.0,"step":1.0})],
+    "actor3d_face_player": [("object_def_id",    "Actor",            "object",   {})],
+    "actor3d_set_alive":  [("object_def_id",     "Actor",            "object",   {}),
+                           ("actor_3d_alive",    "Alive",            "check",    {})],
+    "actor3d_kill":       [("object_def_id",     "Actor",            "object",   {}),
+                           ("actor_3d_state",    "Death State",      "text",     {})],
+    "actor3d_set_blocking": [("object_def_id",   "Actor",            "object",   {}),
+                             ("actor_3d_blocking","Blocking",        "check",    {})],
+    "actor3d_set_interactable": [("object_def_id","Actor",           "object",   {}),
+                                 ("actor_3d_interactable","Interactable","check", {})],
+    "actor3d_get_distance_to_player": [("object_def_id", "Actor",    "object",   {}),
+                                       ("var_name",      "Store in Variable", "text", {})],
+    "if_actor3d_player_in_range": [("object_def_id",    "Actor",     "object",   {}),
+                                   ("actor_3d_query_range", "Range (0=actor default)", "dspin", {"min":0.0,"max":4096.0,"step":1.0})],
+    "if_actor3d_player_in_sight": [("object_def_id",    "Actor",     "object",   {}),
+                                   ("actor_3d_query_range", "Sight Range (0=actor default)", "dspin", {"min":0.0,"max":4096.0,"step":1.0})],
+    "if_actor3d_alive":   [("object_def_id",     "Actor",            "object",   {})],
 }
 
 CATEGORY_ACCENTS = {
     "Scene Flow":"#f87171","State Machine":"#c084fc","Control Flow":"#c084fc",
     "Timing":"#a78bfa","Screen":"#60a5fa",
-    "Camera":"#34d399","Animation":"#34d399","Background":"#60a5fa",
+    "Camera":"#34d399","Animation":"#34d399","Input":"#f59e0b",
     "Layers":"#60a5fa","Music & Sound":"#fb923c","Dialogue":"#e879f9",
     "Choice Menu":"#e879f9","Variables & Flags":"#facc15","Inventory":"#facc15",
     "Save & Load":"#f87171","Signals":"#a78bfa","Movement":"#4ade80",
-    "Objects: Visibility":"#7c6aff","Objects: Transform":"#7c6aff",
-    "Objects: Animation":"#7c6aff","Objects: Lifecycle":"#7c6aff",
-    "Objects: Groups":"#7c6aff",
-    "VN Character":"#f59e0b","GUI":"#7c6aff","Debug":"#94a3b8",
+    "Objects: Visibility":"#4a4860","Objects: Transform":"#4a4860",
+    "Objects: Animation":"#4a4860","Objects: Lifecycle":"#4a4860",
+    "Objects: Groups":"#4a4860","Objects: Management":"#4a4860",
+    "Engine Primitives/Core":"#4a4860","Engine Primitives/World":"#4a4860",
+    "Engine Primitives/Combat":"#4a4860",
+    "VN Character":"#f59e0b","App Essentials":"#f59e0b","Device":"#10b981","Storage":"#22c55e",
+    "GUI":"#4a4860","Debug":"#94a3b8",
     "Paths":"#06b6d4",
     "Layer Animation":"#f472b6",
     "Getters":"#22d3ee",
+    "Advanced":"#e2e8f0",
+    "3D Scene":"#38bdf8",
+    "3D Actors":"#0ea5e9",
+    "3D Queries":"#22c55e",
 }
+
+def display_action_category(category: str) -> str:
+    return ACTION_CATEGORY_DISPLAY_NAMES.get(category, category)
+
+def iter_action_menu_groups():
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for raw_category, items in ACTION_PALETTE.items():
+        display_category = display_action_category(raw_category)
+        grouped.setdefault(display_category, []).extend(items)
+
+    ordered_categories: list[str] = []
+    seen: set[str] = set()
+
+    for category in TOP_ACTION_CATEGORY_ORDER:
+        if category in grouped and category not in seen:
+            ordered_categories.append(category)
+            seen.add(category)
+
+    for raw_category in BASE_ACTION_CATEGORY_ORDER:
+        display_category = display_action_category(raw_category)
+        if display_category in grouped and display_category not in seen:
+            ordered_categories.append(display_category)
+            seen.add(display_category)
+
+    for raw_category in ACTION_PALETTE.keys():
+        if raw_category in BASE_ACTION_CATEGORY_ORDER:
+            continue
+        display_category = display_action_category(raw_category)
+        if display_category in grouped and display_category not in seen:
+            ordered_categories.append(display_category)
+            seen.add(display_category)
+
+    return [(category, grouped[category]) for category in ordered_categories]
+
+def populate_action_menu(menu: QMenu, add_node_callback, legend_callback):
+    menu.setStyleSheet(MENU_STYLE)
+    for category, items in iter_action_menu_groups():
+        active = [(code, name) for code, name in items if code not in DEFERRED_ACTIONS]
+        if not active:
+            continue
+        submenu = menu.addMenu(category)
+        for code, name in active:
+            action = submenu.addAction(name)
+            action.triggered.connect(
+                lambda checked=False, c=code, n=name: add_node_callback(c, n)
+            )
+        if category == "Advanced":
+            submenu.addSeparator()
+            legend_action = submenu.addAction("Copy Triggers & Actions as Text")
+            legend_action.triggered.connect(legend_callback)
+
+def _trigger_source_for_code(code: str, project=None) -> str:
+    registry = getattr(project, "plugin_registry", None) if project is not None else None
+    if registry and hasattr(registry, "get_trigger_descriptor"):
+        descriptor = registry.get_trigger_descriptor(code)
+        if descriptor:
+            return str(descriptor.get("plugin_id", "") or "Plugin")
+    return "Built-in"
+
+def _trigger_parameter_labels(code: str) -> list[str]:
+    labels: list[str] = []
+    for _field_name, label, _wtype, _extra in TRIGGER_FIELDS.get(code, []):
+        text = str(label or "").strip()
+        if text:
+            labels.append(text)
+    return labels
+
+def _trigger_parameter_summary(code: str) -> str:
+    labels = _trigger_parameter_labels(code)
+    if not labels:
+        return "No parameters."
+    return "\n".join(f"- {label}" for label in labels)
+
+def _fallback_trigger_help(code: str, category: str, source: str) -> str:
+    parts: list[str] = []
+    if source != "Built-in":
+        parts.append(f"Provided by plugin '{source}'.")
+    parts.append(f"{category} trigger. Connect actions from this node's output to define what runs when it fires.")
+
+    labels = _trigger_parameter_labels(code)
+    if labels:
+        preview = ", ".join(labels[:4])
+        if len(labels) > 4:
+            preview += f", +{len(labels) - 4} more"
+        parts.append(f"Main parameters: {preview}.")
+    else:
+        parts.append("This trigger has no parameters.")
+    return " ".join(parts)
+
+def _trigger_help_text(code: str, category: str, source: str) -> str:
+    text = BUILTIN_TRIGGER_HELP.get(code)
+    if text:
+        return text
+    return _fallback_trigger_help(code, category, source)
+
+def build_trigger_picker_entries(project=None) -> list[dict]:
+    entries: list[dict] = []
+    for category, codes in TRIGGER_CATEGORIES.items():
+        for code in codes:
+            name = OBJECT_TRIGGERS.get(code, code)
+            source = _trigger_source_for_code(code, project)
+            parameter_labels = _trigger_parameter_labels(code)
+            entry = {
+                "category": category,
+                "code": code,
+                "name": name,
+                "source": source,
+                "is_branch": False,
+                "is_loop": False,
+                "parameter_labels": parameter_labels,
+                "parameter_summary": _trigger_parameter_summary(code),
+                "help_text": _trigger_help_text(code, category, source),
+            }
+            entry["search_text"] = " ".join([
+                name,
+                code,
+                category,
+                source,
+                " ".join(parameter_labels),
+            ]).lower()
+            entries.append(entry)
+    return entries
+
+def _action_source_for_code(code: str, project=None) -> str:
+    registry = getattr(project, "plugin_registry", None) if project is not None else None
+    if registry and hasattr(registry, "get_action_descriptor"):
+        descriptor = registry.get_action_descriptor(code)
+        if descriptor:
+            return str(descriptor.get("plugin_id", "") or "Plugin")
+    return "Built-in"
+
+def _action_parameter_labels(code: str) -> list[str]:
+    labels: list[str] = []
+    for _field_name, label, _wtype, _extra in ACTION_FIELDS.get(code, []):
+        text = str(label or "").strip()
+        if text:
+            labels.append(text)
+    return labels
+
+def _action_parameter_summary(code: str) -> str:
+    labels = _action_parameter_labels(code)
+    if not labels:
+        return "No parameters."
+    return "\n".join(f"- {label}" for label in labels)
+
+def _fallback_action_help(code: str, category: str, source: str, is_branch: bool, is_loop: bool) -> str:
+    parts: list[str] = []
+    if source != "Built-in":
+        parts.append(f"Provided by plugin '{source}'.")
+    if is_branch:
+        parts.append("Branch action. Connect the True and False outputs to decide what happens next.")
+    elif is_loop:
+        parts.append("Loop action. Connect the body output to the actions that should repeat.")
+    else:
+        parts.append(f"{category} action.")
+
+    labels = _action_parameter_labels(code)
+    if labels:
+        preview = ", ".join(labels[:4])
+        if len(labels) > 4:
+            preview += f", +{len(labels) - 4} more"
+        parts.append(f"Main parameters: {preview}.")
+    else:
+        parts.append("This action has no parameters.")
+    return " ".join(parts)
+
+def _action_help_text(code: str, category: str, source: str, is_branch: bool, is_loop: bool) -> str:
+    text = BUILTIN_ACTION_HELP.get(code)
+    if text:
+        return text
+    return _fallback_action_help(code, category, source, is_branch, is_loop)
+
+def build_action_picker_entries(project=None) -> list[dict]:
+    entries: list[dict] = []
+    for category, items in iter_action_menu_groups():
+        active = [(code, name) for code, name in items if code not in DEFERRED_ACTIONS]
+        for code, name in active:
+            source = _action_source_for_code(code, project)
+            is_branch = code in BRANCH_TYPES
+            is_loop = code in LOOP_TYPES
+            parameter_labels = _action_parameter_labels(code)
+            entry = {
+                "category": category,
+                "code": code,
+                "name": name,
+                "source": source,
+                "is_branch": is_branch,
+                "is_loop": is_loop,
+                "parameter_labels": parameter_labels,
+                "parameter_summary": _action_parameter_summary(code),
+                "help_text": _action_help_text(code, category, source, is_branch, is_loop),
+            }
+            entry["search_text"] = " ".join([
+                name,
+                code,
+                category,
+                source,
+                " ".join(parameter_labels),
+            ]).lower()
+            entries.append(entry)
+    return entries
+
+class ActionPickerDialog(QDialog):
+    def __init__(self, parent=None, project=None, legend_callback=None):
+        super().__init__(parent)
+        self._legend_callback = legend_callback
+        self._all_entries = build_action_picker_entries(project)
+        self._filtered_entries = list(self._all_entries)
+        self._selected_entry = None
+        self._pending_action_code = ""
+        self._select_title = "Select an action"
+        self._select_meta = "Choose a node on the right to preview its details."
+        self._empty_title = "No actions found"
+        self._empty_meta = "Try a different search term."
+        self._browse_help = "Search or pick a category to browse the available action nodes."
+
+        self.setWindowTitle("Add Action Node")
+        self.resize(940, 640)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog { background: #0f0f12; }
+            QLabel { color: #e8e6f0; font: 11px 'Segoe UI'; }
+            QLineEdit {
+                background: #1e1e28; color: #e8e6f0;
+                border: 1px solid #2e2e42; border-radius: 4px;
+                padding: 6px 10px; font: 11px 'Segoe UI';
+            }
+            QLineEdit:focus { border-color: #4a4860; }
+            QListWidget {
+                background: #16161c; color: #e8e6f0;
+                border: 1px solid #2e2e42; border-radius: 4px;
+                font: 11px 'Segoe UI';
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 7px 10px;
+                border-bottom: 1px solid #1e1e28;
+            }
+            QListWidget::item:selected {
+                background: #26263a;
+                color: #ffffff;
+            }
+            QPushButton {
+                background: #26263a; color: #e8e6f0;
+                border: 1px solid #2e2e42; padding: 6px 18px;
+                border-radius: 4px; font: 11px 'Segoe UI';
+            }
+            QPushButton:hover { background: #2e2e42; border-color: #4a4860; }
+            QPushButton:pressed { background: #1e1e28; }
+            QPushButton:disabled {
+                color: #7a7890;
+                border-color: #2e2e42;
+                background: #16161c;
+            }
+            QFrame#actionPickerPanel {
+                background: #16161c;
+                border: 1px solid #2e2e42;
+                border-radius: 6px;
+            }
+        """)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search actions, codes, categories, or plugin id...")
+        self._search_edit.textChanged.connect(self._refresh_from_search)
+        root.addWidget(self._search_edit)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setStyleSheet("QSplitter::handle { background: #2e2e42; width: 1px; }")
+        root.addWidget(splitter, stretch=1)
+
+        left_panel = QFrame()
+        left_panel.setObjectName("actionPickerPanel")
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
+        left_layout.addWidget(self._section_header("Categories"))
+        self._category_list = QListWidget()
+        self._category_list.currentItemChanged.connect(self._refresh_action_list)
+        left_layout.addWidget(self._category_list, stretch=1)
+        splitter.addWidget(left_panel)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+
+        list_panel = QFrame()
+        list_panel.setObjectName("actionPickerPanel")
+        list_layout = QVBoxLayout(list_panel)
+        list_layout.setContentsMargins(10, 10, 10, 10)
+        list_layout.setSpacing(8)
+        list_layout.addWidget(self._section_header("Nodes"))
+        self._action_list = QListWidget()
+        self._action_list.currentItemChanged.connect(self._update_details)
+        self._action_list.itemDoubleClicked.connect(self._accept_selected)
+        list_layout.addWidget(self._action_list, stretch=1)
+        right_layout.addWidget(list_panel, stretch=3)
+
+        info_panel = QFrame()
+        info_panel.setObjectName("actionPickerPanel")
+        info_layout = QVBoxLayout(info_panel)
+        info_layout.setContentsMargins(12, 12, 12, 12)
+        info_layout.setSpacing(6)
+        info_layout.addWidget(self._section_header("Info"))
+
+        self._info_title = QLabel(self._select_title)
+        self._info_title.setStyleSheet("font: bold 13px 'Segoe UI'; color: #ffffff;")
+        info_layout.addWidget(self._info_title)
+
+        self._info_meta = QLabel("")
+        self._info_meta.setWordWrap(True)
+        self._info_meta.setStyleSheet("color: #94a3b8;")
+        info_layout.addWidget(self._info_meta)
+
+        self._info_flags = QLabel("")
+        self._info_flags.setWordWrap(True)
+        self._info_flags.setStyleSheet("color: #facc15;")
+        info_layout.addWidget(self._info_flags)
+
+        info_layout.addWidget(self._detail_label("Parameters"))
+        self._info_params = QLabel("Select a node on the right to preview its parameters.")
+        self._info_params.setWordWrap(True)
+        self._info_params.setStyleSheet("color: #cbd5e1;")
+        info_layout.addWidget(self._info_params)
+
+        info_layout.addWidget(self._detail_label("Helper"))
+        self._info_help = QLabel(self._browse_help)
+        self._info_help.setWordWrap(True)
+        self._info_help.setStyleSheet("color: #cbd5e1;")
+        info_layout.addWidget(self._info_help)
+        info_layout.addStretch()
+        right_layout.addWidget(info_panel, stretch=2)
+
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([260, 640])
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        footer.addStretch()
+
+        self._copy_btn = QPushButton("Copy Legend")
+        self._copy_btn.setAutoDefault(False)
+        self._copy_btn.clicked.connect(self._copy_legend)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setAutoDefault(False)
+        cancel_btn.clicked.connect(self.reject)
+
+        self._add_btn = QPushButton("Add")
+        self._add_btn.setAutoDefault(False)
+        self._add_btn.setEnabled(False)
+        self._add_btn.clicked.connect(self._accept_selected)
+
+        footer.addWidget(self._copy_btn)
+        footer.addWidget(cancel_btn)
+        footer.addWidget(self._add_btn)
+        root.addLayout(footer)
+
+        self._refresh_from_search()
+        QTimer.singleShot(0, self._search_edit.setFocus)
+
+    def _section_header(self, text: str) -> QLabel:
+        label = QLabel(text.upper())
+        label.setStyleSheet("color: #4a4860; font: bold 9px 'Segoe UI'; letter-spacing: 1px;")
+        return label
+
+    def _detail_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("color: #7a7890; font: bold 10px 'Segoe UI';")
+        return label
+
+    def selected_entry(self):
+        return self._selected_entry
+
+    def _current_category(self) -> str:
+        item = self._category_list.currentItem()
+        return item.data(Qt.UserRole) if item else ""
+
+    def _current_action_code(self) -> str:
+        item = self._action_list.currentItem()
+        if item:
+            entry = item.data(Qt.UserRole)
+            if isinstance(entry, dict):
+                return str(entry.get("code", ""))
+        return ""
+
+    def _refresh_from_search(self):
+        query = self._search_edit.text().strip().lower()
+        self._pending_action_code = self._current_action_code()
+        if query:
+            self._filtered_entries = [
+                entry for entry in self._all_entries
+                if query in entry["search_text"]
+            ]
+        else:
+            self._filtered_entries = list(self._all_entries)
+
+        previous_category = self._current_category()
+        category_counts: dict[str, int] = {}
+        for entry in self._filtered_entries:
+            category_counts[entry["category"]] = category_counts.get(entry["category"], 0) + 1
+
+        self._category_list.clear()
+        selected_row = -1
+        for index, (category, count) in enumerate(category_counts.items()):
+            item = QListWidgetItem(f"{category} ({count})")
+            item.setData(Qt.UserRole, category)
+            self._category_list.addItem(item)
+            if category == previous_category:
+                selected_row = index
+
+        if self._category_list.count() == 0:
+            self._action_list.clear()
+            self._selected_entry = None
+            self._update_details()
+            return
+
+        if selected_row < 0:
+            selected_row = 0
+        self._category_list.setCurrentRow(selected_row)
+
+    def _refresh_action_list(self, *_args):
+        category = self._current_category()
+        entries = [entry for entry in self._filtered_entries if entry["category"] == category]
+        current_code = self._pending_action_code or self._current_action_code()
+
+        self._action_list.clear()
+        selected_row = -1
+        for index, entry in enumerate(entries):
+            item = QListWidgetItem(entry["name"])
+            item.setData(Qt.UserRole, entry)
+            tooltip = [
+                entry["name"],
+                f"Code: {entry['code']}",
+                f"Category: {entry['category']}",
+                f"Source: {entry['source']}",
+            ]
+            if entry["is_branch"]:
+                tooltip.append("Branch node")
+            if entry["is_loop"]:
+                tooltip.append("Loop/body node")
+            item.setToolTip("\n".join(tooltip))
+            self._action_list.addItem(item)
+            if entry["code"] == current_code:
+                selected_row = index
+
+        self._pending_action_code = ""
+
+        if self._action_list.count() == 0:
+            self._selected_entry = None
+            self._update_details()
+            return
+
+        if selected_row < 0:
+            selected_row = 0
+        self._action_list.setCurrentRow(selected_row)
+
+    def _update_details(self, *_args):
+        item = self._action_list.currentItem()
+        entry = item.data(Qt.UserRole) if item else None
+        self._selected_entry = entry if isinstance(entry, dict) else None
+
+        if not self._selected_entry:
+            if self._filtered_entries:
+                self._info_title.setText(self._select_title)
+                self._info_meta.setText(self._select_meta)
+            else:
+                self._info_title.setText(self._empty_title)
+                self._info_meta.setText(self._empty_meta)
+            self._info_flags.setText("")
+            self._info_params.setText("No parameters to show.")
+            self._info_help.setText(self._browse_help)
+            self._add_btn.setEnabled(False)
+            return
+
+        entry = self._selected_entry
+        flags = []
+        if entry["is_branch"]:
+            flags.append("Branch")
+        if entry["is_loop"]:
+            flags.append("Loop")
+
+        meta = [
+            f"Category: {entry['category']}",
+            f"Code: {entry['code']}",
+            f"Source: {entry['source']}",
+        ]
+        self._info_title.setText(entry["name"])
+        self._info_meta.setText(" | ".join(meta))
+        self._info_flags.setText(" | ".join(flags) if flags else "")
+        self._info_params.setText(entry["parameter_summary"])
+        self._info_help.setText(entry["help_text"])
+        self._add_btn.setEnabled(True)
+
+    def _copy_legend(self):
+        if callable(self._legend_callback):
+            self._legend_callback()
+        else:
+            QApplication.clipboard().setText(build_legend_text())
+
+    def _accept_selected(self, *_args):
+        if self._selected_entry:
+            self.accept()
+
+class TriggerPickerDialog(ActionPickerDialog):
+    def __init__(self, parent=None, project=None, legend_callback=None):
+        super().__init__(parent=parent, project=project, legend_callback=legend_callback)
+        self._all_entries = build_trigger_picker_entries(project)
+        self._filtered_entries = list(self._all_entries)
+        self._selected_entry = None
+        self._pending_action_code = ""
+        self._select_title = "Select a trigger"
+        self._select_meta = "Choose a node on the right to preview its details."
+        self._empty_title = "No triggers found"
+        self._empty_meta = "Try a different search term."
+        self._browse_help = "Search or pick a category to browse the available trigger nodes."
+        self.setWindowTitle("Add Trigger Node")
+        self._search_edit.setPlaceholderText("Search triggers, codes, categories, or plugin id...")
+        self._refresh_from_search()
+
+def open_action_picker(parent, add_node_callback, legend_callback, project=None):
+    dialog = ActionPickerDialog(parent=parent, project=project, legend_callback=legend_callback)
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        entry = dialog.selected_entry()
+        if entry:
+            add_node_callback(entry["code"], entry["name"])
+
+def open_trigger_picker(parent, add_node_callback, legend_callback, project=None):
+    dialog = TriggerPickerDialog(parent=parent, project=project, legend_callback=legend_callback)
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        entry = dialog.selected_entry()
+        if entry:
+            add_node_callback(entry["code"], entry["name"])
 
 def get_action_category(action_type: str) -> str:
     for cat, items in ACTION_PALETTE.items():
         for code, _ in items:
             if code == action_type:
-                return cat
+                return display_action_category(cat)
     return ""
 
 def get_fields(node_type: str, code: str) -> list:
@@ -600,6 +1500,28 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
             obj = p.get("ani_trigger_object","")
             fr  = p.get("ani_trigger_frame", 0)
             return f"🎞 {obj} @ frame {fr}" if obj else ""
+        if code == "on_layer_anim_blink":
+            return "blink"
+        if code == "on_layer_anim_talk_step":
+            return "talk step"
+        if code == "on_layer_anim_idle_cycle":
+            return "idle cycle"
+        if code in ("on_object_overlap", "on_object_overlap_enter", "on_object_overlap_exit"):
+            target = p.get("overlap_object_id", "") or "any"
+            src_role = p.get("overlap_source_role", "Hitbox")
+            dst_role = p.get("overlap_target_role", "Hurtbox")
+            return f"{target}  {src_role}->{dst_role}"
+        if code == "on_touch_swipe":
+            d    = p.get("swipe_direction", "any")
+            dist = p.get("swipe_min_distance", 48)
+            sc   = p.get("swipe_scope", "screen")
+            return f"{d}  min {dist}  {sc}"
+        if code == "on_lua_condition":
+            expr = p.get("lua_condition", "")
+            return expr[:30] if expr else "-- no condition"
+        if code in ("on_keyboard_submit", "on_keyboard_cancel", "on_confirm_yes", "on_confirm_no"):
+            tag = p.get("request_id", "")
+            return f"tag: {tag}" if tag else "any prompt"
         return ""
     summaries = {
         "go_to_scene":       lambda: f"→ scene {p.get('target_scene','')}",
@@ -615,10 +1537,11 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "camera_move_to":    lambda: f"({p.get('camera_target_x',0)}, {p.get('camera_target_y',0)})",
         "camera_offset":     lambda: f"({p.get('camera_offset_x',0)}, {p.get('camera_offset_y',0)})",
         "camera_shake":      lambda: f"x{p.get('shake_intensity',0)}  {p.get('shake_duration',0)}s",
-        "scroll_bg":         lambda: f"{p.get('layer_name','')}  {p.get('scroll_direction','')} spd {p.get('scroll_speed',0)}",
         "layer_show":        lambda: p.get("layer_name",""),
         "layer_hide":        lambda: p.get("layer_name",""),
         "layer_set_image":   lambda: p.get("layer_name",""),
+        "layer_start_scroll":lambda: p.get("layer_name",""),
+        "layer_stop_scroll": lambda: p.get("layer_name",""),
         "play_music":        lambda: p.get("audio_id",""),
         "play_sfx":          lambda: p.get("audio_id",""),
         "set_music_volume":  lambda: f"vol {p.get('volume',0)}",
@@ -628,6 +1551,7 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "set_choice_text":   lambda: f"#{p.get('choice_index','')}  {p.get('choice_text','')}",
         "set_variable":      lambda: f"{p.get('var_name','')} = {p.get('var_value','')}",
         "change_variable":   lambda: f"{p.get('var_name','')} {p.get('var_operator','')} {p.get('var_value','')}",
+        "increment_var":     lambda: f"{p.get('var_name','')} += {p.get('var_value',1)}",
         "set_variable_from_variable": lambda: f"{p.get('var_name','')} = {p.get('var_source','')}",
         "change_variable_by_variable": lambda: f"{p.get('var_name','')} {p.get('var_operator','')} {p.get('var_source','')}",
         "evaluate_expression": lambda: f"{p.get('var_name','')} = {str(p.get('expression',''))[:18]}",
@@ -641,6 +1565,7 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "if_has_item":       lambda: p.get("item_name",""),
         "emit_signal":       lambda: f"📡 {p.get('signal_name','')}",
         "move_to":           lambda: f"({p.get('target_x',0)}, {p.get('target_y',0)})",
+        "move_to_variable":  lambda: f"({p.get('var_name','x')}, {p.get('var_source','y')})",
         "move_by":           lambda: f"({p.get('offset_x',0)}, {p.get('offset_y',0)})",
         "slide_to":          lambda: f"({p.get('target_x',0)}, {p.get('target_y',0)})  {p.get('duration',0)}s",
         "slide_by":          lambda: f"({p.get('offset_x',0)}, {p.get('offset_y',0)})  {p.get('duration',0)}s",
@@ -651,13 +1576,15 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "rotate_by":         lambda: f"{p.get('target_rotation',0)}°  {p.get('duration',0)}s",
         "spin":              lambda: f"{p.get('spin_speed',0)}°/s",
         "set_frame":         lambda: f"frame {p.get('frame_index',0)}",
+        "advance_frame":     lambda: f"frame +{p.get('frame_index', 1)}" if p.get('frame_index', 1) >= 0 else f"frame {p.get('frame_index', 1)}",
+        "ani_advance_frame": lambda: f"frame +{p.get('ani_target_frame', 1)}" if p.get('ani_target_frame', 1) >= 0 else f"frame {p.get('ani_target_frame', 1)}",
         "set_anim_speed":    lambda: f"{p.get('anim_fps',12)} fps",
         "create_object":     lambda: (f"@ self +({p.get('spawn_offset_x',0)}, {p.get('spawn_offset_y',0)})" if p.get("spawn_at_self") else f"({p.get('target_x',0)}, {p.get('target_y',0)}) +({p.get('spawn_offset_x',0)}, {p.get('spawn_offset_y',0)})"),
-        "four_way_movement": lambda: f"{p.get('movement_speed',4)} px/f  {p.get('movement_style','instant')}",
-        "four_way_movement_collide": lambda: f"{p.get('movement_speed',4)} px/f  collide",
-        "eight_way_movement": lambda: f"{p.get('movement_speed',4)} px/f  rot:{p.get('rotation_mode','instant')}",
-        "eight_way_movement_collide": lambda: f"{p.get('movement_speed',4)} px/f  collide  rot:{p.get('rotation_mode','instant')}",
-        "two_way_movement":  lambda: f"{p.get('two_way_axis','h')}  {p.get('movement_speed',4)} px/f",
+        "four_way_movement": lambda: f"{p.get('movement_speed',4)} px/f  {p.get('movement_style','instant')}  [{p.get('movement_input','dpad')}]",
+        "four_way_movement_collide": lambda: f"{p.get('movement_speed',4)} px/f  collide  [{p.get('movement_input','dpad')}]",
+        "eight_way_movement": lambda: f"{p.get('movement_speed',4)} px/f  rot:{p.get('rotation_mode','instant')}  [{p.get('movement_input','dpad')}]",
+        "eight_way_movement_collide": lambda: f"{p.get('movement_speed',4)} px/f  collide  rot:{p.get('rotation_mode','instant')}  [{p.get('movement_input','dpad')}]",
+        "two_way_movement":  lambda: f"{p.get('two_way_axis','h')}  {p.get('movement_speed',4)} px/f  [{p.get('movement_input','dpad')}]",
         "fire_bullet":       lambda: f"→ {p.get('bullet_direction','right')}  {p.get('bullet_speed',6)} px/f",
         "set_velocity":  lambda: (
             f"vx={p.get('velocity_vx',0)}" if p.get('velocity_set_x',True) and not p.get('velocity_set_y',True)
@@ -670,6 +1597,9 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
             else f"+vx={p.get('velocity_vx',0)}  +vy={p.get('velocity_vy',0)}"
         ),
         "jump":          lambda: f"↑{p.get('jump_strength',12)}  ×{p.get('jump_max_count',1)}{'  float' if p.get('jump_float') else ''}{'  var-h' if p.get('jump_variable_height') else ''}",
+        "if_button_pressed": lambda: f"[ {p.get('button','')} ]",
+        "if_button_held":    lambda: f"[ {p.get('button','')} ]",
+        "if_button_released":lambda: f"[ {p.get('button','')} ]",
         "set_label_text":    lambda: str(p.get("dialogue_text",""))[:20],
         "log_message":       lambda: str(p.get("log_message",""))[:20],
         "follow_path":       lambda: f"🛤 {p.get('path_name','')}  {p.get('path_speed',1)} px/f{'  ↻' if p.get('path_loop') else ''}",
@@ -682,6 +1612,8 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "layer_anim_set_idle":   lambda: f"idle {'ON' if p.get('layer_anim_enabled',True) else 'OFF'}",
         "layer_anim_set_talk":   lambda: f"talk {'ON' if p.get('layer_anim_enabled',True) else 'OFF'}",
         "layer_anim_talk_for":   lambda: f"talk {p.get('layer_anim_talk_duration',2.0)}s",
+        "vn_dialog_sound":       lambda: f"🔊 {p.get('vn_dialog_sound_mode','play_once')}",
+        "vn_tw_sound":           lambda: f"🖊 every {p.get('vn_tw_sound_interval',1)} chr",
         # ── New nodes ──
         "wait_random":       lambda: f"{p.get('duration',0)}s – {p.get('wait_max',0)}s",
         "random_chance":     lambda: f"{p.get('var_value',0)}% chance",
@@ -695,6 +1627,21 @@ def build_summary(node_type: str, code: str, params: dict) -> str:
         "ani_switch_slot":   lambda: f"→ slot \"{p.get('ani_slot_name','')}\"",
         "ani_set_flip":      lambda: f"H:{p.get('ani_flip_h',False)}  V:{p.get('ani_flip_v',False)}",
         "play_anim":         lambda: f"slot \"{p.get('ani_slot_name','')}\"" if p.get('ani_slot_name') else "",
+        "open_keyboard":     lambda: f"{p.get('title','Keyboard') or 'Keyboard'}  → {p.get('target_var','') or '?'}",
+        "show_confirm":      lambda: str(p.get("message_text",""))[:20],
+        "show_message":      lambda: str(p.get("message_text",""))[:20],
+        "store_current_date":lambda: ", ".join(v for v in [p.get("weekday_var",""), p.get("day_var",""), p.get("month_var",""), p.get("year_var","")] if v)[:24],
+        "store_current_time":lambda: ", ".join(v for v in [p.get("hour_var",""), p.get("minute_var",""), p.get("second_var","")] if v)[:24],
+        "set_focus":         lambda: f"→ {p.get('focus_target_object_id','?')}",
+        "activate_focused_object": lambda: "activate focus",
+        "lua_code":          lambda: (p.get("lua_snippet","").splitlines()[0][:28] if p.get("lua_snippet","").strip() else "-- empty"),
+        # ── 3D Scene ──
+        "open_door":         lambda: (f"col {p.get('door_col',0)}, row {p.get('door_row',0)}" if p.get("door_target_mode","coords") == "coords" else f"tag: {p.get('door_tag','')}"),
+        "close_door":        lambda: (f"col {p.get('door_col',0)}, row {p.get('door_row',0)}" if p.get("door_target_mode","coords") == "coords" else f"tag: {p.get('door_tag','')}"),
+        "toggle_door":       lambda: (f"col {p.get('door_col',0)}, row {p.get('door_row',0)}" if p.get("door_target_mode","coords") == "coords" else f"tag: {p.get('door_tag','')}"),
+        "move_3d_object":    lambda: f"{p.get('obj_3d_id','?')}  ({p.get('obj_3d_wx',0)}, {p.get('obj_3d_wy',0)})",
+        "set_3d_object_visible": lambda: f"{p.get('obj_3d_id','?')}  {'show' if p.get('obj_3d_visible', True) else 'hide'}",
+        "check_player_tile": lambda: f"{p.get('player_tile_where','under_player')} == {p.get('player_tile_type','empty')}",
     }
     fn = summaries.get(code)
     return fn() if fn else ""
@@ -716,13 +1663,13 @@ COLOR = {
     "action_header":      QColor("#1e3a5f"),
     "action_header2":     QColor("#172d4a"),
     "action_border":      QColor("#3b6ea8"),
-    "action_border_sel":  QColor("#7c6aff"),
+    "action_border_sel":  QColor("#4a4860"),
     "object_header":      QColor("#1a3d2b"),
     "object_header2":     QColor("#14301f"),
     "object_border":      QColor("#2d7a4a"),
     "object_border_sel":  QColor("#4ade80"),
     "port_out_fill":      QColor("#f59e0b"),
-    "port_in_fill":       QColor("#7c6aff"),
+    "port_in_fill":       QColor("#4a4860"),
     "port_true_fill":     QColor("#4ade80"),
     "port_false_fill":    QColor("#f87171"),
     "port_loop_fill":     QColor("#c084fc"),
@@ -888,19 +1835,20 @@ class NodeItem(QGraphicsItem):
         self.corner   = 8
 
         self.category     = get_action_category(code) if node_type == NODE_ACTION else ""
-        self.accent_color = QColor(CATEGORY_ACCENTS.get(self.category, "#7c6aff")) if self.category else None
+        self.accent_color = QColor(CATEGORY_ACCENTS.get(self.category, "#4a4860")) if self.category else None
         self.is_branch    = (node_type == NODE_ACTION and code in BRANCH_TYPES)
         self.is_loop      = (node_type == NODE_ACTION and code in LOOP_TYPES)
 
         for field_name, _lbl, wtype, extra in get_fields(node_type, code):
-            if wtype == "spin":         self.params[field_name] = extra.get("min", 0)
-            elif wtype == "dspin":      self.params[field_name] = extra.get("min", 0.0)
-            elif wtype == "check":      self.params[field_name] = False
+            default = extra.get("default")
+            if wtype == "spin":         self.params[field_name] = default if default is not None else extra.get("min", 0)
+            elif wtype == "dspin":      self.params[field_name] = default if default is not None else extra.get("min", 0.0)
+            elif wtype == "check":      self.params[field_name] = default if default is not None else False
             elif wtype == "combo":
                 opts = extra.get("options", [])
-                self.params[field_name] = opts[0] if opts else ""
-            elif wtype == "scene_num":  self.params[field_name] = 1
-            else:                       self.params[field_name] = ""
+                self.params[field_name] = default if default is not None else (opts[0] if opts else "")
+            elif wtype == "scene_num":  self.params[field_name] = default if default is not None else 1
+            else:                       self.params[field_name] = default if default is not None else ""
 
         self.setPos(x, y)
         self.setFlags(
@@ -1123,7 +2071,7 @@ def build_legend_text() -> str:
                 else:
                     lines.append(f"      {field_name}: text")
     lines += ["", "━━ ACTIONS ━━"]
-    for cat, items in ACTION_PALETTE.items():
+    for cat, items in iter_action_menu_groups():
         active = [(c, d) for c, d in items if c not in DEFERRED_ACTIONS]
         if not active:
             continue
@@ -1608,8 +2556,8 @@ class NodeCanvas(QGraphicsView):
 
         menu.addSeparator()
 
-        copy_text_a  = menu.addAction("📋  Copy Nodes as Text")
-        paste_text_a = menu.addAction("📝  Paste Nodes from Text")
+        copy_text_a  = menu.addAction("Copy Nodes as Text")
+        paste_text_a = menu.addAction("Paste Nodes from Text")
 
         chosen = menu.exec(event.globalPos())
         if chosen == paste_a:
@@ -1627,7 +2575,7 @@ class NodeCanvas(QGraphicsView):
         toast.setStyleSheet("""
             QLabel {
                 background: #26263a; color: #e8e6f0;
-                border: 1px solid #7c6aff; border-radius: 6px;
+                border: 1px solid #4a4860; border-radius: 6px;
                 padding: 6px 16px; font: 11px 'Segoe UI';
             }
         """)
@@ -1751,7 +2699,7 @@ class StateTabBar(QWidget):
     _TAB_STYLE_ACTIVE = """
         QPushButton {{
             background: #1e1e28; color: #e8e6f0;
-            border: none; border-bottom: 2px solid #7c6aff;
+            border: none; border-bottom: 2px solid #4a4860;
             padding: 0 14px; font: 11px 'Segoe UI'; border-radius: 0;
         }}
     """
@@ -1802,10 +2750,10 @@ class StateTabBar(QWidget):
         self._add_btn = QPushButton("＋ Add State")
         self._add_btn.setFixedHeight(24)
         self._add_btn.setStyleSheet("""
-            QPushButton { background: #26263a; color: #7c6aff;
+            QPushButton { background: #26263a; color: #4a4860;
                 border: 1px solid #2e2e42; border-radius: 3px;
                 padding: 0 10px; font: 11px 'Segoe UI'; }
-            QPushButton:hover { background: #2e2e42; border-color: #7c6aff; }
+            QPushButton:hover { background: #2e2e42; border-color: #4a4860; }
         """)
         self._add_btn.clicked.connect(self._on_add)
         self._layout.addWidget(self._add_btn)
@@ -2114,7 +3062,7 @@ class Inspector(QFrame):
 
         if node.node_type == NODE_TRIGGER: bt, bc = "TRIGGER", "#f59e0b"
         elif node.node_type == NODE_OBJECT: bt, bc = "OBJECT",  "#4ade80"
-        else:                               bt, bc = "ACTION",  "#7c6aff"
+        else:                               bt, bc = "ACTION",  "#4a4860"
 
         idx = 0
         def ins(w):
@@ -2175,6 +3123,22 @@ class Inspector(QFrame):
         v.setStyleSheet("color:#7a7890; font:10px 'Segoe UI'; background:transparent;")
         rl.addWidget(k); rl.addWidget(v, stretch=1); return w
 
+    def _definition_object_options(self):
+        options = []
+        seen = set()
+        if self._project:
+            for od in getattr(self._project, "object_defs", []):
+                if od.id in seen:
+                    continue
+                seen.add(od.id)
+                options.append((od.id, od.name))
+        return options
+
+    def _target_object_options(self):
+        if self._scene_objects:
+            return list(self._scene_objects)
+        return self._definition_object_options()
+
     def _field_row(self, node, field_name, label_text, wtype, extra):
         container = QWidget()
         cl = QVBoxLayout(container)
@@ -2216,7 +3180,18 @@ class Inspector(QFrame):
         elif wtype == "object":
             w = QComboBox(); w.setStyleSheet(FIELD_STYLE)
             w.addItem("— none —", "")
-            for def_id, name in self._scene_objects:
+            for target_id, name in self._target_object_options():
+                w.addItem(name, target_id)
+            idx = w.findData(cur or "")
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            w.currentIndexChanged.connect(
+                lambda _, fn=field_name, nd=node, ww=w:
+                self._set(nd, fn, ww.currentData() or ""))
+        elif wtype == "object_def":
+            w = QComboBox(); w.setStyleSheet(FIELD_STYLE)
+            w.addItem("â€” none â€”", "")
+            for def_id, name in self._definition_object_options():
                 w.addItem(name, def_id)
             idx = w.findData(cur or "")
             if idx >= 0:
@@ -2245,7 +3220,37 @@ class Inspector(QFrame):
             w.currentIndexChanged.connect(
                 lambda _, fn=field_name, nd=node, ww=w:
                 self._set(nd, fn, ww.currentData() or ""))
-        elif wtype in ("audio", "image", "signal"):
+        elif wtype == "audio":
+            w = QComboBox(); w.setStyleSheet(FIELD_STYLE)
+            w.addItem("— none —", "")
+            if self._project:
+                for aud in self._project.audio:
+                    w.addItem(aud.name, aud.id)
+            idx = w.findData(cur or "")
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            w.currentIndexChanged.connect(
+                lambda _, fn=field_name, nd=node, ww=w:
+                self._set(nd, fn, ww.currentData() or ""))
+        elif wtype == "signal":
+            w = QComboBox(); w.setStyleSheet(FIELD_STYLE)
+            w.addItem("(none)", "")
+            seen = set()
+            if self._project:
+                for sig in getattr(self._project.game_data, "signals", []):
+                    name = getattr(sig, "name", "") or ""
+                    if name and name not in seen:
+                        w.addItem(name, name)
+                        seen.add(name)
+            if cur and cur not in seen:
+                w.addItem(str(cur), cur)
+            idx = w.findData(cur or "")
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            w.currentIndexChanged.connect(
+                lambda _, fn=field_name, nd=node, ww=w:
+                self._set(nd, fn, ww.currentData() or ""))
+        elif wtype in ("image", "signal"):
             w = QComboBox(); w.setStyleSheet(FIELD_STYLE)
             w.addItem("— not connected —", None)
             if cur: w.addItem(str(cur), cur); w.setCurrentIndex(1)
@@ -2265,6 +3270,20 @@ class Inspector(QFrame):
             w.currentIndexChanged.connect(
                 lambda _, fn=field_name, nd=node, ww=w:
                 self._set(nd, fn, ww.currentData() or ""))
+        elif wtype == "multiline_text":
+            w = QPlainTextEdit()
+            w.setStyleSheet("""
+                QPlainTextEdit {
+                    background: #1e1e28; color: #e8e6f0;
+                    border: 1px solid #2e2e42; border-radius: 3px;
+                    padding: 3px 6px; font: 11px 'Courier New';
+                }
+                QPlainTextEdit:focus { border-color: #7c6aff; }
+            """)
+            w.setMinimumHeight(140)
+            w.setPlainText(str(cur or ""))
+            w.setPlaceholderText("-- Lua code here\n-- Variables in scope: objname_x, objname_y, objname_visible, etc.")
+            w.textChanged.connect(lambda fn=field_name, nd=node, ww=w: self._set(nd, fn, ww.toPlainText()))
         else:
             w = QLineEdit(str(cur or "")); w.setStyleSheet(FIELD_STYLE)
             w.textChanged.connect(lambda v, fn=field_name, nd=node: self._set(nd, fn, v))
@@ -2293,7 +3312,7 @@ class MainWindow(QMainWindow):
             QPushButton { background: #26263a; color: #e8e6f0;
                 border: 1px solid #2e2e42; padding: 5px 14px;
                 border-radius: 4px; font: 11px 'Segoe UI'; }
-            QPushButton:hover { background: #2e2e42; border-color: #7c6aff; }
+            QPushButton:hover { background: #2e2e42; border-color: #4a4860; }
             QPushButton:pressed { background: #1e1e28; }
             QPushButton::menu-indicator { image: none; }
         """)
@@ -2315,39 +3334,27 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         self.addToolBar(Qt.TopToolBarArea, tb)
 
-        trg_btn  = QPushButton("⚡ Trigger")
-        trg_menu = QMenu(trg_btn); trg_menu.setStyleSheet(MENU_STYLE)
-        for cat, codes in TRIGGER_CATEGORIES.items():
-            cm = trg_menu.addMenu(cat)
-            for code in codes:
-                name = OBJECT_TRIGGERS.get(code, code)
-                a = cm.addAction(name)
-                a.triggered.connect(
-                    lambda checked=False, c=code, n=name:
-                    self.state_machine.add_node(NODE_TRIGGER, c, n))
-        trg_btn.setMenu(trg_menu)
+        trg_btn  = QPushButton("Trigger")
+        trg_btn.clicked.connect(
+            lambda: open_trigger_picker(
+                self,
+                lambda code, name: self.state_machine.add_node(NODE_TRIGGER, code, name),
+                self._copy_legend,
+            )
+        )
         tb.addWidget(trg_btn)
 
-        act_btn  = QPushButton("▶ Action")
-        act_menu = QMenu(act_btn); act_menu.setStyleSheet(MENU_STYLE)
-        for cat, items in ACTION_PALETTE.items():
-            active = [(c, n) for c, n in items if c not in DEFERRED_ACTIONS]
-            if not active:
-                continue
-            cm = act_menu.addMenu(cat)
-            for code, name in active:
-                a = cm.addAction(name)
-                a.triggered.connect(
-                    lambda checked=False, c=code, n=name:
-                    self.state_machine.add_node(NODE_ACTION, c, n))
-            if cat == "Debug":
-                cm.addSeparator()
-                legend_a = cm.addAction("📋 Copy Triggers & Actions as Text")
-                legend_a.triggered.connect(self._copy_legend)
-        act_btn.setMenu(act_menu)
+        act_btn  = QPushButton("Action")
+        act_btn.clicked.connect(
+            lambda: open_action_picker(
+                self,
+                lambda code, name: self.state_machine.add_node(NODE_ACTION, code, name),
+                self._copy_legend,
+            )
+        )
         tb.addWidget(act_btn)
 
-        obj_btn  = QPushButton("◈ Object")
+        obj_btn  = QPushButton("Object")
         obj_menu = QMenu(obj_btn); obj_menu.setStyleSheet(MENU_STYLE)
         ph = obj_menu.addAction("(no scene loaded)"); ph.setEnabled(False)
         obj_btn.setMenu(obj_menu)
@@ -2355,7 +3362,7 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        self._grp_btn  = QPushButton("⊞ Groups")
+        self._grp_btn  = QPushButton("Groups")
         self._grp_menu = QMenu(self._grp_btn); self._grp_menu.setStyleSheet(MENU_STYLE)
         self._grp_btn.setMenu(self._grp_menu)
         self._grp_menu.aboutToShow.connect(self._rebuild_groups_menu)
@@ -2389,7 +3396,7 @@ class MainWindow(QMainWindow):
 
     def _rebuild_groups_menu(self):
         self._grp_menu.clear()
-        save_a = self._grp_menu.addAction("💾  Save Selection as Group…")
+        save_a = self._grp_menu.addAction("Save Selection as Group…")
         save_a.triggered.connect(self._save_group)
         names = self.state_machine.group_names()
         if names:
@@ -2421,7 +3428,7 @@ class MainWindow(QMainWindow):
 
     def _copy_legend(self):
         QApplication.clipboard().setText(build_legend_text())
-        self.state_machine.current_canvas()._show_toast("📋 Full legend copied to clipboard")
+        self.state_machine.current_canvas()._show_toast("Full legend copied to clipboard")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -2448,7 +3455,7 @@ def behaviors_to_graph(behaviors: list, canvas: NodeCanvas):
             node    = NodeItem(NODE_ACTION, action.action_type, display, x, y)
 
             for field_name, _lbl, wtype, _extra in get_fields(NODE_ACTION, action.action_type):
-                val = getattr(action, field_name, None)
+                val = get_behavior_plugin_value(action, action.action_type, field_name, None)
                 if val is not None:
                     node.params[field_name] = val
 
@@ -2513,6 +3520,36 @@ def behaviors_to_graph(behaviors: list, canvas: NodeCanvas):
         if behavior.ani_trigger_object:
             tnode.params["ani_trigger_object"] = behavior.ani_trigger_object
             tnode.params["ani_trigger_frame"]  = behavior.ani_trigger_frame
+        if behavior.trigger == "on_touch_swipe":
+            tnode.params["swipe_direction"]    = behavior.swipe_direction
+            tnode.params["swipe_min_distance"] = behavior.swipe_min_distance
+            tnode.params["swipe_scope"]        = behavior.swipe_scope
+        if behavior.trigger == "on_lua_condition":
+            tnode.params["lua_condition"] = behavior.lua_condition
+        builtin_trigger_params = {
+            "button",
+            "interval",
+            "input_action_name",
+            "signal_name",
+            "timer_var",
+            "threshold_var",
+            "threshold_value",
+            "threshold_compare",
+            "threshold_repeat",
+            "path_name",
+            "ani_trigger_object",
+            "ani_trigger_frame",
+            "swipe_direction",
+            "swipe_min_distance",
+            "swipe_scope",
+            "lua_condition",
+        }
+        for field_name, _lbl, _wtype, _extra in get_fields(NODE_TRIGGER, behavior.trigger):
+            if field_name in builtin_trigger_params:
+                continue
+            val = get_behavior_plugin_value(behavior, behavior.trigger, field_name, None)
+            if val is not None:
+                tnode.params[field_name] = val
         tnode.update_summary()
         scene.addItem(tnode)
 
@@ -2539,7 +3576,7 @@ def graph_to_behaviors(canvas: NodeCanvas) -> list:
 
             for field_name, _lbl, wtype, _extra in get_fields(NODE_ACTION, node.code):
                 if field_name in node.params:
-                    setattr(action, field_name, node.params[field_name])
+                    set_behavior_plugin_value(action, node.code, field_name, node.params[field_name])
 
             if node.is_branch:
                 true_first  = next_node(node.true_port)
@@ -2591,6 +3628,33 @@ def graph_to_behaviors(canvas: NodeCanvas) -> list:
         if "ani_trigger_object" in tnode.params:
             b.ani_trigger_object = tnode.params["ani_trigger_object"]
             b.ani_trigger_frame  = tnode.params.get("ani_trigger_frame", 0)
+        if tnode.code == "on_touch_swipe":
+            b.swipe_direction    = tnode.params.get("swipe_direction",    "any")
+            b.swipe_min_distance = tnode.params.get("swipe_min_distance", 48)
+            b.swipe_scope        = tnode.params.get("swipe_scope",        "screen")
+        if tnode.code == "on_lua_condition":
+            b.lua_condition = tnode.params.get("lua_condition", "")
+        builtin_trigger_params = {
+            "button",
+            "interval",
+            "input_action_name",
+            "signal_name",
+            "timer_var",
+            "threshold_var",
+            "threshold_value",
+            "threshold_compare",
+            "threshold_repeat",
+            "path_name",
+            "ani_trigger_object",
+            "ani_trigger_frame",
+            "swipe_direction",
+            "swipe_min_distance",
+            "swipe_scope",
+            "lua_condition",
+        }
+        for field_name, _lbl, _wtype, _extra in get_fields(NODE_TRIGGER, tnode.code):
+            if field_name in tnode.params and field_name not in builtin_trigger_params:
+                set_behavior_plugin_value(b, tnode.code, field_name, tnode.params[field_name])
 
         first = next_node(tnode.out_port)
         if first:
@@ -2609,6 +3673,7 @@ class BehaviorGraphDialog(QDialog):
     def __init__(self, obj, parent=None, scene=None, project=None):
         super().__init__(parent)
         self._obj = obj
+        self._project = project
         self.setWindowTitle(f"Node Graph — {obj.name}")
         self.resize(1280, 800)
         self.setStyleSheet("""
@@ -2618,18 +3683,23 @@ class BehaviorGraphDialog(QDialog):
                 border: 1px solid #2e2e42; padding: 6px 20px;
                 border-radius: 4px; font: 11px 'Segoe UI';
             }
-            QPushButton:hover { background: #2e2e42; border-color: #7c6aff; }
+            QPushButton:hover { background: #2e2e42; border-color: #4a4860; }
             QPushButton:pressed { background: #1e1e28; }
         """)
 
         # ── Build scene object list from placed objects ─────────
         scene_objects = []
-        if scene is not None and project is not None:
-            seen = set()
-            for inst in scene.placed_objects:
-                od = project.get_object_def(inst.object_def_id)
-                if od and od.id not in seen:
-                    seen.add(od.id)
+        if project is not None:
+            is_instance_editor = bool(getattr(obj, "instance_id", ""))
+            if is_instance_editor and scene is not None:
+                for od in getattr(project, "object_defs", []):
+                    scene_objects.append((od.id, f"{od.name} (type)"))
+                for inst in scene.placed_objects:
+                    od = project.get_object_def(inst.object_def_id)
+                    name = od.name if od else (inst.object_def_id or "Object")
+                    scene_objects.append((inst.instance_id, f"{name} [{inst.instance_id}] @ {inst.x}, {inst.y}"))
+            else:
+                for od in getattr(project, "object_defs", []):
                     scene_objects.append((od.id, od.name))
 
         root = QVBoxLayout(self)
@@ -2654,46 +3724,36 @@ class BehaviorGraphDialog(QDialog):
             QPushButton { background: #26263a; color: #e8e6f0;
                 border: 1px solid #2e2e42; padding: 5px 14px;
                 border-radius: 4px; font: 11px 'Segoe UI'; }
-            QPushButton:hover { background: #2e2e42; border-color: #7c6aff; }
+            QPushButton:hover { background: #2e2e42; border-color: #4a4860; }
             QPushButton:pressed { background: #1e1e28; }
             QPushButton::menu-indicator { image: none; }
         """)
 
-        trg_btn  = QPushButton("⚡ Trigger")
-        trg_menu = QMenu(trg_btn); trg_menu.setStyleSheet(MENU_STYLE)
-        for cat, codes in TRIGGER_CATEGORIES.items():
-            cm = trg_menu.addMenu(cat)
-            for code in codes:
-                name = OBJECT_TRIGGERS.get(code, code)
-                a = cm.addAction(name)
-                a.triggered.connect(
-                    lambda checked=False, c=code, n=name:
-                    self._state_machine.add_node(NODE_TRIGGER, c, n))
-        trg_btn.setMenu(trg_menu)
+        trg_btn  = QPushButton("Trigger")
+        trg_btn.clicked.connect(
+            lambda: open_trigger_picker(
+                self,
+                lambda code, name: self._state_machine.add_node(NODE_TRIGGER, code, name),
+                self._copy_legend,
+                project=self._project,
+            )
+        )
         tb.addWidget(trg_btn)
 
-        act_btn  = QPushButton("▶ Action")
-        act_menu = QMenu(act_btn); act_menu.setStyleSheet(MENU_STYLE)
-        for cat, items in ACTION_PALETTE.items():
-            active = [(c, n) for c, n in items if c not in DEFERRED_ACTIONS]
-            if not active:
-                continue
-            cm = act_menu.addMenu(cat)
-            for code, name in active:
-                a = cm.addAction(name)
-                a.triggered.connect(
-                    lambda checked=False, c=code, n=name:
-                    self._state_machine.add_node(NODE_ACTION, c, n))
-            if cat == "Debug":
-                cm.addSeparator()
-                legend_a = cm.addAction("📋 Copy Triggers & Actions as Text")
-                legend_a.triggered.connect(self._copy_legend)
-        act_btn.setMenu(act_menu)
+        act_btn  = QPushButton("Action")
+        act_btn.clicked.connect(
+            lambda: open_action_picker(
+                self,
+                lambda code, name: self._state_machine.add_node(NODE_ACTION, code, name),
+                self._copy_legend,
+                project=self._project,
+            )
+        )
         tb.addWidget(act_btn)
 
         tb.addSeparator()
 
-        self._grp_btn  = QPushButton("⊞ Groups")
+        self._grp_btn  = QPushButton("Groups")
         self._grp_menu = QMenu(self._grp_btn); self._grp_menu.setStyleSheet(MENU_STYLE)
         self._grp_btn.setMenu(self._grp_menu)
         self._grp_menu.aboutToShow.connect(self._rebuild_groups_menu)
@@ -2706,10 +3766,10 @@ class BehaviorGraphDialog(QDialog):
         self._snap_btn.setCheckable(True)
         self._snap_btn.setChecked(True)
         self._snap_btn.setStyleSheet("""
-            QPushButton { background: #26263a; color: #7c6aff;
-                border: 1px solid #7c6aff44; padding: 5px 14px;
+            QPushButton { background: #26263a; color: #4a4860;
+                border: 1px solid #4a486044; padding: 5px 14px;
                 border-radius: 4px; font: 11px 'Segoe UI'; }
-            QPushButton:hover { background: #2e2e42; border-color: #7c6aff; }
+            QPushButton:hover { background: #2e2e42; border-color: #4a4860; }
             QPushButton:checked { background: #1e1e28; color: #4a4860;
                 border-color: #2e2e42; }
         """)
@@ -2777,7 +3837,7 @@ class BehaviorGraphDialog(QDialog):
 
     def _rebuild_groups_menu(self):
         self._grp_menu.clear()
-        save_a = self._grp_menu.addAction("💾  Save Selection as Group…")
+        save_a = self._grp_menu.addAction("Save Selection as Group…")
         save_a.triggered.connect(self._save_group)
 
         names = self._state_machine.group_names()
